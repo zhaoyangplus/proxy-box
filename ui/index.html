@@ -185,6 +185,132 @@
     color: var(--text-main);
   }
 
+  .version-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 33px;
+    padding: 0 11px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: #ffffff;
+    color: var(--text-secondary);
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+
+  .version-pill:hover {
+    background: var(--bg-subtle);
+    border-color: var(--border-strong);
+    color: var(--text-main);
+  }
+
+  .version-pill.has-update {
+    background: #edf9e4;
+    border-color: #a9dd72;
+    color: #184d32;
+  }
+
+  .version-pill.has-update:hover {
+    background: #e1f5d3;
+  }
+
+  .update-badge-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: #22804a;
+    box-shadow: 0 0 0 3px rgba(34, 128, 74, 0.2);
+    display: none;
+  }
+
+  .version-pill.has-update .update-badge-dot {
+    display: inline-block;
+  }
+
+  .update-summary-card {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 13px 15px;
+    border-radius: 12px;
+    background: var(--bg-subtle);
+    border: 1px solid var(--border);
+  }
+
+  .update-ver-flow {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-family: var(--mono);
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--text-main);
+  }
+
+  .update-notes-box {
+    background: #fbfcf9;
+    border: 1px solid var(--border);
+    border-radius: 11px;
+    padding: 12px 14px;
+    font-size: 12.5px;
+    line-height: 1.65;
+    color: var(--text-secondary);
+    max-height: 210px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  .update-progress-wrap {
+    display: none;
+    flex-direction: column;
+    gap: 7px;
+    padding: 12px 14px;
+    border-radius: 11px;
+    background: #f2f9f4;
+    border: 1px solid #cfe7d7;
+  }
+
+  .update-progress-wrap.show {
+    display: flex;
+  }
+
+  .update-progress-track {
+    width: 100%;
+    height: 8px;
+    border-radius: 99px;
+    background: #dcebe1;
+    overflow: hidden;
+  }
+
+  .update-progress-bar {
+    height: 100%;
+    width: 0%;
+    border-radius: 99px;
+    background: linear-gradient(90deg, #1e6b40, #6ec445);
+    transition: width 0.18s ease;
+  }
+
+  .footer-link {
+    border: none;
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 12px;
+    cursor: pointer;
+    padding: 0 2px;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+
+  .footer-link:hover {
+    color: var(--emerald);
+  }
+
   /* Main Container */
   .container {
     width: 100%;
@@ -1274,6 +1400,10 @@
         <span class="dot-green"></span>
         <span>本地工作区</span>
       </div>
+      <button class="version-pill" id="navVersionBtn" title="检查软件更新" onclick="openUpdateModal()">
+        <span class="update-badge-dot"></span>
+        <span id="navVersionText">v1.0.0</span>
+      </button>
       <button class="icon-btn" title="打开配置与备份目录 (~/.proxy-box)" onclick="openBackupsDir()">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
           <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
@@ -1590,7 +1720,11 @@
         <rect width="24" height="24" rx="6" fill="#16422D"/>
         <path d="M13 6.5L8.5 12.5H12L10.5 17.5L15.5 11.5H12L13 6.5Z" fill="#C4F269"/>
       </svg>
-      <span>Proxy Box &nbsp;|&nbsp; 本地代理工作台</span>
+      <span>Proxy Box <span id="footerVersionText" style="font-family:var(--mono);">v1.0.0</span> &nbsp;|&nbsp; 本地代理工作台</span>
+      <span style="opacity:0.4;">·</span>
+      <button class="footer-link" onclick="openUpdateModal()">检查更新</button>
+      <span style="opacity:0.4;">·</span>
+      <button class="footer-link" onclick="openExternalUrl(appRepoUrl)">GitHub</button>
     </div>
     <div id="footerRightStatus">支持 Clash Verge · Clash Mi · v2rayN</div>
   </footer>
@@ -1732,6 +1866,52 @@
       <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:4px;">
         <button class="btn-white" onclick="closeSettingsModal()">取消</button>
         <button class="btn-emerald" onclick="saveSettings()">保存设置</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- App Update Modal -->
+  <div class="modal-backdrop" id="updateModal" onclick="closeUpdateModal()">
+    <div class="modal" style="width:540px;" onclick="event.stopPropagation()">
+      <div class="modal-head">
+        <span>🚀 软件版本与应用更新</span>
+        <button class="icon-btn" style="width:28px;height:28px;" onclick="closeUpdateModal()">✕</button>
+      </div>
+
+      <div class="update-summary-card">
+        <div>
+          <div style="font-size:11.5px; color:var(--text-muted); margin-bottom:3px;" id="updateStatusCaption">正在检查 GitHub Releases 最新版本...</div>
+          <div class="update-ver-flow" id="updateVersionFlow">v1.0.0</div>
+        </div>
+        <span class="status-pill pill-idle" id="updateStatePill">
+          <span class="pill-dot"></span>
+          <span id="updateStatePillText">检查中</span>
+        </span>
+      </div>
+
+      <div id="updateMetaLine" style="font-size:12px; color:var(--text-muted); display:none;"></div>
+
+      <div>
+        <div style="font-size:12px; font-weight:600; color:var(--text-secondary); margin-bottom:6px;">更新日志 / Release Notes</div>
+        <div class="update-notes-box selectable" id="updateNotesBox">正在从 GitHub 获取最新发行说明...</div>
+      </div>
+
+      <div class="update-progress-wrap" id="updateProgressWrap">
+        <div style="display:flex; justify-content:space-between; align-items:center; font-size:12px; font-weight:600; color:#184d32;">
+          <span id="updateProgressMsg">准备下载...</span>
+          <span id="updateProgressBytes" style="font-family:var(--mono); font-size:11.5px; color:var(--text-secondary);"></span>
+        </div>
+        <div class="update-progress-track">
+          <div class="update-progress-bar" id="updateProgressBar"></div>
+        </div>
+      </div>
+
+      <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; margin-top:4px; flex-wrap:wrap;">
+        <button class="btn-white" id="btnOpenReleasePage" onclick="openReleasePage()">↗ GitHub Releases</button>
+        <div style="display:flex; gap:8px;">
+          <button class="btn-white" id="btnRecheckUpdate" onclick="checkForUpdates(false)">↻ 重新检查</button>
+          <button class="btn-emerald" id="btnApplyUpdate" style="display:none;" onclick="startApplyUpdate()">⚡ 立即更新并重启</button>
+        </div>
       </div>
     </div>
   </div>
@@ -2624,6 +2804,275 @@
     return String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
   }
 
+  let appVersion = 'v1.0.0';
+  let appRepoUrl = 'https://github.com/zhaoyangplus/proxy-box';
+  let appReleasesUrl = 'https://github.com/zhaoyangplus/proxy-box/releases';
+  let latestUpdateInfo = null;
+  let updateChecking = false;
+  let updateApplying = false;
+  let updatePollTimer = null;
+
+  async function loadAppVersion() {
+    try {
+      const res = await fetch('/api/version');
+      const data = await res.json();
+      if (data.version) appVersion = data.version;
+      if (data.repoUrl) appRepoUrl = data.repoUrl;
+      if (data.releasesUrl) appReleasesUrl = data.releasesUrl;
+      updateVersionBadges();
+    } catch (_) {}
+  }
+
+  function updateVersionBadges() {
+    const navBtn = document.getElementById('navVersionBtn');
+    const navTxt = document.getElementById('navVersionText');
+    const footerTxt = document.getElementById('footerVersionText');
+    if (footerTxt) footerTxt.textContent = appVersion;
+    if (latestUpdateInfo && latestUpdateInfo.hasUpdate) {
+      if (navBtn) navBtn.classList.add('has-update');
+      if (navTxt) navTxt.textContent = `${appVersion} · 新版 ${latestUpdateInfo.latestVersion}`;
+    } else {
+      if (navBtn) navBtn.classList.remove('has-update');
+      if (navTxt) navTxt.textContent = appVersion;
+    }
+  }
+
+  async function openExternalUrl(url) {
+    try {
+      await apiPost('/api/open-url', { url });
+    } catch (e) {
+      showToast('打开链接失败: ' + e.message);
+    }
+  }
+
+  function openReleasePage() {
+    const target = (latestUpdateInfo && latestUpdateInfo.releaseUrl) ? latestUpdateInfo.releaseUrl : appReleasesUrl;
+    openExternalUrl(target);
+  }
+
+  function formatBytes(bytes) {
+    if (!bytes || bytes <= 0) return '';
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+    return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
+  }
+
+  function formatPublishedAt(iso) {
+    if (!iso) return '';
+    try {
+      const d = new Date(iso);
+      if (isNaN(d.getTime())) return iso;
+      return d.toLocaleString('zh-CN', { hour12: false });
+    } catch (_) {
+      return iso;
+    }
+  }
+
+  function openUpdateModal() {
+    document.getElementById('updateModal').classList.add('open');
+    if (latestUpdateInfo) {
+      renderUpdateModal(latestUpdateInfo, null);
+    }
+    if (!updateApplying && !updateChecking) {
+      checkForUpdates(false);
+    }
+  }
+
+  function closeUpdateModal() {
+    if (updateApplying) {
+      showToast('正在下载并应用更新，请稍候片刻...');
+      return;
+    }
+    document.getElementById('updateModal').classList.remove('open');
+  }
+
+  async function checkForUpdates(silent = false) {
+    if (updateChecking) return;
+    updateChecking = true;
+    const recheckBtn = document.getElementById('btnRecheckUpdate');
+    if (recheckBtn) {
+      recheckBtn.disabled = true;
+      recheckBtn.textContent = '检查中...';
+    }
+    if (!silent) {
+      document.getElementById('updateStatusCaption').textContent = '正在连接 GitHub Releases 检查最新版本...';
+      document.getElementById('updateStatePill').className = 'status-pill pill-idle';
+      document.getElementById('updateStatePillText').textContent = '检查中';
+    }
+
+    try {
+      const info = await apiPost('/api/update/check');
+      latestUpdateInfo = info;
+      if (info.currentVersion) appVersion = info.currentVersion;
+      updateVersionBadges();
+      renderUpdateModal(info, null);
+      if (silent && info.hasUpdate) {
+        showToast(`发现 Proxy Box 新版本 ${info.latestVersion}，点击顶部版本号可一键更新`);
+      }
+    } catch (e) {
+      if (!silent) {
+        renderUpdateModal(null, e.message);
+      }
+    } finally {
+      updateChecking = false;
+      if (recheckBtn) {
+        recheckBtn.disabled = false;
+        recheckBtn.textContent = '↻ 重新检查';
+      }
+    }
+  }
+
+  function renderUpdateModal(info, errMsg) {
+    const captionEl = document.getElementById('updateStatusCaption');
+    const flowEl = document.getElementById('updateVersionFlow');
+    const pillEl = document.getElementById('updateStatePill');
+    const pillTxt = document.getElementById('updateStatePillText');
+    const metaEl = document.getElementById('updateMetaLine');
+    const notesEl = document.getElementById('updateNotesBox');
+    const applyBtn = document.getElementById('btnApplyUpdate');
+
+    if (errMsg) {
+      captionEl.textContent = '检查更新失败（请确认代理通畅或稍后重试）';
+      flowEl.textContent = `当前版本 ${appVersion}`;
+      pillEl.className = 'status-pill pill-warn';
+      pillTxt.textContent = '检查失败';
+      metaEl.style.display = 'none';
+      notesEl.textContent = errMsg;
+      applyBtn.style.display = 'none';
+      return;
+    }
+
+    if (!info) return;
+
+    const metaParts = [];
+    if (info.publishedAt) metaParts.push(`发布时间: ${formatPublishedAt(info.publishedAt)}`);
+    if (info.assetName && info.assetSize > 0) metaParts.push(`安装包: ${info.assetName} (${formatBytes(info.assetSize)})`);
+    if (info.checkedAt) metaParts.push(`检查于 ${info.checkedAt}`);
+    if (metaParts.length > 0) {
+      metaEl.style.display = 'block';
+      metaEl.textContent = metaParts.join('  ·  ');
+    } else {
+      metaEl.style.display = 'none';
+    }
+
+    notesEl.textContent = info.releaseNotes || `${info.releaseName || info.latestVersion}\n暂无详细更新日志，可点击左下角前往 GitHub Releases 查看。`;
+
+    if (info.hasUpdate) {
+      captionEl.textContent = `发现新版本：${info.releaseName || info.latestVersion}`;
+      flowEl.innerHTML = `<span>${escapeHtml(info.currentVersion)}</span><span style="color:var(--emerald);">→</span><span style="color:var(--emerald);">${escapeHtml(info.latestVersion)}</span>`;
+      pillEl.className = 'status-pill pill-ok';
+      pillTxt.textContent = '可更新';
+      if (info.downloadUrl) {
+        applyBtn.style.display = 'inline-flex';
+        applyBtn.disabled = updateApplying;
+      } else {
+        applyBtn.style.display = 'none';
+      }
+    } else {
+      captionEl.textContent = '当前运行的 Proxy Box 已是最新版本';
+      flowEl.textContent = `${info.currentVersion}（最新 ${info.latestVersion}）`;
+      pillEl.className = 'status-pill pill-ok';
+      pillTxt.textContent = '已是最新';
+      applyBtn.style.display = 'none';
+    }
+  }
+
+  async function startApplyUpdate() {
+    if (!latestUpdateInfo || !latestUpdateInfo.downloadUrl || updateApplying) return;
+    updateApplying = true;
+    const applyBtn = document.getElementById('btnApplyUpdate');
+    const recheckBtn = document.getElementById('btnRecheckUpdate');
+    applyBtn.disabled = true;
+    applyBtn.textContent = '正在更新...';
+    if (recheckBtn) recheckBtn.disabled = true;
+
+    renderUpdateProgress({
+      status: 'downloading',
+      percent: 2,
+      downloadedBytes: 0,
+      totalBytes: latestUpdateInfo.assetSize || 0,
+      message: `正在开始下载 ${latestUpdateInfo.latestVersion}...`
+    });
+
+    try {
+      await apiPost('/api/update/apply', {
+        downloadUrl: latestUpdateInfo.downloadUrl,
+        targetVersion: latestUpdateInfo.latestVersion,
+        assetSize: latestUpdateInfo.assetSize || 0
+      });
+      clearInterval(updatePollTimer);
+      updatePollTimer = setInterval(async () => {
+        try {
+          const res = await fetch('/api/update/status');
+          const prog = await res.json();
+          renderUpdateProgress(prog);
+          if (prog.status === 'error' || prog.status === 'restarting') {
+            clearInterval(updatePollTimer);
+          }
+        } catch (_) {
+          // Local API server closing means app is restarting
+          clearInterval(updatePollTimer);
+        }
+      }, 450);
+    } catch (e) {
+      updateApplying = false;
+      applyBtn.disabled = false;
+      applyBtn.textContent = '⚡ 立即更新并重启';
+      if (recheckBtn) recheckBtn.disabled = false;
+      renderUpdateProgress({ status: 'error', message: '启动更新失败', error: e.message });
+      showToast('启动更新失败: ' + e.message);
+    }
+  }
+
+  function renderUpdateProgress(prog) {
+    if (!prog) return;
+    const wrap = document.getElementById('updateProgressWrap');
+    const msgEl = document.getElementById('updateProgressMsg');
+    const bytesEl = document.getElementById('updateProgressBytes');
+    const barEl = document.getElementById('updateProgressBar');
+    const applyBtn = document.getElementById('btnApplyUpdate');
+    const recheckBtn = document.getElementById('btnRecheckUpdate');
+
+    if (prog.status === 'idle') return;
+    wrap.classList.add('show');
+
+    if (prog.status === 'error') {
+      updateApplying = false;
+      wrap.style.background = '#fdecec';
+      wrap.style.borderColor = '#f5c2c2';
+      msgEl.style.color = '#c93b3b';
+      msgEl.textContent = '更新失败: ' + (prog.error || prog.message || '未知错误');
+      bytesEl.textContent = '';
+      if (applyBtn) {
+        applyBtn.disabled = false;
+        applyBtn.textContent = '⚡ 重试更新';
+      }
+      if (recheckBtn) recheckBtn.disabled = false;
+      return;
+    }
+
+    wrap.style.background = '#f2f9f4';
+    wrap.style.borderColor = '#cfe7d7';
+    msgEl.style.color = '#184d32';
+    msgEl.textContent = prog.message || '正在下载更新...';
+    const pct = Math.max(0, Math.min(100, Number(prog.percent) || 0));
+    barEl.style.width = pct.toFixed(1) + '%';
+
+    if (prog.totalBytes > 0) {
+      bytesEl.textContent = `${formatBytes(prog.downloadedBytes)} / ${formatBytes(prog.totalBytes)}`;
+    } else if (prog.downloadedBytes > 0) {
+      bytesEl.textContent = formatBytes(prog.downloadedBytes);
+    } else {
+      bytesEl.textContent = '';
+    }
+
+    if (prog.status === 'restarting') {
+      barEl.style.width = '100%';
+      if (applyBtn) applyBtn.textContent = '正在重启...';
+      showToast(prog.message || '更新完成，正在重启 Proxy Box...');
+    }
+  }
+
   // Real-time SSE stream for instant updates when proxy client switches config, subscription, port or node
   function connectLiveEvents() {
     let diagDebounce = null;
@@ -2632,6 +3081,14 @@
       es.onmessage = (ev) => {
         try {
           const msg = JSON.parse(ev.data);
+          if (msg.type === 'update' && msg.update) {
+            renderUpdateProgress(msg.update);
+            return;
+          }
+          if (msg.type === 'open_update') {
+            openUpdateModal();
+            return;
+          }
           if (msg.snapshot) {
             currentSnap = msg.snapshot;
             renderSnapshot(msg.snapshot);
@@ -2653,9 +3110,11 @@
 
   // Initial load: fetch snapshot immediately, subscribe to live SSE updates & run initial diagnostics
   (async function init() {
+    loadAppVersion();
     await refreshSnapshot();
     connectLiveEvents();
     runDiagnostics();
+    setTimeout(() => checkForUpdates(true), 2500);
     setInterval(refreshSnapshot, 12000);
   })();
 </script>

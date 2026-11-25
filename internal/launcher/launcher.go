@@ -10,7 +10,7 @@ import (
 	"time"
 	"unsafe"
 
-	"cursor-box/internal/configurator"
+	"proxy-box/internal/configurator"
 	"golang.org/x/sys/windows"
 )
 
@@ -189,6 +189,20 @@ func OpenAppOrPath(path string) error {
 	cmd.Dir = filepath.Dir(path)
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		CreationFlags: windows.CREATE_NEW_PROCESS_GROUP | windows.DETACHED_PROCESS,
+	}
+	return cmd.Start()
+}
+
+// OpenURL opens an HTTP/HTTPS URL in the user's default Windows browser safely.
+func OpenURL(rawURL string) error {
+	rawURL = strings.TrimSpace(rawURL)
+	if !strings.HasPrefix(rawURL, "https://") && !strings.HasPrefix(rawURL, "http://") {
+		return fmt.Errorf("仅支持打开 http/https 链接")
+	}
+	cmd := exec.Command("rundll32.exe", "url.dll,FileProtocolHandler", rawURL)
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		HideWindow:    true,
+		CreationFlags: createNoWindow,
 	}
 	return cmd.Start()
 }

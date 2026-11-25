@@ -10,7 +10,7 @@ import (
 	"time"
 	"unsafe"
 
-	"cursor-box/internal/configstore"
+	"proxy-box/internal/configstore"
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 )

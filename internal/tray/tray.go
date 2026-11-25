@@ -44,6 +44,7 @@ const (
 	MenuLaunchCursor     = 1003
 	MenuApplyAll         = 1004
 	MenuRestoreAll       = 1005
+	MenuCheckUpdate      = 1006
 	MenuQuit             = 1009
 )
 
@@ -347,6 +348,7 @@ func showContextMenu(hwnd uintptr) {
 	appendItem(MenuApplyAll, "一键应用免 TUN 配置")
 	appendItem(MenuRestoreAll, "一键还原默认配置")
 	appendSep()
+	appendItem(MenuCheckUpdate, "检查软件更新")
 	appendItem(MenuQuit, "彻底退出")
 
 	var pt point

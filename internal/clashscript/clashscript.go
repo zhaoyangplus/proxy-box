@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"cursor-box/internal/configstore"
-	"cursor-box/internal/mihomo"
+	"proxy-box/internal/configstore"
+	"proxy-box/internal/mihomo"
 	"gopkg.in/yaml.v3"
 )
 

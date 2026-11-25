@@ -1,4 +1,4 @@
-module cursor-box
+module proxy-box
 
 go 1.26.2
 

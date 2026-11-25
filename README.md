@@ -23,6 +23,8 @@
    - 内置「免 TUN 代理启动」及「桌面图标生成」（`ProxyBox.exe --launch antigravity` / `--launch cursor` / `--launch codex`），每次双击自动检测当前正在运行的代理客户端端口并注入环境变量与 `--proxy-server` 参数启动，确保后台 `language_server_windows_x64.exe` 同步继承代理。
 4. **实测连通性与出口地区合规诊断 + 系统托盘常驻**
    - 并发实测本地端口握手、Cloudflare Trace 出口国家/地区合规性（若误选香港/大陆节点会主动预警），以及 Cursor / Claude / Antigravity 三大服务端点延迟。
+5. **软件内一键自动更新（基于 GitHub Releases）**
+   - 自动复用当前代理通道（失败时回退直连）检查最新 Release、展示更新日志，支持一键下载、PE 校验、原子替换并自动重启。
 
 ## 编译命令
 
@@ -30,5 +32,5 @@
 
 ```powershell
 $env:CGO_ENABLED="0"
-go build -ldflags="-s -w -H=windowsgui" -o ProxyBox.exe .
+go build -ldflags="-s -w -H=windowsgui -X main.appVersion=v1.0.0" -o ProxyBox.exe .
 ```

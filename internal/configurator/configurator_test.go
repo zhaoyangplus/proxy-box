@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"cursor-box/internal/configstore"
+	"proxy-box/internal/configstore"
 )
 
 func TestStripJSONCAndNonDestructiveRestore(t *testing.T) {

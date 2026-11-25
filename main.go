@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"embed"
 	"encoding/json"
 	"flag"
@@ -15,13 +16,14 @@ import (
 	"time"
 	"unsafe"
 
-	"cursor-box/internal/clashscript"
-	"cursor-box/internal/configstore"
-	"cursor-box/internal/configurator"
-	"cursor-box/internal/detector"
-	"cursor-box/internal/diagnostics"
-	"cursor-box/internal/launcher"
-	"cursor-box/internal/tray"
+	"proxy-box/internal/clashscript"
+	"proxy-box/internal/configstore"
+	"proxy-box/internal/configurator"
+	"proxy-box/internal/detector"
+	"proxy-box/internal/diagnostics"
+	"proxy-box/internal/launcher"
+	"proxy-box/internal/tray"
+	"proxy-box/internal/updater"
 
 	"github.com/jchv/go-webview2"
 	"golang.org/x/sys/windows"
@@ -32,11 +34,15 @@ var embeddedUI embed.FS
 
 const appWindowTitle = "Proxy Box - 本地代理工作台"
 
+// appVersion can be overridden at build time via: -ldflags "-X main.appVersion=v1.0.0"
+var appVersion = "v1.0.0"
+
 type sseEvent struct {
-	Type       string                   `json:"type"`
-	Reason     string                   `json:"reason,omitempty"`
-	ShouldDiag bool                     `json:"shouldDiag"`
-	Snapshot   *detector.SystemSnapshot `json:"snapshot,omitempty"`
+	Type       string                    `json:"type"`
+	Reason     string                    `json:"reason,omitempty"`
+	ShouldDiag bool                      `json:"shouldDiag"`
+	Snapshot   *detector.SystemSnapshot  `json:"snapshot,omitempty"`
+	Update     *updater.DownloadProgress `json:"update,omitempty"`
 }
 
 type sseHub struct {
@@ -83,7 +89,16 @@ func main() {
 	launchTarget := flag.String("launch", "", "Quickly launch target IDE (cursor or antigravity) with live proxy")
 	selfTest := flag.Bool("self-test", false, "Run non-destructive self-test JSON output and exit")
 	optimizeNow := flag.Bool("optimize", false, "Run optimal compliant node selection and print JSON result")
+	showVersion := flag.Bool("version", false, "Print Proxy Box version and exit")
+	restarted := flag.Bool("restarted", false, "Internal flag indicating process was restarted after self-update")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println("Proxy Box", appVersion)
+		return
+	}
+
+	updater.CleanupOldBinary()
 
 	if *selfTest {
 		runSelfTest()
@@ -108,17 +123,62 @@ func main() {
 	}
 
 	mutexName, _ := windows.UTF16PtrFromString("Local\\ProxyBoxSingleInstanceMutex_v1")
-	hMutex, err := windows.CreateMutex(nil, false, mutexName)
+	var hMutex windows.Handle
+	var err error
+	maxAttempts := 1
+	if *restarted {
+		maxAttempts = 25
+	}
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		hMutex, err = windows.CreateMutex(nil, false, mutexName)
+		if err != windows.ERROR_ALREADY_EXISTS {
+			break
+		}
+		if hMutex != 0 {
+			_ = windows.CloseHandle(hMutex)
+			hMutex = 0
+		}
+		if attempt+1 < maxAttempts {
+			time.Sleep(150 * time.Millisecond)
+		}
+	}
 	if err == windows.ERROR_ALREADY_EXISTS {
 		focusExistingWindow()
 		return
 	}
-	if hMutex != 0 {
-		defer windows.CloseHandle(hMutex)
-	}
 
+	var mutexOnce sync.Once
+	releaseMutex := func() {
+		mutexOnce.Do(func() {
+			if hMutex != 0 {
+				_ = windows.CloseHandle(hMutex)
+				hMutex = 0
+			}
+		})
+	}
+	defer releaseMutex()
+
+	var w webview2.WebView
+	var trayMgr *tray.Manager
+
+	appUpdater := updater.New(appVersion)
 	hub := newSSEHub()
-	srvURL, err := startLocalAPIServer(hub)
+	srvURL, err := startLocalAPIServer(hub, appUpdater, func() {
+		releaseMutex()
+		if trayMgr != nil {
+			trayMgr.Cleanup()
+		}
+	}, func() {
+		if w != nil {
+			w.Dispatch(func() {
+				w.Terminate()
+			})
+		}
+		go func() {
+			time.Sleep(1500 * time.Millisecond)
+			os.Exit(0)
+		}()
+	})
 	if err != nil {
 		showMessageBox("Proxy Box 启动失败", "无法启动本地控制服务: "+err.Error(), 0x10)
 		return
@@ -126,9 +186,6 @@ func main() {
 
 	dataPath := filepath.Join(os.Getenv("LOCALAPPDATA"), "ProxyBox", "WebView2Data")
 	_ = os.MkdirAll(dataPath, 0755)
-
-	var w webview2.WebView
-	var trayMgr *tray.Manager
 
 	trayMgr = tray.NewManager(func(menuID int) {
 		switch menuID {
@@ -182,6 +239,13 @@ func main() {
 				}
 			}
 			trayMgr.NotifyBalloon("已还原默认配置", "Cursor / Claude Code / Antigravity 及扩展脚本已恢复")
+		case tray.MenuCheckUpdate:
+			if w != nil {
+				w.Dispatch(func() {
+					trayMgr.ShowMainWindow()
+				})
+			}
+			hub.broadcast(sseEvent{Type: "open_update"})
 		case tray.MenuQuit:
 			trayMgr.Cleanup()
 			if w != nil {
@@ -384,7 +448,7 @@ func startLiveWatcher(hub *sseHub, trayMgr *tray.Manager) {
 	}
 }
 
-func startLocalAPIServer(hub *sseHub) (string, error) {
+func startLocalAPIServer(hub *sseHub, appUpdater *updater.Updater, onBeforeRestart func(), onAfterRestart func()) (string, error) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return "", err
@@ -848,6 +912,125 @@ func startLocalAPIServer(hub *sseHub) (string, error) {
 			return
 		}
 		writeJSON(rw, http.StatusOK, map[string]any{"ok": true})
+	})
+
+	mux.HandleFunc("/api/version", func(rw http.ResponseWriter, r *http.Request) {
+		writeJSON(rw, http.StatusOK, map[string]any{
+			"version":     appVersion,
+			"repoUrl":     appUpdater.RepoURL(),
+			"releasesUrl": appUpdater.ReleasesURL(),
+		})
+	})
+
+	mux.HandleFunc("/api/open-url", func(rw http.ResponseWriter, r *http.Request) {
+		var req struct {
+			URL string `json:"url"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeErr(rw, err)
+			return
+		}
+		if err := launcher.OpenURL(req.URL); err != nil {
+			writeErr(rw, err)
+			return
+		}
+		writeJSON(rw, http.StatusOK, map[string]any{"ok": true})
+	})
+
+	mux.HandleFunc("/api/update/check", func(rw http.ResponseWriter, r *http.Request) {
+		snap := detector.DetectAll()
+		proxyURL := ""
+		if snap.ActiveClient.PortReachable {
+			proxyURL = snap.ActiveClient.ProxyURL
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+		defer cancel()
+
+		res, err := appUpdater.CheckLatest(ctx, proxyURL)
+		if err != nil {
+			writeErr(rw, err)
+			return
+		}
+		writeJSON(rw, http.StatusOK, res)
+	})
+
+	mux.HandleFunc("/api/update/status", func(rw http.ResponseWriter, r *http.Request) {
+		writeJSON(rw, http.StatusOK, appUpdater.GetProgress())
+	})
+
+	mux.HandleFunc("/api/update/apply", func(rw http.ResponseWriter, r *http.Request) {
+		var req struct {
+			DownloadURL   string `json:"downloadUrl"`
+			TargetVersion string `json:"targetVersion"`
+			AssetSize     int64  `json:"assetSize"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+
+		snap := detector.DetectAll()
+		proxyURL := ""
+		if snap.ActiveClient.PortReachable {
+			proxyURL = snap.ActiveClient.ProxyURL
+		}
+
+		downloadURL := strings.TrimSpace(req.DownloadURL)
+		targetVer := strings.TrimSpace(req.TargetVersion)
+		assetSize := req.AssetSize
+
+		if downloadURL == "" {
+			if last := appUpdater.LastCheck(); last != nil && last.DownloadURL != "" {
+				downloadURL = last.DownloadURL
+				targetVer = last.LatestVersion
+				assetSize = last.AssetSize
+			} else {
+				ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+				res, err := appUpdater.CheckLatest(ctx, proxyURL)
+				cancel()
+				if err != nil {
+					writeErr(rw, err)
+					return
+				}
+				if !res.HasUpdate {
+					writeErr(rw, fmt.Errorf("当前已是最新版本 (%s)", res.CurrentVersion))
+					return
+				}
+				downloadURL = res.DownloadURL
+				targetVer = res.LatestVersion
+				assetSize = res.AssetSize
+			}
+		}
+
+		if downloadURL == "" {
+			writeErr(rw, fmt.Errorf("未找到可下载的 Windows 程序附件，请前往 GitHub Releases 手动下载"))
+			return
+		}
+
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
+			defer cancel()
+			err := appUpdater.DownloadAndApply(
+				ctx,
+				downloadURL,
+				targetVer,
+				assetSize,
+				proxyURL,
+				func(p updater.DownloadProgress) {
+					cp := p
+					hub.broadcast(sseEvent{
+						Type:   "update",
+						Update: &cp,
+					})
+				},
+				onBeforeRestart,
+			)
+			if err == nil && onAfterRestart != nil {
+				onAfterRestart()
+			}
+		}()
+
+		writeJSON(rw, http.StatusOK, map[string]any{
+			"ok":      true,
+			"message": "已开始下载新版本更新包...",
+		})
 	})
 
 	go func() {
