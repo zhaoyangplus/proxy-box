@@ -440,9 +440,6 @@ func WriteAtomic(path string, data []byte) error {
 	return nil
 }
 
-// os.Rename on Windows does not replace an existing file. Deleting the
-// destination first would drop the previous bytes if the process stopped
-// before the new name was in place.
 func replaceFile(oldPath, newPath string) error {
 	from, err := windows.UTF16PtrFromString(oldPath)
 	if err != nil {
