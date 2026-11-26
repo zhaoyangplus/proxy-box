@@ -24,8 +24,8 @@ import (
 )
 
 type ProxyClientInfo struct {
-	ID                  string `json:"id"`   // "clash_verge", "clash_mi", "v2rayn"
-	Name                string `json:"name"` // "Clash Verge", "Clash Mi", "v2rayN"
+	ID                  string `json:"id"`   // "clash_verge", "clash_mi", "v2rayn", "builtin"
+	Name                string `json:"name"` // "Clash Verge", "Clash Mi", "v2rayN", "内置内核"
 	Installed           bool   `json:"installed"`
 	Running             bool   `json:"running"`
 	CoreRunning         bool   `json:"coreRunning"`
@@ -98,10 +98,18 @@ type SystemSnapshot struct {
 	CheckedAt       string                `json:"checkedAt"`
 }
 
-type procDetail struct {
+// procInstance is one process. Several mihomo.exe processes share an exe name and must not share a path or port list.
+type procInstance struct {
+	PID   uint32
 	Path  string
-	PIDs  []uint32
 	Ports []int
+}
+
+type procDetail struct {
+	Path      string
+	PIDs      []uint32
+	Ports     []int
+	Instances []procInstance
 }
 
 // OptimizeClientNode triggers Mihomo optimal compliant node selection ONLY on CursorBox's isolated 🤖 AI-IDE group.
@@ -175,13 +183,22 @@ func FastConfigStamp(cfg configstore.AppConfig) string {
 			filepath.Join(gdir, "guiNDB.db"),
 		)
 	}
+	if base, err := configstore.BaseDir(); err == nil {
+		files = append(files,
+			filepath.Join(base, "core.json"),
+			filepath.Join(base, "subscriptions.json"),
+		)
+	}
+	coreDir := filepath.Join(os.Getenv("LOCALAPPDATA"), "ProxyBox", "core")
+	files = append(files, filepath.Join(coreDir, "config.yaml"))
 
 	var b strings.Builder
 	for _, f := range files {
-		if st, err := os.Stat(f); err == nil {
+		if st, err := os.Stat(f); err == nil && !st.IsDir() {
 			fmt.Fprintf(&b, "%d:%d|", st.ModTime().UnixNano(), st.Size())
 		}
 	}
+	stampProvidersDir(&b, filepath.Join(coreDir, "providers"))
 	return b.String()
 }
 
@@ -204,28 +221,37 @@ func snapshotProcessesAndPorts() map[string]*procDetail {
 	for {
 		exeName := strings.ToLower(windows.UTF16ToString(pe.ExeFile[:]))
 		if exeName != "" {
-			d, ok := result[exeName]
-			if !ok {
-				d = &procDetail{}
-				result[exeName] = d
-			}
-			d.PIDs = append(d.PIDs, pe.ProcessID)
-			if d.Path == "" {
-				d.Path = queryProcessPath(pe.ProcessID)
-			}
-			if ports, has := pidPorts[pe.ProcessID]; has {
-				for _, p := range ports {
-					if !containsInt(d.Ports, p) {
-						d.Ports = append(d.Ports, p)
-					}
-				}
-			}
+			noteProcess(result, exeName, pe.ProcessID, queryProcessPath(pe.ProcessID), pidPorts[pe.ProcessID])
 		}
 		if err := windows.Process32Next(snap, &pe); err != nil {
 			break
 		}
 	}
 	return result
+}
+
+// noteProcess stores this PID's path and ports under the exe name without merging them into another PID.
+func noteProcess(result map[string]*procDetail, exeName string, pid uint32, path string, ports []int) {
+	exeName = strings.ToLower(strings.TrimSpace(exeName))
+	if exeName == "" {
+		return
+	}
+	d, ok := result[exeName]
+	if !ok {
+		d = &procDetail{}
+		result[exeName] = d
+	}
+	owned := append([]int(nil), ports...)
+	d.Instances = append(d.Instances, procInstance{PID: pid, Path: path, Ports: owned})
+	d.PIDs = append(d.PIDs, pid)
+	if d.Path == "" {
+		d.Path = path
+	}
+	for _, p := range owned {
+		if !containsInt(d.Ports, p) {
+			d.Ports = append(d.Ports, p)
+		}
+	}
 }
 
 func getListeningTCPPortsByPID() map[uint32][]int {
@@ -351,8 +377,9 @@ func DetectAll() SystemSnapshot {
 	vergeClient := detectClashVerge(cfg, procs)
 	clashMiClient := detectClashMi(cfg, procs, sysProxyEn, sysHost, sysPort)
 	v2rayNClient := detectV2rayN(cfg, procs, sysProxyEn, sysHost, sysPort)
+	builtinClient := detectBuiltin(procs)
 
-	clients := []ProxyClientInfo{vergeClient, clashMiClient, v2rayNClient}
+	clients := []ProxyClientInfo{vergeClient, clashMiClient, v2rayNClient, builtinClient}
 	active := selectActiveClient(cfg.PreferredClient, clients, cfg.CustomPortOverride)
 
 	if cfg.CustomPortOverride > 0 {
@@ -389,6 +416,9 @@ func DetectAll() SystemSnapshot {
 }
 
 func selectActiveClient(preferred string, clients []ProxyClientInfo, portOverride int) ProxyClientInfo {
+	if len(clients) == 0 {
+		return ProxyClientInfo{}
+	}
 	if preferred != "" && preferred != "auto" {
 		for _, c := range clients {
 			if c.ID == preferred {
@@ -397,26 +427,56 @@ func selectActiveClient(preferred string, clients []ProxyClientInfo, portOverrid
 		}
 	}
 	for _, c := range clients {
-		if c.Running && c.PortReachable && c.HTTPVerified {
+		if c.ID == "builtin" && c.Running {
 			return c
 		}
 	}
+	var rest []ProxyClientInfo
+	var builtin ProxyClientInfo
+	hasBuiltin := false
 	for _, c := range clients {
-		if c.Running && c.PortReachable {
-			return c
+		if c.ID == "builtin" {
+			builtin = c
+			hasBuiltin = true
+			continue
 		}
+		rest = append(rest, c)
 	}
+	if len(rest) == 0 {
+		if hasBuiltin {
+			return builtin
+		}
+		return clients[0]
+	}
+	if c, ok := pickClient(rest, func(c ProxyClientInfo) bool {
+		return c.Running && c.PortReachable && c.HTTPVerified
+	}); ok {
+		return c
+	}
+	if c, ok := pickClient(rest, func(c ProxyClientInfo) bool {
+		return c.Running && c.PortReachable
+	}); ok {
+		return c
+	}
+	if c, ok := pickClient(rest, func(c ProxyClientInfo) bool { return c.Running }); ok {
+		return c
+	}
+	if c, ok := pickClient(rest, func(c ProxyClientInfo) bool { return c.Installed }); ok {
+		return c
+	}
+	if hasBuiltin && builtin.Installed {
+		return builtin
+	}
+	return rest[0]
+}
+
+func pickClient(clients []ProxyClientInfo, ok func(ProxyClientInfo) bool) (ProxyClientInfo, bool) {
 	for _, c := range clients {
-		if c.Running {
-			return c
+		if ok(c) {
+			return c, true
 		}
 	}
-	for _, c := range clients {
-		if c.Installed {
-			return c
-		}
-	}
-	return clients[0]
+	return ProxyClientInfo{}, false
 }
 
 func latestModTime(paths ...string) int64 {
@@ -632,9 +692,13 @@ func detectClashMi(cfg configstore.AppConfig, procs map[string]*procDetail, sysE
 			procPorts = append(procPorts, d.Ports...)
 		}
 	}
-	if d, ok := procs["mihomo.exe"]; ok && strings.Contains(strings.ToLower(d.Path), "clash") {
-		info.CoreRunning = true
-		procPorts = append(procPorts, d.Ports...)
+	if d, ok := procs["mihomo.exe"]; ok {
+		for _, inst := range d.Instances {
+			if strings.Contains(strings.ToLower(inst.Path), "clash") {
+				info.CoreRunning = true
+				procPorts = append(procPorts, inst.Ports...)
+			}
+		}
 	}
 
 	if cfg.CustomClashMiExe != "" && fileExists(cfg.CustomClashMiExe) {
