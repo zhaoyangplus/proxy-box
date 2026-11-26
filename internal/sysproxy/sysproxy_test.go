@@ -173,7 +173,7 @@ func TestRegistryValueNamesAndDefaultBypass(t *testing.T) {
 	if nameProxyEnable != "ProxyEnable" || nameProxyServer != "ProxyServer" || nameProxyOverride != "ProxyOverride" || nameAutoConfigURL != "AutoConfigURL" {
 		t.Fatalf("registry names = %s %s %s %s", nameProxyEnable, nameProxyServer, nameProxyOverride, nameAutoConfigURL)
 	}
-	const want = "<local>;localhost;127.*;10.*;172.16.*;172.17.*;172.18.*;172.19.*;172.20.*;172.21.*;172.22.*;172.23.*;172.24.*;172.25.*;172.26.*;172.27.*;172.28.*;172.29.*;172.30.*;172.31.*;192.168.*"
+	const want = "localhost;127.*;10.*;172.16.*;172.17.*;172.18.*;172.19.*;172.20.*;172.21.*;172.22.*;172.23.*;172.24.*;172.25.*;172.26.*;172.27.*;172.28.*;172.29.*;172.30.*;172.31.*;192.168.*;<local>"
 	if DefaultBypass != want {
 		t.Fatalf("DefaultBypass = %q", DefaultBypass)
 	}
