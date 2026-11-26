@@ -84,7 +84,7 @@ func TestImportBinary(t *testing.T) {
 	}
 }
 
-func TestEnsureBinarySiblingThenLocal(t *testing.T) {
+func TestEnsureBinaryLookupOrder(t *testing.T) {
 	exeDir := t.TempDir()
 	local := t.TempDir()
 	coreDir := t.TempDir()
@@ -95,6 +95,10 @@ func TestEnsureBinarySiblingThenLocal(t *testing.T) {
 
 	sibling := filepath.Join(exeDir, BinaryFileName)
 	if err := os.WriteFile(sibling, []byte("MZsibling"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	coreExe := filepath.Join(coreDir, BinaryFileName)
+	if err := os.WriteFile(coreExe, []byte("MZcore"), 0644); err != nil {
 		t.Fatal(err)
 	}
 	appData := filepath.Join(local, "ProxyBox", "core", BinaryFileName)
@@ -122,8 +126,60 @@ func TestEnsureBinarySiblingThenLocal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if !sameFile(got, coreExe) {
+		t.Fatalf("got %s want core %s", got, coreExe)
+	}
+
+	if err := os.WriteFile(coreExe, []byte("NO"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	got, err = EnsureBinary(context.Background(), coreDir, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !sameFile(got, appData) {
 		t.Fatalf("got %s want local %s", got, appData)
+	}
+}
+
+func TestEnsureBinaryCoreDirBeforeLocalAppData(t *testing.T) {
+	exeDir := t.TempDir()
+	local := t.TempDir()
+	coreDir := t.TempDir()
+	t.Setenv("LOCALAPPDATA", local)
+	restoreExec(t, filepath.Join(exeDir, "ProxyBox.exe"))
+	restoreCurlLookup(t, func() (string, error) { return "", exec.ErrNotFound })
+	restoreLimits(t, 200*time.Millisecond, time.Second, 1)
+	restoreAsset(t, "http://127.0.0.1:1/missing")
+	hits := 0
+
+	appData := filepath.Join(local, "ProxyBox", "core", BinaryFileName)
+	if err := os.MkdirAll(filepath.Dir(appData), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(appData, []byte("MZlocal"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	coreExe := filepath.Join(coreDir, BinaryFileName)
+	if err := os.WriteFile(coreExe, []byte("MZcore"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	got, err := EnsureBinary(ctx, coreDir, []string{"http://127.0.0.1:1"}, func(int64, int64) { hits++ })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sameFile(got, coreExe) {
+		t.Fatalf("got %s want core %s", got, coreExe)
+	}
+	body, err := os.ReadFile(got)
+	if err != nil || string(body) != "MZcore" {
+		t.Fatalf("body %q %v", body, err)
+	}
+	if hits != 0 {
+		t.Fatal("download ran")
 	}
 }
 

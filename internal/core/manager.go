@@ -174,8 +174,26 @@ func (m *Manager) Start(ctx context.Context, binaryPath string, params ConfigPar
 	m.phase = phaseRunning
 	m.version = ver
 	st = m.snapshot()
+	go m.watchDone(gen, child)
 	m.mu.Unlock()
 	return st, nil
+}
+
+// watchDone releases this generation's run after its child exits on its own.
+func (m *Manager) watchDone(gen int, r *running) {
+	if r == nil || r.done == nil {
+		return
+	}
+	<-r.done
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.generation != gen || m.run != r || m.phase != phaseRunning {
+		return
+	}
+	m.run = nil
+	m.phase = phaseStopped
+	m.generation++
+	cleanupRun(r)
 }
 
 // Stop kills the child and closes the job. It is safe to call more than once.

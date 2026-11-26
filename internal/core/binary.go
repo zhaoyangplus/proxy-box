@@ -56,11 +56,15 @@ var downloadResumes atomic.Int64
 type ProgressFunc func(downloaded, total int64)
 
 // EnsureBinary returns a mihomo.exe to run.
-// It checks beside the current executable, then %LOCALAPPDATA%\ProxyBox\core\mihomo.exe,
-// then each reachable proxy URL, then a direct download.
+// It checks beside the current executable, then coreDir/mihomo.exe,
+// then %LOCALAPPDATA%\ProxyBox\core\mihomo.exe, then each reachable proxy URL,
+// then a direct download.
 // A downloaded zip must match AssetSHA256 and the exe inside must start with MZ.
 func EnsureBinary(ctx context.Context, coreDir string, proxyURLs []string, onProgress ProgressFunc) (string, error) {
 	if p, ok := siblingBinary(); ok {
+		return p, nil
+	}
+	if p, ok := validLocalBinary(filepath.Join(coreDir, BinaryFileName)); ok {
 		return p, nil
 	}
 	if p, ok := localAppDataBinary(); ok {

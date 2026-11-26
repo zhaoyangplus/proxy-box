@@ -4,18 +4,28 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"golang.org/x/sys/windows"
 )
+
+func TestMain(m *testing.M) {
+	if os.Getenv("PROXYBOX_FAKE_CORE") == "1" {
+		os.Exit(runFakeCore())
+	}
+	os.Exit(m.Run())
+}
 
 func TestLogTruncatesAboveTwoMB(t *testing.T) {
 	if maxLogBytes != 2*1024*1024 {
@@ -190,4 +200,220 @@ func TestStopIsIdempotentAndStartRejectsBadBinary(t *testing.T) {
 	if m.phase != phaseStopped {
 		t.Fatalf("phase %d", m.phase)
 	}
+}
+
+func TestChildExitAllowsRestart(t *testing.T) {
+	m := NewManager(t.TempDir())
+	t.Cleanup(func() { _ = m.Stop() })
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PROXYBOX_FAKE_CORE", "1")
+	t.Setenv("PROXYBOX_FAKE_EXIT", "1")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	first, err := m.Start(ctx, exe, fakeCoreParams(), nil)
+	cancel()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !first.Running || first.PID == 0 {
+		t.Fatalf("first %+v", first)
+	}
+	waitNotRunning(t, m, 3*time.Second)
+
+	t.Setenv("PROXYBOX_FAKE_EXIT", "")
+	ctx, cancel = context.WithTimeout(context.Background(), 8*time.Second)
+	second, err := m.Start(ctx, exe, fakeCoreParams(), nil)
+	cancel()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !second.Running || second.PID == 0 || second.PID == first.PID {
+		t.Fatalf("second %+v first pid %d", second, first.PID)
+	}
+}
+
+func TestStopOverlapsChildExit(t *testing.T) {
+	m := NewManager(t.TempDir())
+	t.Cleanup(func() { _ = m.Stop() })
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PROXYBOX_FAKE_CORE", "1")
+	t.Setenv("PROXYBOX_FAKE_EXIT", "")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	first, err := m.Start(ctx, exe, stoppedOverlapParams(), nil)
+	cancel()
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.mu.Lock()
+	done := m.run.done
+	m.mu.Unlock()
+	stopErr := make(chan error, 1)
+	go func() {
+		<-done
+		stopErr <- m.Stop()
+	}()
+	out, killErr := exec.Command("taskkill", "/F", "/PID", strconv.Itoa(first.PID)).CombinedOutput()
+	if killErr != nil {
+		t.Fatalf("taskkill %v %s", killErr, out)
+	}
+	select {
+	case err := <-stopErr:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("stop hung")
+	}
+	waitNotRunning(t, m, 2*time.Second)
+
+	ctx, cancel = context.WithTimeout(context.Background(), 8*time.Second)
+	second, err := m.Start(ctx, exe, stoppedOverlapParams(), nil)
+	cancel()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !second.Running || second.PID == 0 || second.PID == first.PID {
+		t.Fatalf("second %+v first pid %d", second, first.PID)
+	}
+}
+
+func TestStaleExitLeavesCurrentRun(t *testing.T) {
+	m := NewManager(t.TempDir())
+	logf, err := os.Create(filepath.Join(t.TempDir(), "stale.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer logf.Close()
+	job, err := newJob()
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	close(done)
+	run := &running{done: done, stopLog: make(chan struct{}), logFile: logf, job: job}
+	m.mu.Lock()
+	m.phase = phaseRunning
+	m.generation = 2
+	m.run = run
+	m.mu.Unlock()
+
+	m.watchDone(1, run)
+	if !m.Status().Running {
+		t.Fatal("stale exit stopped the run")
+	}
+	if !jobOpen(job) {
+		t.Fatal("stale exit closed the job")
+	}
+	if _, err := logf.Write([]byte("x")); err != nil {
+		t.Fatal(err)
+	}
+
+	m.watchDone(2, run)
+	if m.Status().Running {
+		t.Fatal("current exit left the run up")
+	}
+	if jobOpen(job) {
+		t.Fatal("job still open")
+	}
+	if _, err := logf.Write([]byte("y")); err == nil {
+		t.Fatal("log still open")
+	}
+}
+
+func fakeCoreParams() ConfigParams {
+	return ConfigParams{
+		Secret:          "sek",
+		Mode:            ModeRule,
+		MixedPort:       39190,
+		ControllerPort:  39191,
+		AIDedicatedPort: 39192,
+	}
+}
+
+func stoppedOverlapParams() ConfigParams {
+	return ConfigParams{
+		Secret:          "sek",
+		Mode:            ModeRule,
+		MixedPort:       39200,
+		ControllerPort:  39201,
+		AIDedicatedPort: 39202,
+	}
+}
+
+func jobOpen(h windows.Handle) bool {
+	var dup windows.Handle
+	err := windows.DuplicateHandle(windows.CurrentProcess(), h, windows.CurrentProcess(), &dup, 0, false, windows.DUPLICATE_SAME_ACCESS)
+	if err != nil {
+		return false
+	}
+	_ = windows.CloseHandle(dup)
+	return true
+}
+
+func waitNotRunning(t *testing.T, m *Manager, d time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(d)
+	for m.Status().Running {
+		if time.Now().After(deadline) {
+			t.Fatalf("still running pid %d", m.Status().PID)
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+}
+
+func runFakeCore() int {
+	dir := "."
+	for i := 1; i < len(os.Args); i++ {
+		if os.Args[i] == "-d" && i+1 < len(os.Args) {
+			dir = os.Args[i+1]
+		}
+	}
+	port, err := controllerPort(dir)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:"+strconv.Itoa(port))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	exit := os.Getenv("PROXYBOX_FAKE_EXIT") == "1"
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"version":"fake"}`)
+		if exit {
+			time.AfterFunc(500*time.Millisecond, func() { _ = ln.Close() })
+		}
+	})}
+	_ = srv.Serve(ln)
+	return 0
+}
+
+func controllerPort(dir string) (int, error) {
+	b, err := os.ReadFile(filepath.Join(dir, ConfigFileName))
+	if err != nil {
+		return 0, err
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimSpace(strings.TrimSuffix(line, "\r"))
+		const key = "external-controller:"
+		if !strings.HasPrefix(line, key) {
+			continue
+		}
+		val := strings.Trim(strings.TrimSpace(line[len(key):]), "'\"")
+		_, portStr, ok := strings.Cut(val, ":")
+		if !ok {
+			return 0, fmt.Errorf("controller %q", val)
+		}
+		return strconv.Atoi(portStr)
+	}
+	return 0, fmt.Errorf("no external-controller")
 }
