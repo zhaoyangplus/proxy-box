@@ -897,22 +897,7 @@ func startLocalAPIServer(hub *sseHub, appUpdater *updater.Updater, onBeforeResta
 		writeJSON(rw, http.StatusOK, map[string]any{"path": p})
 	})
 
-	mux.HandleFunc("/api/save-config", func(rw http.ResponseWriter, r *http.Request) {
-		var incoming configstore.AppConfig
-		if err := json.NewDecoder(r.Body).Decode(&incoming); err != nil {
-			writeErr(rw, err)
-			return
-		}
-		current := configstore.LoadConfig()
-		if incoming.PreferredClient == "" {
-			incoming.PreferredClient = current.PreferredClient
-		}
-		if err := configstore.SaveConfig(incoming); err != nil {
-			writeErr(rw, err)
-			return
-		}
-		writeJSON(rw, http.StatusOK, map[string]any{"ok": true})
-	})
+	mux.HandleFunc("/api/save-config", handleSaveConfig)
 
 	mux.HandleFunc("/api/version", func(rw http.ResponseWriter, r *http.Request) {
 		writeJSON(rw, http.StatusOK, map[string]any{
