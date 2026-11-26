@@ -62,7 +62,7 @@ func TestLiveMihomo(t *testing.T) {
 
 	if os.Getenv("PROXYBOX_SKIP_DOWNLOAD") != "1" {
 		dlDir := filepath.Join(root, "download")
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+		ctx, cancel := context.WithTimeout(context.Background(), 16*time.Minute)
 		var last int64
 		var logged int64
 		got, err := EnsureBinary(ctx, dlDir, []string{"http://127.0.0.1:7897"}, func(n, total int64) {
@@ -82,7 +82,7 @@ func TestLiveMihomo(t *testing.T) {
 		if !fileHasMZ(got) {
 			t.Fatal("downloaded exe has no MZ")
 		}
-		t.Logf("ensure_binary %s bytes %d", got, last)
+		t.Logf("ensure_binary %s bytes %d resumes %d", got, last, downloadResumes.Load())
 	}
 
 	runGeo(t, filepath.Join(root, "geo"), binary, providerSrc, geoIP, geoSite, &pids)

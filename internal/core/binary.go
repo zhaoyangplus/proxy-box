@@ -16,7 +16,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/sys/windows"
@@ -25,6 +27,7 @@ import (
 const (
 	AssetName   = "mihomo-windows-amd64-compatible-v1.19.34.zip"
 	AssetSHA256 = "cd6738d4648cc1a5f48049a1343b697ab510889d648f045c5c780fc1ab443a79"
+	AssetSize   = 22417383
 	AssetURL    = "https://github.com/MetaCubeX/mihomo/releases/download/v1.19.34/" + AssetName
 
 	BinaryFileName = "mihomo.exe"
@@ -41,9 +44,15 @@ var (
 
 	currentExecutable = os.Executable
 	assetURL          = AssetURL
+	lookupCurl        = func() (string, error) { return exec.LookPath("curl.exe") }
+	downloadStall     = 30 * time.Second
+	downloadOverall   = 15 * time.Minute
+	downloadAttempts  = 8
 )
 
-// ProgressFunc reports download bytes. total is -1 when the server omits the length.
+var downloadResumes atomic.Int64
+
+// ProgressFunc reports bytes written. total is the response length, or AssetSize when the response omits it.
 type ProgressFunc func(downloaded, total int64)
 
 // EnsureBinary returns a mihomo.exe to run.
@@ -60,6 +69,7 @@ func EnsureBinary(ctx context.Context, coreDir string, proxyURLs []string, onPro
 	if err := os.MkdirAll(coreDir, 0755); err != nil {
 		return "", err
 	}
+	downloadResumes.Store(0)
 	var attempt []error
 	for _, proxy := range proxyURLs {
 		if strings.TrimSpace(proxy) == "" {
@@ -174,10 +184,10 @@ func parseProxy(raw string) (*url.URL, error) {
 
 func downloadAndInstall(ctx context.Context, coreDir, proxyURL string, onProgress ProgressFunc) (string, error) {
 	zipPath := filepath.Join(coreDir, AssetName+".tmp")
-	attemptCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
-	defer cancel()
-	if err := downloadAsset(attemptCtx, zipPath, proxyURL, onProgress); err != nil {
-		_ = os.Remove(zipPath)
+	if err := downloadAsset(ctx, zipPath, proxyURL, onProgress); err != nil {
+		if errors.Is(err, ErrHashMismatch) || fileSize(zipPath) > maxAssetBytes {
+			_ = os.Remove(zipPath)
+		}
 		return "", err
 	}
 	defer os.Remove(zipPath)
@@ -189,17 +199,140 @@ func downloadAndInstall(ctx context.Context, coreDir, proxyURL string, onProgres
 }
 
 func downloadAsset(ctx context.Context, dest, proxyURL string, onProgress ProgressFunc) error {
-	// net/http stalls mid-body on this machine's GitHub TLS path. curl.exe finishes it.
-	if assetURL == AssetURL {
-		err := downloadWithCurl(ctx, dest, proxyURL, onProgress)
-		if err == nil {
-			return verifyAssetHash(dest)
-		}
-		_ = os.Remove(dest)
-		if !errors.Is(err, exec.ErrNotFound) {
-			return err
+	if err := fetchAsset(ctx, dest, proxyURL, onProgress); err != nil {
+		return err
+	}
+	return verifyAssetHash(dest)
+}
+
+func fetchAsset(ctx context.Context, dest, proxyURL string, onProgress ProgressFunc) error {
+	ctx, cancel := context.WithTimeout(ctx, downloadOverall)
+	defer cancel()
+	var total atomic.Int64
+	total.Store(AssetSize)
+	report := func() {
+		if onProgress != nil {
+			onProgress(fileSize(dest), total.Load())
 		}
 	}
+	curl, err := lookupCurl()
+	// curl.exe is preferred because its TLS stack finishes the release asset when net/http stops mid-body.
+	if err != nil && !errors.Is(err, exec.ErrNotFound) {
+		return err
+	}
+	report()
+	if err == nil {
+		return downloadWithRetry(ctx, dest, report, func(ctx context.Context, _ int64) error {
+			return curlAttempt(ctx, curl, dest, proxyURL)
+		})
+	}
+	return downloadWithRetry(ctx, dest, report, func(ctx context.Context, have int64) error {
+		return httpAttempt(ctx, dest, proxyURL, have, &total)
+	})
+}
+
+func downloadWithRetry(ctx context.Context, dest string, report func(), once func(context.Context, int64) error) error {
+	var last error
+	for attempt := 1; attempt <= downloadAttempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		have := fileSize(dest)
+		if have > maxAssetBytes {
+			return fmt.Errorf("asset exceeds %d bytes", maxAssetBytes)
+		}
+		if have > 0 {
+			downloadResumes.Add(1)
+		}
+		err := watchAttempt(ctx, dest, report, func(ctx context.Context) error {
+			return once(ctx, have)
+		})
+		if err == nil {
+			return nil
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		last = err
+	}
+	if last == nil {
+		return errors.New("download failed")
+	}
+	return last
+}
+
+func watchAttempt(ctx context.Context, dest string, report func(), run func(context.Context) error) error {
+	attemptCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- run(attemptCtx) }()
+	tick := time.NewTicker(stallPoll(downloadStall))
+	defer tick.Stop()
+	last := fileSize(dest)
+	changed := time.Now()
+	for {
+		select {
+		case err := <-done:
+			report()
+			return err
+		case <-ctx.Done():
+			cancel()
+			<-done
+			report()
+			return ctx.Err()
+		case <-tick.C:
+			sz := fileSize(dest)
+			if sz != last {
+				last = sz
+				changed = time.Now()
+			}
+			report()
+			if sz > maxAssetBytes {
+				cancel()
+				<-done
+				return fmt.Errorf("asset exceeds %d bytes", maxAssetBytes)
+			}
+			if time.Since(changed) >= downloadStall {
+				cancel()
+				<-done
+				return fmt.Errorf("download stalled after %s", downloadStall)
+			}
+		}
+	}
+}
+
+func stallPoll(stall time.Duration) time.Duration {
+	poll := stall / 4
+	if poll < 10*time.Millisecond {
+		poll = 10 * time.Millisecond
+	}
+	if poll > 100*time.Millisecond {
+		poll = 100 * time.Millisecond
+	}
+	return poll
+}
+
+func curlAttempt(ctx context.Context, curl, dest, proxyURL string) error {
+	args := []string{"-sS", "-L", "--fail", "-C", "-", "-A", "proxy-box", "-o", dest, "-x", proxyURL}
+	if proxyURL != "" {
+		args = append(args, "--noproxy", "")
+	}
+	args = append(args, assetURL)
+	cmd := commandHidden(ctx, curl, args...)
+	cmd.Stdout = io.Discard
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		msg := strings.TrimSpace(stderr.String())
+		if msg == "" {
+			return fmt.Errorf("curl: %w", err)
+		}
+		return fmt.Errorf("curl: %w: %s", err, msg)
+	}
+	return nil
+}
+
+func httpAttempt(ctx context.Context, dest, proxyURL string, have int64, total *atomic.Int64) error {
 	client, err := httpClient(proxyURL)
 	if err != nil {
 		return err
@@ -209,84 +342,77 @@ func downloadAsset(ctx context.Context, dest, proxyURL string, onProgress Progre
 		return err
 	}
 	req.Header.Set("User-Agent", "proxy-box")
+	if have > 0 {
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", have))
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
+	restart := resp.StatusCode == http.StatusOK
+	switch resp.StatusCode {
+	case http.StatusOK:
+		have = 0
+	case http.StatusPartialContent:
+	default:
 		return fmt.Errorf("download http %d", resp.StatusCode)
 	}
-	total := resp.ContentLength
-	if total < 0 {
-		total = -1
+	total.Store(responseTotal(resp, have))
+	flag := os.O_CREATE | os.O_WRONLY
+	if restart {
+		flag |= os.O_TRUNC
+	} else {
+		flag |= os.O_APPEND
 	}
-	if onProgress != nil {
-		onProgress(0, total)
-	}
-	f, err := os.OpenFile(dest, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0644)
+	f, err := os.OpenFile(dest, flag, 0644)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-	hash := sha256.New()
-	src := &progressReader{r: io.TeeReader(resp.Body, hash), total: total, fn: onProgress}
-	n, err := io.Copy(f, io.LimitReader(src, maxAssetBytes+1))
-	if err != nil {
-		return err
-	}
-	if n > maxAssetBytes {
+	limit := maxAssetBytes - have
+	n, copyErr := io.Copy(f, io.LimitReader(resp.Body, limit+1))
+	syncErr := f.Sync()
+	closeErr := f.Close()
+	if n > limit {
 		return fmt.Errorf("asset exceeds %d bytes", maxAssetBytes)
 	}
-	if err := f.Sync(); err != nil {
-		return err
+	if copyErr != nil {
+		return copyErr
 	}
-	return hashMatches(hash.Sum(nil))
+	return errors.Join(syncErr, closeErr)
 }
 
-func downloadWithCurl(ctx context.Context, dest, proxyURL string, onProgress ProgressFunc) error {
-	curl, err := exec.LookPath("curl.exe")
-	if err != nil {
-		return err
+func responseTotal(resp *http.Response, already int64) int64 {
+	if n, ok := contentRangeSize(resp.Header.Get("Content-Range")); ok {
+		return n
 	}
-	args := []string{"-L", "--fail", "--retry", "2", "-A", "proxy-box", "-o", dest}
-	if proxyURL != "" {
-		args = append(args, "-x", proxyURL)
+	if resp.ContentLength < 0 {
+		return AssetSize
 	}
-	args = append(args, assetURL)
-	cmd := commandHidden(ctx, curl, args...)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Start(); err != nil {
-		return err
+	if resp.StatusCode == http.StatusPartialContent {
+		return already + resp.ContentLength
 	}
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
-	tick := time.NewTicker(300 * time.Millisecond)
-	defer tick.Stop()
-	for {
-		select {
-		case err := <-done:
-			reportFile(dest, onProgress)
-			if err != nil {
-				return fmt.Errorf("curl: %w: %s", err, strings.TrimSpace(stderr.String()))
-			}
-			return nil
-		case <-tick.C:
-			reportFile(dest, onProgress)
-		}
-	}
+	return resp.ContentLength
 }
 
-func reportFile(path string, onProgress ProgressFunc) {
-	if onProgress == nil {
-		return
+func contentRangeSize(header string) (int64, bool) {
+	_, size, ok := strings.Cut(header, "/")
+	if !ok || size == "" || size == "*" {
+		return 0, false
 	}
+	n, err := strconv.ParseInt(strings.TrimSpace(size), 10, 64)
+	if err != nil || n < 0 {
+		return 0, false
+	}
+	return n, true
+}
+
+func fileSize(path string) int64 {
 	st, err := os.Stat(path)
 	if err != nil {
-		return
+		return 0
 	}
-	onProgress(st.Size(), -1)
+	return st.Size()
 }
 
 func verifyAssetHash(path string) error {
@@ -326,24 +452,6 @@ func httpClient(proxyURL string) (*http.Client, error) {
 		tr.Proxy = http.ProxyURL(u)
 	}
 	return &http.Client{Transport: tr}, nil
-}
-
-type progressReader struct {
-	r     io.Reader
-	n     int64
-	total int64
-	next  int64
-	fn    ProgressFunc
-}
-
-func (p *progressReader) Read(buf []byte) (int, error) {
-	n, err := p.r.Read(buf)
-	p.n += int64(n)
-	if p.fn != nil && (err == io.EOF || p.n >= p.next) {
-		p.fn(p.n, p.total)
-		p.next = p.n + 256*1024
-	}
-	return n, err
 }
 
 func extractMihomo(zipPath, dest string) error {

@@ -2,14 +2,22 @@ package core
 
 import (
 	"archive/zip"
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestImportBinary(t *testing.T) {
@@ -176,6 +184,323 @@ func restoreAsset(t *testing.T, raw string) {
 	old := assetURL
 	assetURL = raw
 	t.Cleanup(func() { assetURL = old })
+}
+
+func restoreCurlLookup(t *testing.T, fn func() (string, error)) {
+	t.Helper()
+	old := lookupCurl
+	lookupCurl = fn
+	t.Cleanup(func() { lookupCurl = old })
+}
+
+func restoreLimits(t *testing.T, stall, overall time.Duration, attempts int) {
+	t.Helper()
+	oldStall, oldOverall, oldAttempts := downloadStall, downloadOverall, downloadAttempts
+	downloadStall, downloadOverall, downloadAttempts = stall, overall, attempts
+	t.Cleanup(func() {
+		downloadStall, downloadOverall, downloadAttempts = oldStall, oldOverall, oldAttempts
+	})
+}
+
+func TestDownloadKeepsPartialAfterStall(t *testing.T) {
+	restoreCurlLookup(t, func() (string, error) { return "", exec.ErrNotFound })
+	restoreLimits(t, 200*time.Millisecond, 3*time.Second, 2)
+	payload := bytes.Repeat([]byte("abc"), 4000)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", strconv.Itoa(len(payload)))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(payload[:1500])
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+	restoreAsset(t, srv.URL)
+	dir := t.TempDir()
+	_, err := downloadAndInstall(context.Background(), dir, "", nil)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	st, statErr := os.Stat(filepath.Join(dir, AssetName+".tmp"))
+	if statErr != nil || st.Size() == 0 {
+		t.Fatalf("partial size %v err %v download %v", st, statErr, err)
+	}
+}
+
+func TestCurlKeepsPartialAcrossStall(t *testing.T) {
+	if _, err := exec.LookPath("curl.exe"); err != nil {
+		t.Fatal(err)
+	}
+	payload := bytes.Repeat([]byte("0123456789abcdef"), 8192)
+	const cut = 20000
+	hits := &hitLog{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := hits.add(r.Header.Get("Accept"), r.Header.Get("Range"))
+		if n == 1 {
+			w.Header().Set("Content-Length", strconv.Itoa(len(payload)))
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(payload[:cut])
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+			<-r.Context().Done()
+			return
+		}
+		start, ok := rangeStart(r.Header.Get("Range"))
+		if !ok || start > len(payload) {
+			http.Error(w, "bad range", http.StatusBadRequest)
+			return
+		}
+		chunk := payload[start:]
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, len(payload)-1, len(payload)))
+		w.Header().Set("Content-Length", strconv.Itoa(len(chunk)))
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write(chunk)
+	}))
+	t.Cleanup(srv.Close)
+	restoreAsset(t, srv.URL)
+	restoreLimits(t, 300*time.Millisecond, 8*time.Second, 4)
+	dest := filepath.Join(t.TempDir(), "asset.bin")
+	err := fetchAsset(context.Background(), dest, "", nil)
+	got := hits.snapshot()
+	if err != nil {
+		t.Fatalf("err %v hits %+v resumes %d", err, got, downloadResumes.Load())
+	}
+	sum := sha256.Sum256(payload)
+	if hashFile(t, dest) != hex.EncodeToString(sum[:]) {
+		t.Fatal("file hash mismatch")
+	}
+	if len(got) < 2 || got[1].rang == "" {
+		t.Fatalf("hits %+v", got)
+	}
+}
+
+func TestCurlDownloadResumes(t *testing.T) {
+	if _, err := exec.LookPath("curl.exe"); err != nil {
+		t.Fatal(err)
+	}
+	assertResume(t, false, http.StatusPartialContent)
+}
+
+func TestHTTPDownloadResumes(t *testing.T) {
+	restoreCurlLookup(t, func() (string, error) { return "", exec.ErrNotFound })
+	assertResume(t, true, http.StatusPartialContent)
+}
+
+func TestHTTPDownloadRestartsOnFullResponse(t *testing.T) {
+	restoreCurlLookup(t, func() (string, error) { return "", exec.ErrNotFound })
+	assertResume(t, true, http.StatusOK)
+}
+
+func TestHTTPProgressUsesAssetSizeWithoutLength(t *testing.T) {
+	restoreCurlLookup(t, func() (string, error) { return "", exec.ErrNotFound })
+	restoreLimits(t, 5*time.Second, 20*time.Second, 2)
+	payload := []byte("chunked-body")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		_, _ = w.Write(payload)
+	}))
+	defer srv.Close()
+	restoreAsset(t, srv.URL)
+	var total int64
+	dest := filepath.Join(t.TempDir(), "asset.bin")
+	if err := fetchAsset(context.Background(), dest, "", func(_, tot int64) { total = tot }); err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(dest)
+	if err != nil || string(body) != string(payload) {
+		t.Fatalf("body %q %v", body, err)
+	}
+	if total != AssetSize {
+		t.Fatalf("total %d", total)
+	}
+}
+
+func TestDownloadAbortsOnStallAndOverallCap(t *testing.T) {
+	cases := []struct {
+		name    string
+		http    bool
+		stall   time.Duration
+		overall time.Duration
+		limit   time.Duration
+	}{
+		{name: "curl stall", stall: 200 * time.Millisecond, overall: 8 * time.Second, limit: 4 * time.Second},
+		{name: "http stall", http: true, stall: 200 * time.Millisecond, overall: 8 * time.Second, limit: 4 * time.Second},
+		{name: "curl overall", stall: 15 * time.Second, overall: time.Second, limit: 5 * time.Second},
+		{name: "http overall", http: true, stall: 15 * time.Second, overall: time.Second, limit: 5 * time.Second},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.http {
+				restoreCurlLookup(t, func() (string, error) { return "", exec.ErrNotFound })
+			} else if _, err := exec.LookPath("curl.exe"); err != nil {
+				t.Fatal(err)
+			}
+			restoreLimits(t, tc.stall, tc.overall, 2)
+			srv := hangServer(t)
+			restoreAsset(t, srv.URL)
+			dest := filepath.Join(t.TempDir(), "asset.bin")
+			start := time.Now()
+			err := fetchAsset(context.Background(), dest, "", nil)
+			elapsed := time.Since(start)
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			if elapsed > tc.limit {
+				t.Fatalf("elapsed %s limit %s err %v", elapsed, tc.limit, err)
+			}
+		})
+	}
+}
+
+func assertResume(t *testing.T, httpFallback bool, follow int) {
+	t.Helper()
+	payload := bytes.Repeat([]byte("0123456789abcdef"), 2048)
+	const cut = 2048
+	srv, hits := newCutServer(t, payload, cut, follow)
+	restoreAsset(t, srv.URL)
+	restoreLimits(t, 5*time.Second, 20*time.Second, 4)
+	downloadResumes.Store(0)
+	var last, total int64
+	dest := filepath.Join(t.TempDir(), "asset.bin")
+	if err := fetchAsset(context.Background(), dest, "", func(n, tot int64) {
+		last, total = n, tot
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(payload)
+	if hashFile(t, dest) != hex.EncodeToString(sum[:]) {
+		t.Fatal("file hash mismatch")
+	}
+	if last != int64(len(payload)) {
+		t.Fatalf("progress %d", last)
+	}
+	wantTotal := int64(AssetSize)
+	if httpFallback {
+		wantTotal = int64(len(payload))
+	}
+	if total != wantTotal {
+		t.Fatalf("total %d want %d", total, wantTotal)
+	}
+	got := hits.snapshot()
+	if len(got) < 2 {
+		t.Fatalf("requests %d", len(got))
+	}
+	if got[1].rang == "" || !strings.HasPrefix(got[1].rang, "bytes=") {
+		t.Fatalf("second range %q hits %+v", got[1].rang, got)
+	}
+	if httpFallback && got[0].accept != "" {
+		t.Fatalf("Accept %q, http path did not run", got[0].accept)
+	}
+	if !httpFallback && got[0].accept != "*/*" {
+		t.Fatalf("Accept %q, curl path did not run", got[0].accept)
+	}
+	if downloadResumes.Load() < 1 {
+		t.Fatalf("resumes %d", downloadResumes.Load())
+	}
+}
+
+type downloadHit struct {
+	accept string
+	rang   string
+}
+
+type hitLog struct {
+	mu   sync.Mutex
+	hits []downloadHit
+}
+
+func (l *hitLog) add(accept, rang string) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.hits = append(l.hits, downloadHit{accept, rang})
+	return len(l.hits)
+}
+
+func (l *hitLog) snapshot() []downloadHit {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	out := make([]downloadHit, len(l.hits))
+	copy(out, l.hits)
+	return out
+}
+
+func newCutServer(t *testing.T, payload []byte, cut, follow int) (*httptest.Server, *hitLog) {
+	t.Helper()
+	hits := &hitLog{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := hits.add(r.Header.Get("Accept"), r.Header.Get("Range"))
+		if n == 1 {
+			hj, ok := w.(http.Hijacker)
+			if !ok {
+				http.Error(w, "hijack unsupported", http.StatusInternalServerError)
+				return
+			}
+			conn, buf, err := hj.Hijack()
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			defer conn.Close()
+			fmt.Fprintf(buf, "HTTP/1.1 200 OK\r\nContent-Length: %d\r\nConnection: close\r\n\r\n", len(payload))
+			_, _ = buf.Write(payload[:cut])
+			_ = buf.Flush()
+			return
+		}
+		if follow == http.StatusOK {
+			w.Header().Set("Content-Length", strconv.Itoa(len(payload)))
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(payload)
+			return
+		}
+		start, ok := rangeStart(r.Header.Get("Range"))
+		if !ok || start > len(payload) {
+			http.Error(w, "bad range", http.StatusBadRequest)
+			return
+		}
+		chunk := payload[start:]
+		end := len(payload) - 1
+		if end < start {
+			end = start
+		}
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, len(payload)))
+		w.Header().Set("Content-Length", strconv.Itoa(len(chunk)))
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write(chunk)
+	}))
+	t.Cleanup(srv.Close)
+	return srv, hits
+}
+
+func rangeStart(header string) (int, bool) {
+	header = strings.TrimSpace(header)
+	header = strings.TrimPrefix(header, "bytes=")
+	if header == "" || strings.HasPrefix(header, "-") {
+		return 0, false
+	}
+	if i := strings.IndexByte(header, '-'); i >= 0 {
+		header = header[:i]
+	}
+	n, err := strconv.Atoi(header)
+	if err != nil || n < 0 {
+		return 0, false
+	}
+	return n, true
+}
+
+func hangServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		<-r.Context().Done()
+	}))
+	t.Cleanup(srv.Close)
+	return srv
 }
 
 func writeZip(t *testing.T, path string, files map[string]string) {
