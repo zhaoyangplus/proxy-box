@@ -1,0 +1,81 @@
+mixed-port: 27890
+allow-lan: false
+bind-address: '127.0.0.1'
+mode: direct
+find-process-mode: always
+external-controller: '127.0.0.1:27891'
+secret: 's3cret'
+dns:
+  enable: false
+profile:
+  store-selected: true
+listeners:
+  - name: 'proxybox-ai-dedicated'
+    type: mixed
+    port: 27892
+    listen: '127.0.0.1'
+    udp: true
+    proxy: '🤖 AI-IDE'
+proxy-groups:
+  - name: 'PROXY'
+    type: select
+    proxies:
+      - '⚡ AUTO'
+      - 'DIRECT'
+  - name: '⚡ AUTO'
+    type: url-test
+    proxies:
+      - 'DIRECT'
+    url: 'https://www.gstatic.com/generate_204'
+    interval: 300
+    lazy: true
+  - name: '🤖 AI-IDE'
+    type: select
+    proxies:
+      - '⚡ AI-Auto'
+      - 'DIRECT'
+    exclude-filter: '(?i)香港|🇭🇰|Hong Kong|港\d|hktj|hkbn|hkt|澳门|🇲🇴|Macau|中国|大陆|🇨🇳|China|俄罗斯|🇷🇺|Russia|(^|[^a-z])(hk|mo|cn|ru)([^a-z]|$)|剩余|流量|到期|官网|套餐|重置|订阅|网址'
+  - name: '⚡ AI-Auto'
+    type: url-test
+    proxies:
+      - 'DIRECT'
+    url: 'https://www.gstatic.com/generate_204'
+    interval: 300
+    lazy: true
+    exclude-filter: '(?i)香港|🇭🇰|Hong Kong|港\d|hktj|hkbn|hkt|澳门|🇲🇴|Macau|中国|大陆|🇨🇳|China|俄罗斯|🇷🇺|Russia|(^|[^a-z])(hk|mo|cn|ru)([^a-z]|$)|剩余|流量|到期|官网|套餐|重置|订阅|网址'
+rules:
+  - 'IP-CIDR,127.0.0.0/8,DIRECT,no-resolve'
+  - 'IP-CIDR6,::1/128,DIRECT,no-resolve'
+  - 'IP-CIDR,10.0.0.0/8,DIRECT,no-resolve'
+  - 'IP-CIDR,172.16.0.0/12,DIRECT,no-resolve'
+  - 'IP-CIDR,192.168.0.0/16,DIRECT,no-resolve'
+  - 'PROCESS-NAME,Cursor.exe,🤖 AI-IDE'
+  - 'PROCESS-NAME,Antigravity.exe,🤖 AI-IDE'
+  - 'PROCESS-NAME,language_server_windows_x64.exe,🤖 AI-IDE'
+  - 'PROCESS-NAME,agy.exe,🤖 AI-IDE'
+  - 'PROCESS-NAME,claude.exe,🤖 AI-IDE'
+  - 'PROCESS-NAME,codex.exe,🤖 AI-IDE'
+  - 'PROCESS-NAME,Codex.exe,🤖 AI-IDE'
+  - 'PROCESS-NAME,codex-plus-plus.exe,🤖 AI-IDE'
+  - 'PROCESS-NAME,ProxyBox.exe,🤖 AI-IDE'
+  - 'PROCESS-NAME,CursorBox.exe,🤖 AI-IDE'
+  - 'DOMAIN-SUFFIX,cursor.sh,🤖 AI-IDE'
+  - 'DOMAIN-SUFFIX,cursor.com,🤖 AI-IDE'
+  - 'DOMAIN-SUFFIX,cursorapi.com,🤖 AI-IDE'
+  - 'DOMAIN-SUFFIX,cursor-cdn.com,🤖 AI-IDE'
+  - 'DOMAIN-SUFFIX,anthropic.com,🤖 AI-IDE'
+  - 'DOMAIN-SUFFIX,claude.ai,🤖 AI-IDE'
+  - 'DOMAIN-SUFFIX,claude.com,🤖 AI-IDE'
+  - 'DOMAIN-SUFFIX,openai.com,🤖 AI-IDE'
+  - 'DOMAIN-SUFFIX,chatgpt.com,🤖 AI-IDE'
+  - 'DOMAIN-SUFFIX,oaistatic.com,🤖 AI-IDE'
+  - 'DOMAIN-SUFFIX,oaiusercontent.com,🤖 AI-IDE'
+  - 'DOMAIN-SUFFIX,antigravity.google,🤖 AI-IDE'
+  - 'DOMAIN-SUFFIX,antigravity-unleash.goog,🤖 AI-IDE'
+  - 'DOMAIN-SUFFIX,generativelanguage.googleapis.com,🤖 AI-IDE'
+  - 'DOMAIN-SUFFIX,cloudcode-pa.googleapis.com,🤖 AI-IDE'
+  - 'DOMAIN-SUFFIX,alkalimakersuite-pa.clients6.google.com,🤖 AI-IDE'
+  - 'DOMAIN-SUFFIX,aistudio.google.com,🤖 AI-IDE'
+  - 'DOMAIN-SUFFIX,ai.google.dev,🤖 AI-IDE'
+  - 'DOMAIN-SUFFIX,googleapis.com,🤖 AI-IDE'
+  - 'MATCH,PROXY'
