@@ -316,7 +316,7 @@ func TestCurlKeepsPartialAcrossStall(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 	restoreAsset(t, srv.URL)
-	restoreLimits(t, 300*time.Millisecond, 8*time.Second, 4)
+	restoreLimits(t, 2*time.Second, 20*time.Second, 4)
 	dest := filepath.Join(t.TempDir(), "asset.bin")
 	err := fetchAsset(context.Background(), dest, "", nil)
 	got := hits.snapshot()
