@@ -22,6 +22,7 @@ import (
 	"proxy-box/internal/detector"
 	"proxy-box/internal/diagnostics"
 	"proxy-box/internal/launcher"
+	"proxy-box/internal/sysproxy"
 	"proxy-box/internal/tray"
 	"proxy-box/internal/updater"
 
@@ -43,6 +44,7 @@ type sseEvent struct {
 	ShouldDiag bool                      `json:"shouldDiag"`
 	Snapshot   *detector.SystemSnapshot  `json:"snapshot,omitempty"`
 	Update     *updater.DownloadProgress `json:"update,omitempty"`
+	Core       *coreEvent                `json:"core,omitempty"`
 }
 
 type sseHub struct {
@@ -157,13 +159,17 @@ func main() {
 		})
 	}
 	defer releaseMutex()
+	_ = sysproxy.RecoverIfStale(false)
 
 	var w webview2.WebView
 	var trayMgr *tray.Manager
 
 	appUpdater := updater.New(appVersion)
 	hub := newSSEHub()
+	rt := newAppRuntime(hub)
+	defer rt.Shutdown()
 	srvURL, err := startLocalAPIServer(hub, appUpdater, func() {
+		rt.Shutdown()
 		releaseMutex()
 		if trayMgr != nil {
 			trayMgr.Cleanup()
@@ -183,6 +189,7 @@ func main() {
 		showMessageBox("Proxy Box 启动失败", "无法启动本地控制服务: "+err.Error(), 0x10)
 		return
 	}
+	go rt.bootCore()
 
 	dataPath := filepath.Join(os.Getenv("LOCALAPPDATA"), "ProxyBox", "WebView2Data")
 	_ = os.MkdirAll(dataPath, 0755)
@@ -247,6 +254,7 @@ func main() {
 			}
 			hub.broadcast(sseEvent{Type: "open_update"})
 		case tray.MenuQuit:
+			rt.Shutdown()
 			trayMgr.Cleanup()
 			if w != nil {
 				w.Terminate()
@@ -256,6 +264,7 @@ func main() {
 		return configstore.LoadConfig().MinimizeToTray
 	})
 
+	trayMgr.SetShutdown(rt.Shutdown)
 	trayMgr.Start("Proxy Box - 本地代理工作台")
 	defer trayMgr.Cleanup()
 
@@ -371,7 +380,10 @@ func startLiveWatcher(hub *sseHub, trayMgr *tray.Manager) {
 					break
 				}
 			}
-			if hasManaged {
+			subs, subErr := configstore.LoadSubscriptions()
+			if currClient.ID == "builtin" && (subErr != nil || !detector.IDESyncAllowed(currClient, subs)) {
+				reasons = append(reasons, "内置内核还没有可用订阅或节点，未改写 IDE 配置")
+			} else if hasManaged {
 				_, _ = configurator.ApplyAll(configurator.ApplyOptions{
 					ProxyURL:    currClient.ProxyURL,
 					Cursor:      true,

@@ -17,6 +17,7 @@ const (
 	wmLButtonUp     = 0x0202
 	wmLButtonDblClk = 0x0203
 	wmRButtonUp     = 0x0205
+	wmEndSession    = 0x0016
 
 	nifMessage = 0x00000001
 	nifIcon    = 0x00000002
@@ -39,13 +40,13 @@ const (
 )
 
 const (
-	MenuShowWindow       = 1001
-	MenuLaunchAntigrav   = 1002
-	MenuLaunchCursor     = 1003
-	MenuApplyAll         = 1004
-	MenuRestoreAll       = 1005
-	MenuCheckUpdate      = 1006
-	MenuQuit             = 1009
+	MenuShowWindow     = 1001
+	MenuLaunchAntigrav = 1002
+	MenuLaunchCursor   = 1003
+	MenuApplyAll       = 1004
+	MenuRestoreAll     = 1005
+	MenuCheckUpdate    = 1006
+	MenuQuit           = 1009
 )
 
 var (
@@ -54,31 +55,31 @@ var (
 	gdi32    = windows.NewLazySystemDLL("gdi32.dll")
 	kernel32 = windows.NewLazySystemDLL("kernel32.dll")
 
-	procRegisterClassExW     = user32.NewProc("RegisterClassExW")
-	procCreateWindowExW      = user32.NewProc("CreateWindowExW")
-	procDefWindowProcW       = user32.NewProc("DefWindowProcW")
-	procGetMessageW          = user32.NewProc("GetMessageW")
-	procTranslateMessage     = user32.NewProc("TranslateMessage")
-	procDispatchMessageW     = user32.NewProc("DispatchMessageW")
-	procPostMessageW         = user32.NewProc("PostMessageW")
-	procPostQuitMessage      = user32.NewProc("PostQuitMessage")
-	procCreatePopupMenu      = user32.NewProc("CreatePopupMenu")
-	procAppendMenuW          = user32.NewProc("AppendMenuW")
-	procTrackPopupMenu       = user32.NewProc("TrackPopupMenu")
-	procDestroyMenu          = user32.NewProc("DestroyMenu")
-	procGetCursorPos         = user32.NewProc("GetCursorPos")
-	procSetForegroundWindow  = user32.NewProc("SetForegroundWindow")
-	procShowWindow           = user32.NewProc("ShowWindow")
-	procIsWindowVisible      = user32.NewProc("IsWindowVisible")
-	procSetWindowLongPtrW    = user32.NewProc("SetWindowLongPtrW")
-	procCallWindowProcW      = user32.NewProc("CallWindowProcW")
-	procCreateIconIndirect   = user32.NewProc("CreateIconIndirect")
-	procSendMessageW         = user32.NewProc("SendMessageW")
-	procShellNotifyIconW     = shell32.NewProc("Shell_NotifyIconW")
-	procCreateBitmap         = gdi32.NewProc("CreateBitmap")
-	procCreateDIBSection     = gdi32.NewProc("CreateDIBSection")
-	procDeleteObject         = gdi32.NewProc("DeleteObject")
-	procGetModuleHandleW     = kernel32.NewProc("GetModuleHandleW")
+	procRegisterClassExW    = user32.NewProc("RegisterClassExW")
+	procCreateWindowExW     = user32.NewProc("CreateWindowExW")
+	procDefWindowProcW      = user32.NewProc("DefWindowProcW")
+	procGetMessageW         = user32.NewProc("GetMessageW")
+	procTranslateMessage    = user32.NewProc("TranslateMessage")
+	procDispatchMessageW    = user32.NewProc("DispatchMessageW")
+	procPostMessageW        = user32.NewProc("PostMessageW")
+	procPostQuitMessage     = user32.NewProc("PostQuitMessage")
+	procCreatePopupMenu     = user32.NewProc("CreatePopupMenu")
+	procAppendMenuW         = user32.NewProc("AppendMenuW")
+	procTrackPopupMenu      = user32.NewProc("TrackPopupMenu")
+	procDestroyMenu         = user32.NewProc("DestroyMenu")
+	procGetCursorPos        = user32.NewProc("GetCursorPos")
+	procSetForegroundWindow = user32.NewProc("SetForegroundWindow")
+	procShowWindow          = user32.NewProc("ShowWindow")
+	procIsWindowVisible     = user32.NewProc("IsWindowVisible")
+	procSetWindowLongPtrW   = user32.NewProc("SetWindowLongPtrW")
+	procCallWindowProcW     = user32.NewProc("CallWindowProcW")
+	procCreateIconIndirect  = user32.NewProc("CreateIconIndirect")
+	procSendMessageW        = user32.NewProc("SendMessageW")
+	procShellNotifyIconW    = shell32.NewProc("Shell_NotifyIconW")
+	procCreateBitmap        = gdi32.NewProc("CreateBitmap")
+	procCreateDIBSection    = gdi32.NewProc("CreateDIBSection")
+	procDeleteObject        = gdi32.NewProc("DeleteObject")
+	procGetModuleHandleW    = kernel32.NewProc("GetModuleHandleW")
 )
 
 type wndClassExW struct {
@@ -157,6 +158,7 @@ type Manager struct {
 	hIcon       uintptr
 	onAction    func(menuID int)
 	shouldHide  func() bool
+	onShutdown  func()
 	quitting    bool
 }
 
@@ -169,6 +171,15 @@ func NewManager(onAction func(menuID int), shouldHideOnClose func() bool) *Manag
 	}
 	globalMgr = m
 	return m
+}
+
+// SetShutdown runs when the window really closes or Windows ends the session.
+// Hiding to the tray does not call it.
+func (m *Manager) SetShutdown(fn func()) {
+	if m == nil {
+		return
+	}
+	m.onShutdown = fn
 }
 
 // Start launches the Win32 system tray icon and message pump on its own OS thread.
@@ -282,13 +293,26 @@ func (m *Manager) Cleanup() {
 	}
 }
 
+func callShutdown() {
+	if globalMgr != nil && globalMgr.onShutdown != nil {
+		globalMgr.onShutdown()
+	}
+}
+
 func mainSubclassWndProc(hwnd uintptr, uMsg uint32, wParam, lParam uintptr) uintptr {
+	if globalMgr != nil && uMsg == wmEndSession {
+		if wParam != 0 {
+			callShutdown()
+		}
+		return 0
+	}
 	if globalMgr != nil && uMsg == wmClose && !globalMgr.quitting {
 		if globalMgr.shouldHide != nil && globalMgr.shouldHide() {
 			procShowWindow.Call(hwnd, swHide)
 			globalMgr.NotifyBalloon("Proxy Box 仍在后台运行", "双击托盘图标可重新打开面板，右键可快速免 TUN 启动 IDE")
 			return 0
 		}
+		callShutdown()
 	}
 	if globalMgr != nil && globalMgr.origWndProc != 0 {
 		ret, _, _ := procCallWindowProcW.Call(globalMgr.origWndProc, hwnd, uintptr(uMsg), wParam, lParam)
@@ -300,6 +324,11 @@ func mainSubclassWndProc(hwnd uintptr, uMsg uint32, wParam, lParam uintptr) uint
 
 func trayWndProc(hwnd uintptr, uMsg uint32, wParam, lParam uintptr) uintptr {
 	switch uMsg {
+	case wmEndSession:
+		if wParam != 0 {
+			callShutdown()
+		}
+		return 0
 	case wmTrayCallback:
 		switch uint32(lParam) {
 		case wmLButtonUp, wmLButtonDblClk:
