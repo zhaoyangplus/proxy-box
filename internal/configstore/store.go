@@ -258,7 +258,8 @@ type CoreSettings struct {
 	SystemProxy     bool   `json:"systemProxy"`
 }
 
-// LoadCoreSettings reads core.json. The first call creates a file with default ports and a random Secret.
+// LoadCoreSettings reads core.json. A missing file is created with default ports and a random Secret.
+// An existing file fills zero ports, an empty mode, and an empty Secret, and is rewritten only when a field was filled.
 func LoadCoreSettings() (CoreSettings, error) {
 	mu.Lock()
 	defer mu.Unlock()
@@ -287,6 +288,20 @@ func LoadCoreSettings() (CoreSettings, error) {
 	}
 	var cfg CoreSettings
 	if err := json.Unmarshal(data, &cfg); err != nil {
+		return CoreSettings{}, err
+	}
+	filled, err := fillCoreDefaults(&cfg)
+	if err != nil {
+		return CoreSettings{}, err
+	}
+	if !filled {
+		return cfg, nil
+	}
+	raw, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return CoreSettings{}, err
+	}
+	if err := WriteAtomic(path, raw); err != nil {
 		return CoreSettings{}, err
 	}
 	return cfg, nil
@@ -382,17 +397,38 @@ func subscriptionsPath() (string, error) {
 }
 
 func newCoreSettings() (CoreSettings, error) {
-	secret, err := randomSecret()
-	if err != nil {
-		return CoreSettings{}, err
+	var cfg CoreSettings
+	_, err := fillCoreDefaults(&cfg)
+	return cfg, err
+}
+
+func fillCoreDefaults(cfg *CoreSettings) (bool, error) {
+	filled := false
+	if cfg.MixedPort == 0 {
+		cfg.MixedPort = defaultMixedPort
+		filled = true
 	}
-	return CoreSettings{
-		MixedPort:       defaultMixedPort,
-		ControllerPort:  defaultControllerPort,
-		AIDedicatedPort: defaultAIPort,
-		Secret:          secret,
-		Mode:            defaultMode,
-	}, nil
+	if cfg.ControllerPort == 0 {
+		cfg.ControllerPort = defaultControllerPort
+		filled = true
+	}
+	if cfg.AIDedicatedPort == 0 {
+		cfg.AIDedicatedPort = defaultAIPort
+		filled = true
+	}
+	if cfg.Mode == "" {
+		cfg.Mode = defaultMode
+		filled = true
+	}
+	if cfg.Secret == "" {
+		secret, err := randomSecret()
+		if err != nil {
+			return false, err
+		}
+		cfg.Secret = secret
+		filled = true
+	}
+	return filled, nil
 }
 
 func randomSecret() (string, error) {

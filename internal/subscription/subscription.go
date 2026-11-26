@@ -139,7 +139,7 @@ func fetch(ctx context.Context, rawURL, ua, proxy string) ([]byte, http.Header, 
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, nil, &statusError{code: resp.StatusCode}
+		return nil, nil, &statusError{code: resp.StatusCode, viaProxy: proxy != ""}
 	}
 	body, err := readLimited(resp.Body)
 	if err != nil {
@@ -159,7 +159,10 @@ func readLimited(r io.Reader) ([]byte, error) {
 	return body, nil
 }
 
-type statusError struct{ code int }
+type statusError struct {
+	code     int
+	viaProxy bool
+}
 
 func (e *statusError) Error() string {
 	return fmt.Sprintf("subscription status %d", e.code)
@@ -175,7 +178,12 @@ func canTryNext(err error) bool {
 	}
 	var status *statusError
 	if errors.As(err, &status) {
-		return false
+		switch status.code {
+		case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout, http.StatusProxyAuthRequired:
+			return status.viaProxy
+		default:
+			return false
+		}
 	}
 	var big *bodyTooLarge
 	if errors.As(err, &big) {
@@ -192,7 +200,8 @@ func parseUsage(header http.Header) *configstore.SubUsage {
 	if raw == "" {
 		return nil
 	}
-	usage := &configstore.SubUsage{}
+	var usage configstore.SubUsage
+	parsed := false
 	for _, part := range strings.Split(raw, ";") {
 		key, val, ok := strings.Cut(strings.TrimSpace(part), "=")
 		if !ok {
@@ -211,14 +220,21 @@ func parseUsage(header http.Header) *configstore.SubUsage {
 			usage.Total = n
 		case "expire":
 			usage.Expire = n
+		default:
+			continue
 		}
+		parsed = true
 	}
-	return usage
+	if !parsed {
+		return nil
+	}
+	return &usage
 }
 
 // normalize keeps Clash YAML with a non-empty proxies list.
 // Every other accepted body becomes one line of standard base64.
 func normalize(body []byte) ([]byte, int, error) {
+	body = bytes.TrimPrefix(body, []byte("\xEF\xBB\xBF"))
 	if len(bytes.TrimSpace(body)) == 0 {
 		return nil, 0, errors.New("subscription body is empty")
 	}

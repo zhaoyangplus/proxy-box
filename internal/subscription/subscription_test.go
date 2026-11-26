@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -151,6 +152,125 @@ func TestUpdateAllSchemes(t *testing.T) {
 	if res.Usage != nil {
 		t.Fatal("missing usage header returned a value")
 	}
+}
+
+func TestUpdateAcceptsLeadingBOM(t *testing.T) {
+	bom := []byte("\xEF\xBB\xBF")
+	text, canonical := uriFixture(t)
+	yamlBody := []byte("proxies:\n  - name: a\n    type: vmess\n  - name: b\n    type: ss\n")
+
+	t.Run("yaml", func(t *testing.T) {
+		res, path, _ := runUpdate(t, http.StatusOK, "", "", append(append([]byte{}, bom...), yamlBody...), nil)
+		if res.NodeCount != 2 {
+			t.Fatalf("nodes %d", res.NodeCount)
+		}
+		assertFile(t, path, yamlBody)
+	})
+	t.Run("base64", func(t *testing.T) {
+		res, path, _ := runUpdate(t, http.StatusOK, "", "", append(append([]byte{}, bom...), canonical...), nil)
+		if res.NodeCount != 2 {
+			t.Fatalf("nodes %d", res.NodeCount)
+		}
+		assertFile(t, path, canonical)
+		if decodeFile(t, path) != text {
+			t.Fatal("bom base64 did not round-trip")
+		}
+	})
+	t.Run("plain", func(t *testing.T) {
+		res, path, _ := runUpdate(t, http.StatusOK, "", "", append(append([]byte{}, bom...), text...), nil)
+		if res.NodeCount != 2 {
+			t.Fatalf("nodes %d", res.NodeCount)
+		}
+		assertFile(t, path, canonical)
+		if decodeFile(t, path) != text {
+			t.Fatal("bom plain list did not round-trip")
+		}
+	})
+}
+
+func TestUpdateUsageHeaderWithoutKnownFields(t *testing.T) {
+	_, canonical := uriFixture(t)
+	t.Run("unknown keys", func(t *testing.T) {
+		res, path, _ := runUpdate(t, http.StatusOK, "foo=1; bar=2", "", canonical, nil)
+		if res.Usage != nil || res.NodeCount != 2 {
+			t.Fatalf("result %+v", res)
+		}
+		assertFile(t, path, canonical)
+	})
+	t.Run("zero", func(t *testing.T) {
+		res, _, _ := runUpdate(t, http.StatusOK, "upload=0", "", canonical, nil)
+		if !usageEqual(res.Usage, &configstore.SubUsage{}) {
+			t.Fatalf("usage %+v", res.Usage)
+		}
+	})
+}
+
+func TestUpdateProxyStatusFallback(t *testing.T) {
+	_, canonical := uriFixture(t)
+	for _, code := range []int{
+		http.StatusBadGateway,
+		http.StatusServiceUnavailable,
+		http.StatusGatewayTimeout,
+		http.StatusProxyAuthRequired,
+	} {
+		t.Run(http.StatusText(code), func(t *testing.T) {
+			res, err, path, hits, originHits := runViaProxies(t, http.StatusOK, canonical, []int{code})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.NodeCount != 2 {
+				t.Fatalf("nodes %d", res.NodeCount)
+			}
+			assertFile(t, path, canonical)
+			if hits[0] == 0 || originHits == 0 {
+				t.Fatalf("hits %v origin %d", hits, originHits)
+			}
+		})
+	}
+
+	t.Run("next proxy", func(t *testing.T) {
+		res, err, path, hits, originHits := runViaProxies(t, http.StatusOK, canonical, []int{http.StatusBadGateway, http.StatusProxyAuthRequired})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.NodeCount != 2 {
+			t.Fatalf("nodes %d", res.NodeCount)
+		}
+		assertFile(t, path, canonical)
+		if hits[0] == 0 || hits[1] == 0 || originHits == 0 {
+			t.Fatalf("hits %v origin %d", hits, originHits)
+		}
+	})
+
+	t.Run("404", func(t *testing.T) {
+		_, err, path, hits, originHits := runViaProxies(t, http.StatusOK, canonical, []int{http.StatusNotFound, http.StatusOK})
+		if err == nil {
+			t.Fatal("expected error")
+		}
+		var status *statusError
+		if !errors.As(err, &status) || status.code != http.StatusNotFound || !status.viaProxy {
+			t.Fatalf("err %v", err)
+		}
+		assertFile(t, path, []byte(oldBody))
+		if hits[0] == 0 || hits[1] != 0 || originHits != 0 {
+			t.Fatalf("hits %v origin %d", hits, originHits)
+		}
+	})
+
+	t.Run("direct status", func(t *testing.T) {
+		_, err, path, hits, originHits := runViaProxies(t, http.StatusNotFound, canonical, []int{http.StatusBadGateway})
+		if err == nil {
+			t.Fatal("expected error")
+		}
+		var status *statusError
+		if !errors.As(err, &status) || status.code != http.StatusNotFound || status.viaProxy {
+			t.Fatalf("err %v", err)
+		}
+		assertFile(t, path, []byte(oldBody))
+		if hits[0] == 0 || originHits == 0 {
+			t.Fatalf("hits %v origin %d", hits, originHits)
+		}
+	})
 }
 
 func TestUpdateProxyFallback(t *testing.T) {
@@ -326,6 +446,45 @@ func runUpdate(t *testing.T, status int, header, filter string, body []byte, edi
 	}
 	assertNoTemps(t, dir)
 	return res, path, ua
+}
+
+func runViaProxies(t *testing.T, originStatus int, body []byte, proxyStatuses []int) (UpdateResult, error, string, []int32, int32) {
+	t.Helper()
+	var originHits int32
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&originHits, 1)
+		if originStatus != 0 {
+			w.WriteHeader(originStatus)
+		}
+		_, _ = w.Write(body)
+	}))
+	t.Cleanup(origin.Close)
+
+	proxyHits := make([]int32, len(proxyStatuses))
+	proxies := make([]string, len(proxyStatuses))
+	for i, code := range proxyStatuses {
+		i, code := i, code
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			atomic.AddInt32(&proxyHits[i], 1)
+			w.WriteHeader(code)
+		}))
+		t.Cleanup(srv.Close)
+		proxies[i] = srv.URL
+	}
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sub_1.txt")
+	if err := os.WriteFile(path, []byte(oldBody), 0644); err != nil {
+		t.Fatal(err)
+	}
+	res, err := Update(context.Background(), configstore.Subscription{
+		ID:      "sub_1",
+		Name:    "demo",
+		URL:     origin.URL,
+		Enabled: true,
+	}, proxies, dir)
+	assertNoTemps(t, dir)
+	return res, err, path, proxyHits, originHits
 }
 
 func runFail(t *testing.T, status int, body []byte) (error, string) {

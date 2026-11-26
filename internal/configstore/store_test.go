@@ -137,6 +137,114 @@ func TestLoadCoreSettingsCreatesStableSecret(t *testing.T) {
 	}
 }
 
+func TestLoadCoreSettingsFillsZeroFields(t *testing.T) {
+	t.Run("partial", func(t *testing.T) {
+		dir := useDir(t)
+		path := filepath.Join(dir, "core.json")
+		original := []byte("{\"enabled\":true,\"mixedPort\":27901,\"secret\":\"kept-secret\",\"bypassCN\":true}")
+		if err := os.WriteFile(path, original, 0644); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := LoadCoreSettings()
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := CoreSettings{
+			Enabled:         true,
+			MixedPort:       27901,
+			ControllerPort:  27891,
+			AIDedicatedPort: 27892,
+			Secret:          "kept-secret",
+			Mode:            "rule",
+			BypassCN:        true,
+		}
+		if cfg != want {
+			t.Fatalf("core = %+v", cfg)
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Equal(raw, original) {
+			t.Fatal("partial core.json was not rewritten")
+		}
+		var disk CoreSettings
+		if err := json.Unmarshal(raw, &disk); err != nil {
+			t.Fatal(err)
+		}
+		if disk != want {
+			t.Fatalf("disk = %+v", disk)
+		}
+		again, err := LoadCoreSettings()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if again != want {
+			t.Fatalf("second = %+v", again)
+		}
+		raw2, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(raw, raw2) {
+			t.Fatal("second load rewrote core.json")
+		}
+	})
+
+	t.Run("empty secret", func(t *testing.T) {
+		dir := useDir(t)
+		path := filepath.Join(dir, "core.json")
+		original := []byte("{\"mixedPort\":27890,\"controllerPort\":27891,\"aiDedicatedPort\":27892,\"mode\":\"rule\"}")
+		if err := os.WriteFile(path, original, 0644); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := LoadCoreSettings()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Secret == "" || cfg.MixedPort != 27890 || cfg.Mode != "rule" {
+			t.Fatalf("core = %+v", cfg)
+		}
+		again, err := LoadCoreSettings()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if again.Secret != cfg.Secret {
+			t.Fatalf("secret changed %q -> %q", cfg.Secret, again.Secret)
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Contains(raw, []byte(cfg.Secret)) {
+			t.Fatal("core.json does not contain the generated secret")
+		}
+	})
+
+	t.Run("complete", func(t *testing.T) {
+		dir := useDir(t)
+		path := filepath.Join(dir, "core.json")
+		original := []byte("{\"enabled\":true,\"mixedPort\":27901,\"controllerPort\":27891,\"aiDedicatedPort\":27892,\"secret\":\"kept-secret\",\"mode\":\"direct\",\"bypassCN\":true,\"systemProxy\":false}")
+		if err := os.WriteFile(path, original, 0644); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := LoadCoreSettings()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.MixedPort != 27901 || cfg.Mode != "direct" || cfg.Secret != "kept-secret" || !cfg.Enabled || !cfg.BypassCN || cfg.SystemProxy {
+			t.Fatalf("core = %+v", cfg)
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(raw, original) {
+			t.Fatalf("complete core.json was rewritten: %s", raw)
+		}
+	})
+}
+
 func TestConcurrentFirstLoadSharesSecret(t *testing.T) {
 	useDir(t)
 	const n = 8
