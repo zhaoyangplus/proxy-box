@@ -23,6 +23,10 @@ const (
 	AIGroupName = "🤖 AI-IDE"
 	AIAutoName  = "⚡ AI-Auto"
 	TestURL     = "https://www.gstatic.com/generate_204"
+	// groupDelayTimeoutMs is sent as the /group/<name>/delay timeout.
+	// A blackhole group waits this long, and the list call also does two
+	// controller reads, so the value stays under the 3.5s budget.
+	groupDelayTimeoutMs = 3000
 )
 
 var (
@@ -45,6 +49,9 @@ type Client struct {
 	secret   string
 	usePipe  bool
 	client   *http.Client
+
+	mu           sync.Mutex
+	nodeProvider map[string]string // node name -> provider name
 }
 
 // LiveNodeStatus summarizes the currently active proxy group and resolved leaf node in Mihomo.
@@ -62,7 +69,7 @@ type LiveNodeStatus struct {
 	ExternalNode    string `json:"externalNode,omitempty"`
 }
 
-// NodeOption represents one selectable proxy node inside CursorBox's independent 🤖 AI-IDE group.
+// NodeOption is one selectable proxy in a Mihomo selector group.
 type NodeOption struct {
 	Name       string `json:"name"`
 	Type       string `json:"type"`
@@ -73,6 +80,8 @@ type NodeOption struct {
 	IsAuto     bool   `json:"isAuto"`
 	Selected   bool   `json:"selected"`
 	ResolvedTo string `json:"resolvedTo,omitempty"`
+	Provider   string `json:"provider,omitempty"`
+	Untested   bool   `json:"untested"`
 }
 
 // NodeListResult is returned to the UI's independent node picker modal.
@@ -97,18 +106,25 @@ type OptimizeResult struct {
 }
 
 type proxyItem struct {
-	Name    string   `json:"name"`
-	Type    string   `json:"type"`
-	Now     string   `json:"now"`
-	All     []string `json:"all"`
-	Alive   bool     `json:"alive"`
-	History []struct {
+	Name         string   `json:"name"`
+	Type         string   `json:"type"`
+	Now          string   `json:"now"`
+	All          []string `json:"all"`
+	Alive        bool     `json:"alive"`
+	ProviderName string   `json:"provider-name,omitempty"`
+	History      []struct {
 		Delay int `json:"delay"`
 	} `json:"history"`
 }
 
 type proxiesResponse struct {
 	Proxies map[string]proxyItem `json:"proxies"`
+}
+
+type providersResponse struct {
+	Providers map[string]struct {
+		Proxies []proxyItem `json:"proxies"`
+	} `json:"providers"`
 }
 
 func openNamedPipe(ctx context.Context, pipePath string) (windows.Handle, error) {
@@ -270,7 +286,58 @@ func (c *Client) getProxies(ctx context.Context) (map[string]proxyItem, error) {
 	if err := json.Unmarshal(data, &pr); err != nil {
 		return nil, err
 	}
+	if pr.Proxies == nil {
+		pr.Proxies = map[string]proxyItem{}
+	}
+	names := map[string]string{}
+	if pdata, pstatus, perr := c.doRequest(ctx, http.MethodGet, "/providers/proxies", nil); perr == nil && pstatus >= 200 && pstatus < 300 {
+		pr.Proxies, names = mergeProviderProxies(pr.Proxies, pdata)
+	}
+	c.setNodeProviders(names)
 	return pr.Proxies, nil
+}
+
+func mergeProviderProxies(proxies map[string]proxyItem, body []byte) (map[string]proxyItem, map[string]string) {
+	names := map[string]string{}
+	var resp providersResponse
+	if json.Unmarshal(body, &resp) != nil || len(resp.Providers) == 0 {
+		return proxies, names
+	}
+	if proxies == nil {
+		proxies = map[string]proxyItem{}
+	}
+	for _, prov := range resp.Providers {
+		for i := range prov.Proxies {
+			item := prov.Proxies[i]
+			if item.Name == "" {
+				continue
+			}
+			if item.ProviderName != "" {
+				names[item.Name] = item.ProviderName
+			}
+			if exist, ok := proxies[item.Name]; ok {
+				if exist.ProviderName == "" && item.ProviderName != "" {
+					exist.ProviderName = item.ProviderName
+					proxies[item.Name] = exist
+				}
+				continue
+			}
+			proxies[item.Name] = item
+		}
+	}
+	return proxies, names
+}
+
+func (c *Client) setNodeProviders(names map[string]string) {
+	c.mu.Lock()
+	c.nodeProvider = names
+	c.mu.Unlock()
+}
+
+func (c *Client) lookupProvider(nodeName string) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.nodeProvider[nodeName]
 }
 
 func (c *Client) selectProxy(ctx context.Context, groupName, targetName string) error {
@@ -291,12 +358,22 @@ func (c *Client) testGroupDelay(ctx context.Context, groupName string, timeoutMs
 	if err != nil {
 		return nil, err
 	}
+	// Every node timed out. Mihomo answers 504 and omits the map.
+	if status == http.StatusGatewayTimeout {
+		return map[string]int{}, nil
+	}
 	if status < 200 || status >= 300 {
 		return nil, fmt.Errorf("群组测速返回 HTTP %d", status)
 	}
-	var delays map[string]int
+	delays := map[string]int{}
+	if len(bytes.TrimSpace(data)) == 0 {
+		return delays, nil
+	}
 	if err := json.Unmarshal(data, &delays); err != nil {
 		return nil, err
+	}
+	if delays == nil {
+		delays = map[string]int{}
 	}
 	return delays, nil
 }
@@ -304,9 +381,32 @@ func (c *Client) testGroupDelay(ctx context.Context, groupName string, timeoutMs
 func (c *Client) testSingleNodeDelay(ctx context.Context, nodeName string, timeoutMs int) int {
 	q := fmt.Sprintf("/proxies/%s/delay?url=%s&timeout=%d", url.PathEscape(nodeName), url.QueryEscape(TestURL), timeoutMs)
 	data, status, err := c.doRequest(ctx, http.MethodGet, q, nil)
-	if err != nil || status < 200 || status >= 300 {
+	if err != nil {
 		return 0
 	}
+	if status == http.StatusNotFound {
+		if provider := c.lookupProvider(nodeName); provider != "" {
+			return c.testProviderNodeDelay(ctx, provider, nodeName, timeoutMs)
+		}
+		return 0
+	}
+	if status < 200 || status >= 300 {
+		return 0
+	}
+	return decodeDelay(data)
+}
+
+func (c *Client) testProviderNodeDelay(ctx context.Context, provider, nodeName string, timeoutMs int) int {
+	q := fmt.Sprintf("/providers/proxies/%s/%s/healthcheck?url=%s&timeout=%d",
+		url.PathEscape(provider), url.PathEscape(nodeName), url.QueryEscape(TestURL), timeoutMs)
+	data, status, err := c.doRequest(ctx, http.MethodGet, q, nil)
+	if err != nil || status != http.StatusOK {
+		return 0
+	}
+	return decodeDelay(data)
+}
+
+func decodeDelay(data []byte) int {
 	var res struct {
 		Delay int `json:"delay"`
 	}
@@ -325,6 +425,54 @@ func (c *Client) ReloadConfig() bool {
 	defer cancel()
 	_, status, err := c.doRequest(ctx, http.MethodPut, "/configs?force=true", []byte(`{"path":""}`))
 	return err == nil && status >= 200 && status < 300
+}
+
+// ReloadConfigPath hot-reloads an explicit config file. Mihomo keeps the same process.
+func (c *Client) ReloadConfigPath(configPath string) error {
+	if !c.Available() {
+		return fmt.Errorf("未连接到 Mihomo 控制接口")
+	}
+	payload, err := json.Marshal(map[string]string{"path": configPath})
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	_, status, err := c.doRequest(ctx, http.MethodPut, "/configs?force=true", payload)
+	if err != nil {
+		return err
+	}
+	if status < 200 || status >= 300 {
+		return fmt.Errorf("重载配置失败 (HTTP %d)", status)
+	}
+	return nil
+}
+
+// PatchMode switches rule, global, or direct without dropping open connections.
+func (c *Client) PatchMode(mode string) error {
+	if !c.Available() {
+		return fmt.Errorf("未连接到 Mihomo 控制接口")
+	}
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	switch mode {
+	case "rule", "global", "direct":
+	default:
+		return fmt.Errorf("不支持的模式 %s", mode)
+	}
+	payload, err := json.Marshal(map[string]string{"mode": mode})
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	_, status, err := c.doRequest(ctx, http.MethodPatch, "/configs", payload)
+	if err != nil {
+		return err
+	}
+	if status < 200 || status >= 300 {
+		return fmt.Errorf("切换模式失败 (HTTP %d)", status)
+	}
+	return nil
 }
 
 // GetLiveStatus inspects Mihomo's active group, resolves nested groups to the actual leaf node,
@@ -393,6 +541,11 @@ func (c *Client) GetLiveStatus() LiveNodeStatus {
 // ListAINodes returns all selectable nodes in CursorBox's isolated 🤖 AI-IDE group
 // along with the external proxy client's own main group/node so the user can see both are independent.
 func (c *Client) ListAINodes(runDelayTest bool) (*NodeListResult, error) {
+	return c.ListGroupNodes(AIGroupName, runDelayTest)
+}
+
+// ListGroupNodes lists one selector group. 🤖 AI-IDE is probed through ⚡ AI-Auto when that group exists.
+func (c *Client) ListGroupNodes(groupName string, runDelayTest bool) (*NodeListResult, error) {
 	if !c.Available() {
 		return nil, fmt.Errorf("未连接到 Mihomo 控制接口，请确认代理软件已运行")
 	}
@@ -403,31 +556,34 @@ func (c *Client) ListAINodes(runDelayTest bool) (*NodeListResult, error) {
 	if err != nil {
 		return nil, err
 	}
-
-	grp, hasAI := proxies[AIGroupName]
-	if !hasAI {
-		return nil, fmt.Errorf("当前配置尚未启用独立分组 %s，请先点击「一键配置全部应用」并在代理软件刷新订阅", AIGroupName)
+	grp, ok := proxies[groupName]
+	if !ok {
+		if groupName == AIGroupName {
+			return nil, fmt.Errorf("当前配置尚未启用独立分组 %s，请先点击「一键配置全部应用」并在代理软件刷新订阅", AIGroupName)
+		}
+		return nil, fmt.Errorf("代理组 %s 不存在", groupName)
 	}
 
 	var freshDelays map[string]int
 	if runDelayTest {
-		if _, hasAuto := proxies[AIAutoName]; hasAuto {
-			if d, err := c.testGroupDelay(ctx, AIAutoName, 3200); err == nil {
-				freshDelays = d
-			}
+		if d, err := c.testGroupDelay(ctx, delayProbeGroup(proxies, groupName), groupDelayTimeoutMs); err == nil {
+			freshDelays = d
 		}
-		// Refresh proxies snapshot after delay test to get updated history & ⚡ AI-Auto.now
 		if updated, err := c.getProxies(ctx); err == nil && len(updated) > 0 {
 			proxies = updated
-			grp = proxies[AIGroupName]
+			grp = proxies[groupName]
 		}
 	}
 
-	resolvedNow, _ := resolveLeafNode(proxies, AIGroupName, 6)
+	resolvedNow, _ := resolveLeafNode(proxies, groupName, 6)
 	extGroup := pickExternalGroup(proxies)
 	extNode := ""
 	if extGroup != "" {
 		extNode, _ = resolveLeafNode(proxies, extGroup, 6)
+	}
+	isolated := ""
+	if _, hasAI := proxies[AIGroupName]; hasAI {
+		isolated = AIGroupName
 	}
 
 	nodes := make([]NodeOption, 0, len(grp.All))
@@ -438,6 +594,15 @@ func (c *Client) ListAINodes(runDelayTest bool) (*NodeListResult, error) {
 		}
 		if member == AIAutoName {
 			rName, rDelay := resolveLeafNode(proxies, AIAutoName, 4)
+			untested := rDelay <= 0 && freshDelays == nil && len(p.History) == 0
+			if freshDelays != nil {
+				if d := freshDelays[rName]; d > 0 {
+					rDelay = d
+				} else {
+					rDelay = 0
+				}
+				untested = false
+			}
 			nodes = append(nodes, NodeOption{
 				Name:       AIAutoName,
 				Type:       "URLTest",
@@ -446,6 +611,7 @@ func (c *Client) ListAINodes(runDelayTest bool) (*NodeListResult, error) {
 				Compliant:  true,
 				Preferred:  true,
 				IsAuto:     true,
+				Untested:   untested,
 				Selected:   grp.Now == AIAutoName,
 				ResolvedTo: rName,
 			})
@@ -454,13 +620,7 @@ func (c *Client) ListAINodes(runDelayTest bool) (*NodeListResult, error) {
 		if isGroupType(p.Type) {
 			continue
 		}
-		delay := 0
-		if freshDelays != nil {
-			delay = freshDelays[member]
-		}
-		if delay == 0 && len(p.History) > 0 {
-			delay = p.History[len(p.History)-1].Delay
-		}
+		delay, untested := probeDelay(member, p, freshDelays)
 		nodes = append(nodes, NodeOption{
 			Name:      member,
 			Type:      p.Type,
@@ -470,6 +630,8 @@ func (c *Client) ListAINodes(runDelayTest bool) (*NodeListResult, error) {
 			Preferred: IsPreferredNodeName(member),
 			IsAuto:    false,
 			Selected:  grp.Now == member,
+			Provider:  p.ProviderName,
+			Untested:  untested,
 		})
 	}
 
@@ -492,7 +654,7 @@ func (c *Client) ListAINodes(runDelayTest bool) (*NodeListResult, error) {
 	})
 
 	return &NodeListResult{
-		IsolatedGroup: AIGroupName,
+		IsolatedGroup: isolated,
 		CurrentSelect: grp.Now,
 		ResolvedNode:  resolvedNow,
 		ExternalGroup: extGroup,
@@ -504,37 +666,72 @@ func (c *Client) ListAINodes(runDelayTest bool) (*NodeListResult, error) {
 // SelectAINode switches ONLY CursorBox's isolated 🤖 AI-IDE group to targetNode,
 // strictly never touching the external proxy software's own main group.
 func (c *Client) SelectAINode(targetNode string) (*LiveNodeStatus, error) {
+	if err := c.SelectGroupNode(AIGroupName, targetNode); err != nil {
+		return nil, err
+	}
+	live := c.GetLiveStatus()
+	return &live, nil
+}
+
+// SelectGroupNode switches one selector group. Callers pass PROXY, 🤖 AI-IDE, or GLOBAL.
+func (c *Client) SelectGroupNode(groupName, targetNode string) error {
 	if !c.Available() {
-		return nil, fmt.Errorf("未连接到 Mihomo 控制接口")
+		return fmt.Errorf("未连接到 Mihomo 控制接口")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
 
 	proxies, err := c.getProxies(ctx)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	grp, hasAI := proxies[AIGroupName]
-	if !hasAI {
-		return nil, fmt.Errorf("尚未启用独立分组 %s，为避免影响外部代理软件节点，请先注入分流脚本并刷新订阅", AIGroupName)
+	grp, ok := proxies[groupName]
+	if !ok {
+		if groupName == AIGroupName {
+			return fmt.Errorf("尚未启用独立分组 %s，为避免影响外部代理软件节点，请先注入分流脚本并刷新订阅", AIGroupName)
+		}
+		return fmt.Errorf("代理组 %s 不存在", groupName)
 	}
+	if !groupHasMember(grp.All, targetNode) {
+		if groupName == AIGroupName {
+			return fmt.Errorf("节点 %s 不在当前独立分组 %s 中", targetNode, AIGroupName)
+		}
+		return fmt.Errorf("节点 %s 不在代理组 %s 中", targetNode, groupName)
+	}
+	return c.selectProxy(ctx, groupName, targetNode)
+}
 
-	valid := false
-	for _, m := range grp.All {
-		if m == targetNode {
-			valid = true
-			break
+func delayProbeGroup(proxies map[string]proxyItem, groupName string) string {
+	if groupName == AIGroupName {
+		if _, ok := proxies[AIAutoName]; ok {
+			return AIAutoName
 		}
 	}
-	if !valid {
-		return nil, fmt.Errorf("节点 %s 不在当前独立分组 %s 中", targetNode, AIGroupName)
-	}
+	return groupName
+}
 
-	if err := c.selectProxy(ctx, AIGroupName, targetNode); err != nil {
-		return nil, err
+// probeDelay reads a group delay result. A nil map means the probe did not run.
+// A present map omits dead nodes, and those count as a measured timeout.
+func probeDelay(name string, item proxyItem, fresh map[string]int) (delay int, untested bool) {
+	if fresh != nil {
+		if d := fresh[name]; d > 0 {
+			return d, false
+		}
+		return 0, false
 	}
-	live := c.GetLiveStatus()
-	return &live, nil
+	if len(item.History) == 0 {
+		return 0, true
+	}
+	return item.History[len(item.History)-1].Delay, false
+}
+
+func groupHasMember(all []string, name string) bool {
+	for _, member := range all {
+		if member == name {
+			return true
+		}
+	}
+	return false
 }
 
 // OptimizeBestNode actively probes compliant (non-HK/CN/RU) nodes inside Mihomo
