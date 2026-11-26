@@ -1114,8 +1114,8 @@ func setWindowsClipboard(text string) error {
 	if ptr == 0 {
 		return fmt.Errorf("GlobalLock failed")
 	}
-	dst := unsafe.Slice((*uint16)(unsafe.Pointer(ptr)), len(utf16))
-	copy(dst, utf16)
+	rtlMoveMemory := kernel32.NewProc("RtlMoveMemory")
+	_, _, _ = rtlMoveMemory.Call(ptr, uintptr(unsafe.Pointer(&utf16[0])), byteSize)
 	globalUnlock.Call(hMem)
 
 	r, _, err := openClip.Call(0)
