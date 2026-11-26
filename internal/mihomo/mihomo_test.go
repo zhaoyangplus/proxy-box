@@ -268,6 +268,7 @@ func TestListGroupNodesDelayAndAIAutoProbe(t *testing.T) {
 		t.Fatalf("ListAINodes: %v", err)
 	}
 	found := false
+	foundAuto := false
 	for _, n := range aiList.Nodes {
 		if n.Name == "ss-dummy" {
 			found = true
@@ -275,9 +276,16 @@ func TestListGroupNodesDelayAndAIAutoProbe(t *testing.T) {
 				t.Fatalf("AI ss-dummy = %+v", n)
 			}
 		}
+		if n.Name == AIAutoName {
+			foundAuto = true
+			if !n.IsAuto || n.Type != "URLTest" || !n.Preferred || !n.Compliant || n.Provider != "" ||
+				n.ResolvedTo != "US01" || n.DelayMs != 90 || n.Untested || !n.Selected || !n.Alive {
+				t.Fatalf("AI-Auto = %+v", n)
+			}
+		}
 	}
-	if !found {
-		t.Fatalf("provider node missing from AI list: %+v", aiList.Nodes)
+	if !found || !foundAuto {
+		t.Fatalf("provider node or AI-Auto missing from AI list: %+v", aiList.Nodes)
 	}
 	mu.Lock()
 	defer mu.Unlock()
@@ -294,7 +302,11 @@ func TestGroupDelay504IsMeasuredTimeout(t *testing.T) {
 				"proxies": map[string]any{
 					"DEAD": map[string]any{
 						"name": "DEAD", "type": "Selector", "now": "dead-00",
-						"all": []string{"dead-00", "dead-01"},
+						"all": []string{"⚡ AUTO", "dead-00", "dead-01"},
+					},
+					"⚡ AUTO": map[string]any{
+						"name": "⚡ AUTO", "type": "URLTest", "now": "dead-00", "alive": true,
+						"all": []string{"dead-00", "dead-01"}, "history": []any{},
 					},
 					"dead-00": map[string]any{"name": "dead-00", "type": "Shadowsocks", "alive": true, "history": []any{}},
 					"dead-01": map[string]any{"name": "dead-01", "type": "Shadowsocks", "alive": true, "history": []any{}},
@@ -315,13 +327,127 @@ func TestGroupDelay504IsMeasuredTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListGroupNodes: %v", err)
 	}
-	if len(got.Nodes) != 2 {
+	if len(got.Nodes) != 3 {
 		t.Fatalf("nodes = %+v", got.Nodes)
 	}
 	for _, n := range got.Nodes {
-		if n.DelayMs != 0 || n.Untested {
+		if n.Alive || n.DelayMs != 0 || n.Untested {
 			t.Fatalf("node after 504 = %+v", n)
 		}
+		if n.Name == "⚡ AUTO" && (!n.IsAuto || n.ResolvedTo != "dead-00") {
+			t.Fatalf("auto group after 504 = %+v", n)
+		}
+	}
+}
+
+func TestListGroupNodesListsAutoGroups(t *testing.T) {
+	const (
+		autoName = "⚡ AUTO"
+		fallName = "⚡ FALL"
+	)
+	var delayHits int
+	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/proxies":
+			_ = json.NewEncoder(rw).Encode(map[string]any{
+				"proxies": map[string]any{
+					"PROXY": map[string]any{
+						"name": "PROXY", "type": "Selector", "now": autoName,
+						"all": []string{autoName, fallName, "US01", "DIRECT", "REJECT", "NEST"},
+					},
+					autoName: map[string]any{
+						"name": autoName, "type": "URLTest", "now": "US01", "alive": true,
+						"all": []string{"US01"}, "history": []any{},
+					},
+					fallName: map[string]any{
+						"name": fallName, "type": "Fallback", "now": "JP02", "alive": true,
+						"all": []string{"JP02"}, "history": []any{},
+					},
+					"US01": map[string]any{
+						"name": "US01", "type": "Vless", "alive": true,
+						"history": []any{map[string]any{"delay": 40}},
+					},
+					"JP02": map[string]any{
+						"name": "JP02", "type": "Vless", "alive": true,
+						"history": []any{map[string]any{"delay": 25}},
+					},
+					"DIRECT": map[string]any{"name": "DIRECT", "type": "Direct", "alive": true, "history": []any{}},
+					"REJECT": map[string]any{"name": "REJECT", "type": "Reject", "alive": false, "history": []any{}},
+					"NEST": map[string]any{
+						"name": "NEST", "type": "Selector", "now": "US01",
+						"all": []string{"US01"},
+					},
+				},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/providers/proxies":
+			rw.WriteHeader(http.StatusNotFound)
+		case r.Method == http.MethodGet && r.URL.Path == "/group/PROXY/delay":
+			delayHits++
+			_ = json.NewEncoder(rw).Encode(map[string]int{"US01": 88, "JP02": 70})
+		default:
+			rw.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	mc := NewClient("", srv.URL, "")
+	history, err := mc.ListGroupNodes("PROXY", false)
+	if err != nil {
+		t.Fatalf("ListGroupNodes history: %v", err)
+	}
+	if delayHits != 0 {
+		t.Fatalf("delay endpoint was called %d times", delayHits)
+	}
+	byName := map[string]NodeOption{}
+	for _, n := range history.Nodes {
+		byName[n.Name] = n
+	}
+	if len(byName) != 5 {
+		t.Fatalf("nodes = %+v", history.Nodes)
+	}
+	if _, ok := byName["NEST"]; ok {
+		t.Fatal("select group was listed")
+	}
+	if _, ok := byName["JP02"]; ok {
+		t.Fatal("leaf outside the group was listed")
+	}
+	auto := byName[autoName]
+	if !auto.IsAuto || auto.Type != "URLTest" || auto.ResolvedTo != "US01" || auto.DelayMs != 40 || auto.Untested || !auto.Selected || !auto.Alive || auto.Provider != "" {
+		t.Fatalf("url-test member = %+v", auto)
+	}
+	fall := byName[fallName]
+	if !fall.IsAuto || fall.Type != "Fallback" || fall.ResolvedTo != "JP02" || fall.DelayMs != 25 || fall.Untested || fall.Selected || !fall.Alive {
+		t.Fatalf("fallback member = %+v", fall)
+	}
+	if byName["DIRECT"].IsAuto || !byName["DIRECT"].Untested || !byName["DIRECT"].Alive {
+		t.Fatalf("DIRECT = %+v", byName["DIRECT"])
+	}
+	if byName["REJECT"].IsAuto || !byName["REJECT"].Untested || byName["REJECT"].Alive {
+		t.Fatalf("REJECT = %+v", byName["REJECT"])
+	}
+
+	probed, err := mc.ListGroupNodes("PROXY", true)
+	if err != nil {
+		t.Fatalf("ListGroupNodes probe: %v", err)
+	}
+	byName = map[string]NodeOption{}
+	for _, n := range probed.Nodes {
+		byName[n.Name] = n
+	}
+	auto = byName[autoName]
+	if !auto.IsAuto || auto.ResolvedTo != "US01" || auto.DelayMs != 88 || auto.Untested || !auto.Alive {
+		t.Fatalf("probed url-test member = %+v", auto)
+	}
+	fall = byName[fallName]
+	if !fall.IsAuto || fall.ResolvedTo != "JP02" || fall.DelayMs != 70 || fall.Untested || !fall.Alive {
+		t.Fatalf("probed fallback member = %+v", fall)
+	}
+	direct := byName["DIRECT"]
+	if direct.IsAuto || direct.Untested || direct.Alive || direct.DelayMs != 0 {
+		t.Fatalf("probed DIRECT = %+v", direct)
+	}
+	if delayHits != 1 {
+		t.Fatalf("delay endpoint was called %d times", delayHits)
 	}
 }
 

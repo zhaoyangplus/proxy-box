@@ -592,29 +592,8 @@ func (c *Client) ListGroupNodes(groupName string, runDelayTest bool) (*NodeListR
 		if !ok {
 			continue
 		}
-		if member == AIAutoName {
-			rName, rDelay := resolveLeafNode(proxies, AIAutoName, 4)
-			untested := rDelay <= 0 && freshDelays == nil && len(p.History) == 0
-			if freshDelays != nil {
-				if d := freshDelays[rName]; d > 0 {
-					rDelay = d
-				} else {
-					rDelay = 0
-				}
-				untested = false
-			}
-			nodes = append(nodes, NodeOption{
-				Name:       AIAutoName,
-				Type:       "URLTest",
-				DelayMs:    rDelay,
-				Alive:      rDelay > 0 || p.Alive,
-				Compliant:  true,
-				Preferred:  true,
-				IsAuto:     true,
-				Untested:   untested,
-				Selected:   grp.Now == AIAutoName,
-				ResolvedTo: rName,
-			})
+		if isAutoGroupType(p.Type) {
+			nodes = append(nodes, autoGroupOption(member, p, grp.Now, proxies, freshDelays))
 			continue
 		}
 		if isGroupType(p.Type) {
@@ -625,7 +604,7 @@ func (c *Client) ListGroupNodes(groupName string, runDelayTest bool) (*NodeListR
 			Name:      member,
 			Type:      p.Type,
 			DelayMs:   delay,
-			Alive:     delay > 0 || p.Alive,
+			Alive:     nodeAlive(delay, untested, p.Alive),
 			Compliant: !IsRestrictedNodeName(member),
 			Preferred: IsPreferredNodeName(member),
 			IsAuto:    false,
@@ -635,7 +614,6 @@ func (c *Client) ListGroupNodes(groupName string, runDelayTest bool) (*NodeListR
 		})
 	}
 
-	// Sort: ⚡ AI-Auto first, then alive nodes by delay asc, then untested/dead nodes
 	sort.SliceStable(nodes, func(i, j int) bool {
 		if nodes[i].IsAuto != nodes[j].IsAuto {
 			return nodes[i].IsAuto
@@ -708,6 +686,47 @@ func delayProbeGroup(proxies map[string]proxyItem, groupName string) string {
 		}
 	}
 	return groupName
+}
+
+// autoGroupOption lists a URLTest or Fallback member so the UI can select it again.
+// ⚡ AI-Auto keeps the fields ListAINodes already returned.
+func autoGroupOption(name string, item proxyItem, selected string, proxies map[string]proxyItem, fresh map[string]int) NodeOption {
+	resolved, delay := resolveLeafNode(proxies, name, 4)
+	untested := delay <= 0 && fresh == nil && len(item.History) == 0
+	if fresh != nil {
+		if d := fresh[resolved]; d > 0 {
+			delay = d
+		} else {
+			delay = 0
+		}
+		untested = false
+	}
+	opt := NodeOption{
+		Name:       name,
+		Type:       item.Type,
+		DelayMs:    delay,
+		Alive:      nodeAlive(delay, untested, item.Alive),
+		Compliant:  !IsRestrictedNodeName(name),
+		Preferred:  IsPreferredNodeName(name),
+		IsAuto:     true,
+		Selected:   selected == name,
+		ResolvedTo: resolved,
+		Untested:   untested,
+	}
+	if name == AIAutoName {
+		opt.Type = "URLTest"
+		opt.Compliant = true
+		opt.Preferred = true
+	}
+	return opt
+}
+
+// nodeAlive reports a finished probe from its delay. An untested node keeps the controller flag.
+func nodeAlive(delay int, untested, controllerAlive bool) bool {
+	if untested {
+		return delay > 0 || controllerAlive
+	}
+	return delay > 0
 }
 
 // probeDelay reads a group delay result. A nil map means the probe did not run.
@@ -965,6 +984,14 @@ func resolveLeafNode(proxies map[string]proxyItem, name string, depth int) (stri
 func isGroupType(t string) bool {
 	switch strings.ToLower(t) {
 	case "selector", "urltest", "fallback", "loadbalance", "relay":
+		return true
+	}
+	return false
+}
+
+func isAutoGroupType(t string) bool {
+	switch strings.ToLower(t) {
+	case "urltest", "fallback":
 		return true
 	}
 	return false
