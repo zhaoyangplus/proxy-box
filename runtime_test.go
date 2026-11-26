@@ -15,6 +15,8 @@ type fakeCore struct {
 	mode    string
 	ports   core.Ports
 	version string
+	reloads int
+	modes   []string
 }
 
 func (f *fakeCore) Start(context.Context, string, core.ConfigParams, []core.ProviderSpec) (core.Status, error) {
@@ -34,11 +36,13 @@ func (f *fakeCore) Stop() error {
 }
 
 func (f *fakeCore) Reload(context.Context, core.ConfigParams, []core.ProviderSpec) error {
+	f.reloads++
 	return nil
 }
 
 func (f *fakeCore) SwitchMode(_ context.Context, mode string) error {
 	f.mode = mode
+	f.modes = append(f.modes, mode)
 	return nil
 }
 
