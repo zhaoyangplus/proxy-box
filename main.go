@@ -57,8 +57,10 @@ func newSSEHub() *sseHub {
 	return &sseHub{clients: make(map[chan []byte]struct{})}
 }
 
+const sseClientBuffer = 32
+
 func (h *sseHub) subscribe() chan []byte {
-	ch := make(chan []byte, 8)
+	ch := make(chan []byte, sseClientBuffer)
 	h.mu.Lock()
 	h.clients[ch] = struct{}{}
 	h.mu.Unlock()
@@ -80,11 +82,24 @@ func (h *sseHub) broadcast(ev sseEvent) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	for ch := range h.clients {
-		select {
-		case ch <- data:
-		default:
-			// Drop stale frame if slow consumer
-		}
+		enqueueSSE(ch, data)
+	}
+}
+
+// enqueueSSE keeps the newest frame. A full buffer drops the oldest frame.
+func enqueueSSE(ch chan []byte, data []byte) {
+	select {
+	case ch <- data:
+		return
+	default:
+	}
+	select {
+	case <-ch:
+	default:
+	}
+	select {
+	case ch <- data:
+	default:
 	}
 }
 
