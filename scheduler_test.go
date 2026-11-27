@@ -242,18 +242,13 @@ func TestSchedulerStopCancelsInFlightUpdate(t *testing.T) {
 	}
 }
 
-func TestSchedulerTickOverride(t *testing.T) {
-	t.Setenv("PROXYBOX_SCHEDULER_TICK", "")
-	if schedulerTick() != 30*time.Second {
-		t.Fatalf("default %s", schedulerTick())
-	}
+func TestSchedulerTickStaysDefault(t *testing.T) {
+	useTempConfig(t)
 	t.Setenv("PROXYBOX_SCHEDULER_TICK", "5s")
-	if schedulerTick() != 5*time.Second {
-		t.Fatalf("override %s", schedulerTick())
-	}
-	t.Setenv("PROXYBOX_SCHEDULER_TICK", "100ms")
-	if schedulerTick() != 30*time.Second {
-		t.Fatalf("too-small override %s", schedulerTick())
+	s := startSubScheduler(&appRuntime{flight: newSubFlight()})
+	t.Cleanup(s.Stop)
+	if s.tick != 30*time.Second {
+		t.Fatalf("tick %s", s.tick)
 	}
 }
 

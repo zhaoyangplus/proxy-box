@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"os"
 	"sync"
 	"time"
 
@@ -212,18 +211,6 @@ func (s *subScheduler) Stop() {
 	})
 }
 
-func schedulerTick() time.Duration {
-	raw := os.Getenv("PROXYBOX_SCHEDULER_TICK")
-	if raw == "" {
-		return schedulerTickDefault
-	}
-	d, err := time.ParseDuration(raw)
-	if err != nil || d < time.Second {
-		return schedulerTickDefault
-	}
-	return d
-}
-
 func (a *appRuntime) broadcastSubs() {
 	if a == nil || a.hub == nil {
 		return
@@ -240,7 +227,6 @@ func startSubScheduler(a *appRuntime) *subScheduler {
 		flight = a.flight
 	}
 	s := newSubScheduler(flight)
-	s.tick = schedulerTick()
 	s.load = configstore.LoadSubscriptions
 	s.update = func(ctx context.Context, sub configstore.Subscription) (configstore.Subscription, error) {
 		next, err := a.updateSubscription(ctx, sub)
