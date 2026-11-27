@@ -80,7 +80,7 @@
   }
 
   function isDirty() {
-    return Object.keys(L.changedFields(baseline, draft)).length > 0;
+    return !L.sameDraft(baseline, draft);
   }
 
   function coreInfo() {

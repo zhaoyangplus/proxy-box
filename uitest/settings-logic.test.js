@@ -13,6 +13,42 @@ test("settings leave allows a clean page, blocks a dirty page, and allows force"
   assert.deepEqual(S.leaveDecision({ dirty: true, target: "" }), { allow: false, target: "" });
 });
 
+test("a clean settings draft matches the loaded config after normalization", function () {
+  assert.equal(S.draftFrom({}).delayTestURL, "");
+  assert.equal(S.draftFrom({}).speedTestURL, "");
+  assert.equal(S.draftFrom({}).speedTestMaxMB, 10);
+  const missing = {};
+  const typed = {
+    speedTestMaxMB: "10",
+    autoOptimizeNode: null,
+    autoSyncOnChange: true,
+    syncUserEnv: false,
+    minimizeToTray: 1,
+    delayTestURL: " http://www.gstatic.com/generate_204 ",
+    speedTestURL: ""
+  };
+  const reordered = {
+    customCodexExe: "",
+    minimizeToTray: true,
+    speedTestURL: "",
+    delayTestURL: "http://www.gstatic.com/generate_204",
+    speedTestMaxMB: 10,
+    autoOptimizeNode: true
+  };
+  assert.equal(S.sameDraft(missing, S.draftFrom(missing)), true);
+  assert.equal(S.sameDraft(typed, S.draftFrom(typed)), true);
+  assert.equal(S.sameDraft(typed, reordered), true);
+  assert.equal(S.sameDraft({ speedTestMaxMB: 0 }, { speedTestMaxMB: 10 }), true);
+  assert.equal(S.sameDraft({ speedTestMaxMB: "10" }, { speedTestMaxMB: 10 }), true);
+  assert.equal(S.sameDraft({ speedTestMaxMB: "nope" }, { speedTestMaxMB: "nope" }), true);
+  assert.equal(S.sameDraft({ autoOptimizeNode: null, autoSyncOnChange: undefined }, { autoOptimizeNode: true, autoSyncOnChange: true }), true);
+  assert.equal(S.sameDraft({ speedTestURL: "" }, { speedTestURL: "https://speed.cloudflare.com/__down?bytes=10485760" }), false);
+  const edited = S.draftFrom(typed);
+  edited.customCursorExe = "D:\\Cursor.exe";
+  assert.equal(S.sameDraft(typed, edited), false);
+  assert.deepEqual(S.changedFields(typed, edited), { customCursorExe: "D:\\Cursor.exe" });
+});
+
 test("settings diff posts only changed fields", function () {
   const saved = {
     delayTestURL: "http://www.gstatic.com/generate_204",

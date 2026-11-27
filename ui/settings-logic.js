@@ -58,15 +58,23 @@
     return draft;
   }
 
+  function sameValue(a, b) {
+    return a === b || (typeof a === "number" && typeof b === "number" && isNaN(a) && isNaN(b));
+  }
+
   function changedFields(saved, draft) {
     var before = draftFrom(saved);
     var after = draftFrom(draft);
     var out = {};
     for (var i = 0; i < KEYS.length; i++) {
       var key = KEYS[i];
-      if (before[key] !== after[key]) out[key] = after[key];
+      if (!sameValue(before[key], after[key])) out[key] = after[key];
     }
     return out;
+  }
+
+  function sameDraft(a, b) {
+    return Object.keys(changedFields(a, b)).length === 0;
   }
 
   function leaveDecision(input) {
@@ -128,6 +136,7 @@
     MB_ERROR: MB_ERROR,
     draftFrom: draftFrom,
     changedFields: changedFields,
+    sameDraft: sameDraft,
     leaveDecision: leaveDecision,
     validate: validate,
     portsFrom: portsFrom
