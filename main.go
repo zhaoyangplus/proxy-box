@@ -36,9 +36,6 @@ var embeddedUI embed.FS
 
 const appWindowTitle = "Proxy Box - 本地代理工作台"
 
-// appVersion can be overridden at build time via: -ldflags "-X main.appVersion=v1.0.0"
-var appVersion = "v1.0.0"
-
 type sseEvent struct {
 	Type       string                    `json:"type"`
 	Reason     string                    `json:"reason,omitempty"`
@@ -592,7 +589,7 @@ func startLocalAPIServer(hub *sseHub, rt *appRuntime, appUpdater *updater.Update
 
 func takeEarlyCLI(w io.Writer, showVersion, selfTest bool, cleanup func(), selfTestFn func()) bool {
 	if showVersion {
-		fmt.Fprintln(w, "Proxy Box", appVersion)
+		fmt.Fprintln(w, versionLine())
 		return true
 	}
 	if cleanup != nil {
