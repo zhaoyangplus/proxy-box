@@ -47,6 +47,13 @@ type appRuntime struct {
 	cancelStart context.CancelFunc
 	shutdownMu  sync.Mutex
 	opMu        sync.Mutex
+
+	geoOnce      sync.Once
+	geo          *geoCtl
+	downloadGeo  func(context.Context, string, string, core.ProgressFunc) error
+	preflightGeo func(context.Context, string, string, string) error
+	flight       *subFlight
+	trayState    trayStateCache
 }
 
 func newAppRuntime(hub *sseHub) *appRuntime {
@@ -59,10 +66,11 @@ func newAppRuntime(hub *sseHub) *appRuntime {
 		setProxy:     sysproxy.Set,
 		ensureBinary: core.EnsureBinary,
 		importBinary: core.ImportBinary,
+		flight:       newSubFlight(),
 	}
 }
 
-// Shutdown restores the system proxy and then stops the core.
+// Shutdown cancels geo work, restores the system proxy, and then stops the core.
 // A second call repeats that order. Overlapping calls wait and do the same.
 func (a *appRuntime) Shutdown() {
 	if a == nil {
@@ -74,6 +82,7 @@ func (a *appRuntime) Shutdown() {
 	if cancel != nil {
 		cancel()
 	}
+	a.cancelGeo()
 	a.shutdownMu.Lock()
 	defer a.shutdownMu.Unlock()
 	if a.restore != nil {
@@ -127,7 +136,7 @@ func (a *appRuntime) startCore(ctx context.Context, settings configstore.CoreSet
 	if err := runCtx.Err(); err != nil {
 		return core.Status{}, err
 	}
-	st, err := a.core.Start(runCtx, path, coreParams(settings), providerSpecs(subs))
+	st, err := a.core.Start(runCtx, path, a.coreParams(settings), providerSpecs(subs))
 	if err != nil {
 		return core.Status{}, err
 	}
@@ -141,6 +150,7 @@ func (a *appRuntime) startCore(ctx context.Context, settings configstore.CoreSet
 	if err := configstore.SaveCoreSettings(settings); err != nil {
 		return st, err
 	}
+	a.kickGeoDownload()
 	if settings.SystemProxy {
 		if err := a.enableSystemProxy(runCtx, st.Ports.Mixed); err != nil {
 			return st, err
@@ -247,7 +257,11 @@ func providerSpecs(subs []configstore.Subscription) []core.ProviderSpec {
 	return out
 }
 
-func coreParams(settings configstore.CoreSettings) core.ConfigParams {
+func (a *appRuntime) coreParams(settings configstore.CoreSettings) core.ConfigParams {
+	dir := ""
+	if a != nil {
+		dir = a.coreDir
+	}
 	return core.ConfigParams{
 		MixedPort:       settings.MixedPort,
 		ControllerPort:  settings.ControllerPort,
@@ -255,6 +269,7 @@ func coreParams(settings configstore.CoreSettings) core.ConfigParams {
 		Secret:          settings.Secret,
 		Mode:            settings.Mode,
 		BypassCN:        settings.BypassCN,
+		GeoReady:        core.GeoFilesReady(dir),
 	}
 }
 

@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	"proxy-box/internal/configstore"
@@ -97,6 +98,10 @@ func TestPublicErrIsChinese(t *testing.T) {
 		errors.New("import note.txt: want .exe or .zip"),
 		errors.New("download failed"),
 		errors.New("download stalled after 30s"),
+		core.ErrGeoHTML,
+		core.ErrGeoTooSmall,
+		core.ErrGeoPreflight,
+		errors.New("geo download: timeout"),
 		errors.New("127.0.0.1:7897: unreachable"),
 	}
 	for _, err := range cases {
@@ -731,6 +736,158 @@ func TestNodeSelectMessageUsesSwitchedNode(t *testing.T) {
 	if got := nodeSelectMessage("", mihomo.AIAutoName, live); got != "Proxy Box 专属通道已切回自动优选：SG03" {
 		t.Fatalf("AI auto = %s", got)
 	}
+}
+
+func TestSubscriptionUserAgentReachesOrigin(t *testing.T) {
+	useTempConfig(t)
+	t.Setenv("LOCALAPPDATA", t.TempDir())
+	var mu sync.Mutex
+	var uas []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		uas = append(uas, r.Header.Get("User-Agent"))
+		mu.Unlock()
+		_, _ = io.WriteString(w, "proxies:\n  - {name: alpha, type: http, server: 127.0.0.1, port: 1}\n")
+	}))
+	defer srv.Close()
+
+	rt := newAppRuntime(nil)
+	rt.core = &fakeCore{}
+	rt.proxyURLs = func() []string { return nil }
+
+	rec := postJSON(rt.handleSubs, `{"name":"custom","url":"`+srv.URL+`","userAgent":" ProxyBoxTest/9 ","filter":"keep","updateIntervalMin":15}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create custom %s", rec.Body.String())
+	}
+	var custom subResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &custom); err != nil {
+		t.Fatal(err)
+	}
+	if custom.Subscription.UserAgent != "ProxyBoxTest/9" || custom.Subscription.Filter != "keep" || custom.Subscription.UpdateIntervalMin != 15 {
+		t.Fatalf("created = %+v", custom.Subscription)
+	}
+	rec = postJSON(rt.handleSubsUpdate, `{"id":"`+custom.Subscription.ID+`"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update custom %s", rec.Body.String())
+	}
+	if got := lastUA(t, &mu, uas); got != "ProxyBoxTest/9" {
+		t.Fatalf("custom ua %q", got)
+	}
+
+	rec = postJSON(rt.handleSubs, `{"name":"plain","url":"`+srv.URL+`","enabled":true}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create plain %s", rec.Body.String())
+	}
+	var plain subResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &plain); err != nil {
+		t.Fatal(err)
+	}
+	if plain.Subscription.UserAgent != "" {
+		t.Fatalf("plain ua stored %q", plain.Subscription.UserAgent)
+	}
+	rec = postJSON(rt.handleSubsUpdate, `{"id":"`+plain.Subscription.ID+`"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update plain %s", rec.Body.String())
+	}
+	if got := lastUA(t, &mu, uas); got != "clash.meta" {
+		t.Fatalf("empty ua %q", got)
+	}
+
+	put := httptest.NewRequest(http.MethodPut, "/api/subs", bytes.NewBufferString(`{"id":"`+custom.Subscription.ID+`","name":"renamed"}`))
+	rec = httptest.NewRecorder()
+	rt.updateSubFields(rec, put)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("put name %s", rec.Body.String())
+	}
+	stored := mustSub(t, custom.Subscription.ID)
+	if stored.Name != "renamed" || stored.UserAgent != "ProxyBoxTest/9" || stored.Filter != "keep" || stored.URL != srv.URL || stored.UpdateIntervalMin != 15 {
+		t.Fatalf("name put changed other fields: %+v", stored)
+	}
+
+	put = httptest.NewRequest(http.MethodPut, "/api/subs", bytes.NewBufferString(`{"id":"`+custom.Subscription.ID+`","userAgent":"  "}`))
+	rec = httptest.NewRecorder()
+	rt.updateSubFields(rec, put)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("put ua %s", rec.Body.String())
+	}
+	stored = mustSub(t, custom.Subscription.ID)
+	if stored.UserAgent != "" || stored.Name != "renamed" || stored.Filter != "keep" || stored.UpdateIntervalMin != 15 {
+		t.Fatalf("ua put = %+v", stored)
+	}
+	rec = postJSON(rt.handleSubsUpdate, `{"id":"`+custom.Subscription.ID+`"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update cleared %s", rec.Body.String())
+	}
+	if got := lastUA(t, &mu, uas); got != "clash.meta" {
+		t.Fatalf("cleared ua %q", got)
+	}
+}
+
+func TestApplySystemProxyRefusesWhenCoreStopped(t *testing.T) {
+	useTempConfig(t)
+	called := false
+	restored := false
+	rt := &appRuntime{
+		core: &fakeCore{},
+		setProxy: func(string, int, string) error {
+			called = true
+			return nil
+		},
+		restore: func() error {
+			restored = true
+			return nil
+		},
+	}
+	if _, err := rt.applySystemProxy(true); err == nil || err.Error() != "内核未运行，不能开启系统代理" || called {
+		t.Fatalf("err %v called %v", err, called)
+	}
+	settings, err := configstore.LoadCoreSettings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.SystemProxy {
+		t.Fatal("stopped core enabled the system proxy")
+	}
+
+	rt.core = &fakeCore{running: true, ports: core.Ports{Mixed: 27890}}
+	on, err := rt.applySystemProxy(true)
+	if err != nil || !on || !called {
+		t.Fatalf("enable on %v err %v called %v", on, err, called)
+	}
+	on, err = rt.applySystemProxy(false)
+	if err != nil || on || !restored {
+		t.Fatalf("disable on %v err %v restored %v", on, err, restored)
+	}
+	settings, err = configstore.LoadCoreSettings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.SystemProxy {
+		t.Fatal("system proxy stayed on")
+	}
+}
+
+func lastUA(t *testing.T, mu *sync.Mutex, uas []string) string {
+	t.Helper()
+	mu.Lock()
+	defer mu.Unlock()
+	if len(uas) == 0 {
+		t.Fatal("subscription server saw no request")
+	}
+	return uas[len(uas)-1]
+}
+
+func mustSub(t *testing.T, id string) configstore.Subscription {
+	t.Helper()
+	subs, err := configstore.LoadSubscriptions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx := subIndex(subs, id)
+	if idx < 0 {
+		t.Fatalf("missing %s", id)
+	}
+	return subs[idx]
 }
 
 func postJSON(h http.HandlerFunc, body string) *httptest.ResponseRecorder {

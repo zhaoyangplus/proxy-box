@@ -209,14 +209,33 @@ func downloadAsset(ctx context.Context, dest, proxyURL string, onProgress Progre
 	return verifyAssetHash(dest)
 }
 
+// fetchSpec is one resumable HTTP download. fallbackTotal is reported until the response has a length.
+type fetchSpec struct {
+	dest          string
+	url           string
+	proxyURL      string
+	maxBytes      int64
+	fallbackTotal int64
+}
+
 func fetchAsset(ctx context.Context, dest, proxyURL string, onProgress ProgressFunc) error {
+	return fetchURL(ctx, fetchSpec{
+		dest:          dest,
+		url:           assetURL,
+		proxyURL:      proxyURL,
+		maxBytes:      maxAssetBytes,
+		fallbackTotal: AssetSize,
+	}, onProgress)
+}
+
+func fetchURL(ctx context.Context, spec fetchSpec, onProgress ProgressFunc) error {
 	ctx, cancel := context.WithTimeout(ctx, downloadOverall)
 	defer cancel()
 	var total atomic.Int64
-	total.Store(AssetSize)
+	total.Store(spec.fallbackTotal)
 	report := func() {
 		if onProgress != nil {
-			onProgress(fileSize(dest), total.Load())
+			onProgress(fileSize(spec.dest), total.Load())
 		}
 	}
 	curl, err := lookupCurl()
@@ -226,29 +245,29 @@ func fetchAsset(ctx context.Context, dest, proxyURL string, onProgress ProgressF
 	}
 	report()
 	if err == nil {
-		return downloadWithRetry(ctx, dest, report, func(ctx context.Context, _ int64) error {
-			return curlAttempt(ctx, curl, dest, proxyURL)
+		return downloadWithRetry(ctx, spec.dest, spec.maxBytes, report, func(ctx context.Context, _ int64) error {
+			return curlAttempt(ctx, curl, spec.dest, spec.proxyURL, spec.url)
 		})
 	}
-	return downloadWithRetry(ctx, dest, report, func(ctx context.Context, have int64) error {
-		return httpAttempt(ctx, dest, proxyURL, have, &total)
+	return downloadWithRetry(ctx, spec.dest, spec.maxBytes, report, func(ctx context.Context, have int64) error {
+		return httpAttempt(ctx, spec, have, &total)
 	})
 }
 
-func downloadWithRetry(ctx context.Context, dest string, report func(), once func(context.Context, int64) error) error {
+func downloadWithRetry(ctx context.Context, dest string, maxBytes int64, report func(), once func(context.Context, int64) error) error {
 	var last error
 	for attempt := 1; attempt <= downloadAttempts; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		have := fileSize(dest)
-		if have > maxAssetBytes {
-			return fmt.Errorf("asset exceeds %d bytes", maxAssetBytes)
+		if have > maxBytes {
+			return fmt.Errorf("asset exceeds %d bytes", maxBytes)
 		}
 		if have > 0 {
 			downloadResumes.Add(1)
 		}
-		err := watchAttempt(ctx, dest, report, func(ctx context.Context) error {
+		err := watchAttempt(ctx, dest, maxBytes, report, func(ctx context.Context) error {
 			return once(ctx, have)
 		})
 		if err == nil {
@@ -265,7 +284,7 @@ func downloadWithRetry(ctx context.Context, dest string, report func(), once fun
 	return last
 }
 
-func watchAttempt(ctx context.Context, dest string, report func(), run func(context.Context) error) error {
+func watchAttempt(ctx context.Context, dest string, maxBytes int64, report func(), run func(context.Context) error) error {
 	attemptCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	done := make(chan error, 1)
@@ -291,10 +310,10 @@ func watchAttempt(ctx context.Context, dest string, report func(), run func(cont
 				changed = time.Now()
 			}
 			report()
-			if sz > maxAssetBytes {
+			if sz > maxBytes {
 				cancel()
 				<-done
-				return fmt.Errorf("asset exceeds %d bytes", maxAssetBytes)
+				return fmt.Errorf("asset exceeds %d bytes", maxBytes)
 			}
 			if time.Since(changed) >= downloadStall {
 				cancel()
@@ -316,12 +335,12 @@ func stallPoll(stall time.Duration) time.Duration {
 	return poll
 }
 
-func curlAttempt(ctx context.Context, curl, dest, proxyURL string) error {
+func curlAttempt(ctx context.Context, curl, dest, proxyURL, rawURL string) error {
 	args := []string{"-sS", "-L", "--fail", "-C", "-", "-A", "proxy-box", "-o", dest, "-x", proxyURL}
 	if proxyURL != "" {
 		args = append(args, "--noproxy", "")
 	}
-	args = append(args, assetURL)
+	args = append(args, rawURL)
 	cmd := commandHidden(ctx, curl, args...)
 	cmd.Stdout = io.Discard
 	var stderr bytes.Buffer
@@ -336,12 +355,12 @@ func curlAttempt(ctx context.Context, curl, dest, proxyURL string) error {
 	return nil
 }
 
-func httpAttempt(ctx context.Context, dest, proxyURL string, have int64, total *atomic.Int64) error {
-	client, err := httpClient(proxyURL)
+func httpAttempt(ctx context.Context, spec fetchSpec, have int64, total *atomic.Int64) error {
+	client, err := httpClient(spec.proxyURL)
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, assetURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, spec.url, nil)
 	if err != nil {
 		return err
 	}
@@ -362,23 +381,23 @@ func httpAttempt(ctx context.Context, dest, proxyURL string, have int64, total *
 	default:
 		return fmt.Errorf("download http %d", resp.StatusCode)
 	}
-	total.Store(responseTotal(resp, have))
+	total.Store(responseTotal(resp, have, spec.fallbackTotal))
 	flag := os.O_CREATE | os.O_WRONLY
 	if restart {
 		flag |= os.O_TRUNC
 	} else {
 		flag |= os.O_APPEND
 	}
-	f, err := os.OpenFile(dest, flag, 0644)
+	f, err := os.OpenFile(spec.dest, flag, 0644)
 	if err != nil {
 		return err
 	}
-	limit := maxAssetBytes - have
+	limit := spec.maxBytes - have
 	n, copyErr := io.Copy(f, io.LimitReader(resp.Body, limit+1))
 	syncErr := f.Sync()
 	closeErr := f.Close()
 	if n > limit {
-		return fmt.Errorf("asset exceeds %d bytes", maxAssetBytes)
+		return fmt.Errorf("asset exceeds %d bytes", spec.maxBytes)
 	}
 	if copyErr != nil {
 		return copyErr
@@ -386,12 +405,12 @@ func httpAttempt(ctx context.Context, dest, proxyURL string, have int64, total *
 	return errors.Join(syncErr, closeErr)
 }
 
-func responseTotal(resp *http.Response, already int64) int64 {
+func responseTotal(resp *http.Response, already, fallback int64) int64 {
 	if n, ok := contentRangeSize(resp.Header.Get("Content-Range")); ok {
 		return n
 	}
 	if resp.ContentLength < 0 {
-		return AssetSize
+		return fallback
 	}
 	if resp.StatusCode == http.StatusPartialContent {
 		return already + resp.ContentLength

@@ -84,6 +84,7 @@ func assembleBuiltin(procs map[string]*procDetail, paths []string, settings conf
 	info.Running = running
 	info.CoreRunning = running
 	if running {
+		info.ActiveProfileName = "内置订阅配置"
 		info.Installed = true
 		info.ExePath = inst.Path
 		if doc.MixedPort > 0 {

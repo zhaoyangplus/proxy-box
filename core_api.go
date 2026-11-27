@@ -45,6 +45,9 @@ type coreStatusResponse struct {
 	AIDedicatedPort   int              `json:"aiDedicatedPort"`
 	Settings          coreSettingsView `json:"settings"`
 	SystemProxyActive bool             `json:"systemProxyActive"`
+	GeoReady          bool             `json:"geoReady"`
+	GeoDownloading    bool             `json:"geoDownloading"`
+	GeoError          string           `json:"geoError"`
 }
 
 type subsResponse struct {
@@ -56,6 +59,19 @@ type subUpdateItem struct {
 	OK    bool   `json:"ok"`
 	Error string `json:"error,omitempty"`
 }
+
+// subPersistError means the subscription file could not be saved.
+// The download error is separate so a batch update can continue.
+type subPersistError struct{ err error }
+
+func (e *subPersistError) Error() string {
+	if e == nil || e.err == nil {
+		return "保存订阅失败"
+	}
+	return e.err.Error()
+}
+
+func (e *subPersistError) Unwrap() error { return e.err }
 
 type subsUpdateResponse struct {
 	Subscriptions []configstore.Subscription `json:"subscriptions"`
@@ -110,6 +126,7 @@ func (a *appRuntime) register(mux *http.ServeMux) {
 	mux.HandleFunc("/api/subs", a.handleSubs)
 	mux.HandleFunc("/api/subs/update", a.handleSubsUpdate)
 	mux.HandleFunc("/api/core/status", a.handleCoreStatus)
+	mux.HandleFunc("/api/core/bypass-cn", a.handleBypassCN)
 	mux.HandleFunc("/api/core/start", a.handleCoreStart)
 	mux.HandleFunc("/api/core/stop", a.handleCoreStop)
 	mux.HandleFunc("/api/core/mode", a.handleCoreMode)
@@ -147,6 +164,10 @@ func (a *appRuntime) coreStatusResponse() (coreStatusResponse, error) {
 		}
 	}
 	settings.Mode = mode
+	ready, busy, geoErr := false, false, ""
+	if a != nil {
+		ready, busy, geoErr = a.geoView()
+	}
 	return coreStatusResponse{
 		OK:                true,
 		Running:           st.Running,
@@ -158,6 +179,9 @@ func (a *appRuntime) coreStatusResponse() (coreStatusResponse, error) {
 		AIDedicatedPort:   ai,
 		Settings:          viewSettings(settings),
 		SystemProxyActive: st.Running && settings.SystemProxy,
+		GeoReady:          ready,
+		GeoDownloading:    busy,
+		GeoError:          geoErr,
 	}, nil
 }
 
@@ -234,31 +258,37 @@ func (a *appRuntime) handleCoreMode(rw http.ResponseWriter, r *http.Request) {
 		writeUserErr(rw, err)
 		return
 	}
-	mode := strings.ToLower(strings.TrimSpace(req.Mode))
-	if err := a.core.SwitchMode(r.Context(), mode); err != nil {
-		writeUserErr(rw, err)
-		return
-	}
-	settings, err := configstore.LoadCoreSettings()
+	resp, err := a.applyCoreMode(r.Context(), req.Mode)
 	if err != nil {
 		writeUserErr(rw, err)
 		return
 	}
+	writeJSON(rw, http.StatusOK, resp)
+}
+
+func (a *appRuntime) applyCoreMode(ctx context.Context, mode string) (modeResponse, error) {
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	if err := a.core.SwitchMode(ctx, mode); err != nil {
+		return modeResponse{}, err
+	}
+	settings, err := configstore.LoadCoreSettings()
+	if err != nil {
+		return modeResponse{}, err
+	}
 	settings.Mode = mode
 	if err := configstore.SaveCoreSettings(settings); err != nil {
-		writeUserErr(rw, err)
-		return
+		return modeResponse{}, err
 	}
+	a.invalidateTrayState()
 	resp := modeResponse{OK: true, Mode: mode}
 	if mode == core.ModeGlobal {
 		target, selErr := a.followGlobal()
 		if selErr != nil {
-			writeUserErr(rw, selErr)
-			return
+			return modeResponse{}, selErr
 		}
 		resp.Global = target
 	}
-	writeJSON(rw, http.StatusOK, resp)
+	return resp, nil
 }
 
 func (a *appRuntime) followGlobal() (string, error) {
@@ -326,39 +356,44 @@ func (a *appRuntime) handleSysproxySet(rw http.ResponseWriter, r *http.Request) 
 		writeUserErr(rw, err)
 		return
 	}
-	if req.Enable && (a.core == nil || !a.core.Status().Running) {
-		writeUserErr(rw, errors.New("内核未运行，不能开启系统代理"))
-		return
-	}
-	settings, err := configstore.LoadCoreSettings()
+	on, err := a.applySystemProxy(req.Enable)
 	if err != nil {
 		writeUserErr(rw, err)
 		return
 	}
-	if req.Enable {
+	writeJSON(rw, http.StatusOK, sysproxyResponse{OK: true, SystemProxy: on})
+}
+
+func (a *appRuntime) applySystemProxy(enable bool) (bool, error) {
+	if enable && (a.core == nil || !a.core.Status().Running) {
+		return false, errors.New("内核未运行，不能开启系统代理")
+	}
+	settings, err := configstore.LoadCoreSettings()
+	if err != nil {
+		return false, err
+	}
+	if enable {
 		port := settings.MixedPort
 		if st := a.core.Status(); st.Ports.Mixed > 0 {
 			port = st.Ports.Mixed
 		}
 		if err := a.setProxy("127.0.0.1", port, ""); err != nil {
-			writeUserErr(rw, err)
-			return
+			return false, err
 		}
 		settings.SystemProxy = true
 	} else {
 		if a.restore != nil {
 			if err := a.restore(); err != nil {
-				writeUserErr(rw, err)
-				return
+				return false, err
 			}
 		}
 		settings.SystemProxy = false
 	}
 	if err := configstore.SaveCoreSettings(settings); err != nil {
-		writeUserErr(rw, err)
-		return
+		return false, err
 	}
-	writeJSON(rw, http.StatusOK, sysproxyResponse{OK: true, SystemProxy: settings.SystemProxy})
+	a.invalidateTrayState()
+	return settings.SystemProxy, nil
 }
 
 func (a *appRuntime) handleSubs(rw http.ResponseWriter, r *http.Request) {
@@ -486,10 +521,12 @@ func (a *appRuntime) updateSubFields(rw http.ResponseWriter, r *http.Request) {
 		sub.URL = strings.TrimSpace(next)
 	}
 	if v, ok := raw["userAgent"]; ok {
-		if err := json.Unmarshal(v, &sub.UserAgent); err != nil {
+		var ua string
+		if err := json.Unmarshal(v, &ua); err != nil {
 			writeUserErr(rw, err)
 			return
 		}
+		sub.UserAgent = strings.TrimSpace(ua)
 	}
 	if v, ok := raw["filter"]; ok {
 		if err := json.Unmarshal(v, &sub.Filter); err != nil {
@@ -591,50 +628,37 @@ func (a *appRuntime) handleSubsUpdate(rw http.ResponseWriter, r *http.Request) {
 		writeUserErr(rw, errors.New("没有启用的订阅"))
 		return
 	}
-	dir := filepath.Join(a.coreDir, "providers")
-	proxies := a.candidateProxies()
 	updated := make([]configstore.Subscription, 0, len(targets))
 	results := make([]subUpdateItem, 0, len(targets))
 	for _, sub := range targets {
-		res, upErr := subscription.Update(r.Context(), sub, proxies, dir)
+		done := a.beginSub(sub.ID)
+		if done == nil {
+			if id != "" {
+				writeUserErr(rw, errors.New("订阅正在更新"))
+				return
+			}
+			results = append(results, subUpdateItem{ID: sub.ID, OK: false, Error: "订阅正在更新"})
+			continue
+		}
+		next, upErr := a.updateSubscription(r.Context(), sub)
+		done()
 		if upErr != nil {
-			sub.LastError = publicErr(upErr)
-			if err := a.saveSub(sub); err != nil {
-				writeUserErr(rw, err)
+			var persist *subPersistError
+			if errors.As(upErr, &persist) {
+				writeUserErr(rw, upErr)
 				return
 			}
 			if id != "" {
 				writeUserErr(rw, upErr)
 				return
 			}
-			results = append(results, subUpdateItem{ID: sub.ID, OK: false, Error: sub.LastError})
+			results = append(results, subUpdateItem{ID: sub.ID, OK: false, Error: next.LastError})
 			continue
 		}
-		sub.NodeCount = res.NodeCount
-		sub.Usage = res.Usage
-		sub.UpdatedAt = time.Now()
-		sub.LastError = ""
-		if err := a.saveSub(sub); err != nil {
-			writeUserErr(rw, err)
-			return
-		}
-		updated = append(updated, sub)
+		updated = append(updated, next)
 		results = append(results, subUpdateItem{ID: sub.ID, OK: true})
 	}
-	a.opMu.Lock()
-	subs, err = configstore.LoadSubscriptions()
-	if err != nil {
-		a.opMu.Unlock()
-		writeUserErr(rw, err)
-		return
-	}
-	if err := a.reloadIfRunning(r.Context(), subs); err != nil {
-		a.opMu.Unlock()
-		writeUserErr(rw, err)
-		return
-	}
-	subs, err = configstore.LoadSubscriptions()
-	a.opMu.Unlock()
+	subs, err = a.reloadSubs(r.Context())
 	if err != nil {
 		writeUserErr(rw, err)
 		return
@@ -648,6 +672,41 @@ func (a *appRuntime) handleSubsUpdate(rw http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(rw, http.StatusOK, subsUpdateResponse{Subscriptions: subs, Results: results})
+}
+
+// updateSubscription downloads one subscription, writes its provider file, and stores the node count.
+// A download failure is saved on LastError and returned. A save failure is a subPersistError.
+func (a *appRuntime) updateSubscription(ctx context.Context, sub configstore.Subscription) (configstore.Subscription, error) {
+	res, err := subscription.Update(ctx, sub, a.candidateProxies(), filepath.Join(a.coreDir, "providers"))
+	if err != nil {
+		sub.LastError = publicErr(err)
+		if saveErr := a.saveSub(sub); saveErr != nil {
+			return sub, &subPersistError{err: saveErr}
+		}
+		return sub, err
+	}
+	sub.NodeCount = res.NodeCount
+	sub.Usage = res.Usage
+	sub.UpdatedAt = time.Now()
+	sub.LastError = ""
+	if saveErr := a.saveSub(sub); saveErr != nil {
+		return sub, &subPersistError{err: saveErr}
+	}
+	return sub, nil
+}
+
+// reloadSubs hot-reloads the running core from the saved subscriptions and returns the stored list.
+func (a *appRuntime) reloadSubs(ctx context.Context) ([]configstore.Subscription, error) {
+	a.opMu.Lock()
+	defer a.opMu.Unlock()
+	subs, err := configstore.LoadSubscriptions()
+	if err != nil {
+		return nil, err
+	}
+	if err := a.reloadIfRunning(ctx, subs); err != nil {
+		return nil, err
+	}
+	return configstore.LoadSubscriptions()
 }
 
 func (a *appRuntime) saveSub(sub configstore.Subscription) error {
@@ -677,9 +736,10 @@ func (a *appRuntime) reloadIfRunning(ctx context.Context, subs []configstore.Sub
 	if mode := strings.TrimSpace(a.core.Status().Mode); mode != "" {
 		settings.Mode = mode
 	}
-	if err := a.core.Reload(ctx, coreParams(settings), providerSpecs(subs)); err != nil {
+	if err := a.core.Reload(ctx, a.coreParams(settings), providerSpecs(subs)); err != nil {
 		return err
 	}
+	defer a.kickGeoDownload()
 	counts, err := providerNodeCounts(ctx, a.core.Status().Ports.Controller, settings.Secret)
 	if err != nil {
 		return nil
@@ -766,31 +826,42 @@ func (a *appRuntime) handleNodesSelect(rw http.ResponseWriter, r *http.Request) 
 		writeUserErr(rw, err)
 		return
 	}
-	snap := a.snapshot()
-	client, err := nodeClient(snap, req.Client)
+	msg, live, fresh, err := a.selectRequestedNode(req.Client, req.Group, req.NodeName)
 	if err != nil {
 		writeUserErr(rw, err)
 		return
 	}
-	live, err := a.selectClientGroup(client, req.Group, req.NodeName)
+	writeJSON(rw, http.StatusOK, map[string]any{
+		"ok":       true,
+		"message":  msg,
+		"live":     live,
+		"snapshot": fresh,
+	})
+}
+
+func (a *appRuntime) selectRequestedNode(clientID, group, node string) (string, *mihomo.LiveNodeStatus, detector.SystemSnapshot, error) {
+	client, err := nodeClient(a.snapshot(), clientID)
 	if err != nil {
-		writeUserErr(rw, err)
-		return
+		return "", nil, detector.SystemSnapshot{}, err
 	}
-	group := strings.TrimSpace(req.Group)
-	if group == "" || group == mihomo.AIGroupName {
+	live, err := a.selectClientGroup(client, group, node)
+	if err != nil {
+		return "", nil, detector.SystemSnapshot{}, err
+	}
+	trimmed := strings.TrimSpace(group)
+	if trimmed == "" || trimmed == mihomo.AIGroupName {
 		cfg := configstore.LoadConfig()
-		if req.NodeName == clashscript.AIAutoName {
+		if node == clashscript.AIAutoName {
 			cfg.NodeSelectionMode = "auto"
 			cfg.ManualNodeName = ""
 		} else {
 			cfg.NodeSelectionMode = "manual"
-			cfg.ManualNodeName = req.NodeName
+			cfg.ManualNodeName = node
 		}
 		_ = configstore.SaveConfig(cfg)
 	}
 	fresh := a.snapshot()
-	msg := nodeSelectMessage(group, req.NodeName, live)
+	msg := nodeSelectMessage(trimmed, node, live)
 	if a.hub != nil {
 		a.hub.broadcast(sseEvent{
 			Type:       "sync",
@@ -799,12 +870,8 @@ func (a *appRuntime) handleNodesSelect(rw http.ResponseWriter, r *http.Request) 
 			Snapshot:   &fresh,
 		})
 	}
-	writeJSON(rw, http.StatusOK, map[string]any{
-		"ok":       true,
-		"message":  msg,
-		"live":     live,
-		"snapshot": fresh,
-	})
+	a.invalidateTrayState()
+	return msg, live, fresh, nil
 }
 
 func nodeClient(snap detector.SystemSnapshot, clientID string) (detector.ProxyClientInfo, error) {
