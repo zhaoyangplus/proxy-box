@@ -104,7 +104,7 @@ func TestStrictIsolationOnlyTouchesAIIDEGroup(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	mc := NewClient("", srv.URL, "")
+	mc := NewClient(srv.URL, "")
 
 	// 1. Optimize CursorBox's isolated group -> should pick JP02 and NEVER alter external PROXY (HK01)
 	res, err := mc.OptimizeBestNode()
@@ -184,7 +184,7 @@ func TestListMergesProviderNodes(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	got, err := NewClient("", srv.URL, "").ListGroupNodes("PROXY", false)
+	got, err := NewClient(srv.URL, "").ListGroupNodes("PROXY", false)
 	if err != nil {
 		t.Fatalf("ListGroupNodes: %v", err)
 	}
@@ -212,6 +212,9 @@ func TestListMergesProviderNodes(t *testing.T) {
 	dead := byName["old-dead"]
 	if dead.Untested || dead.DelayMs != 0 {
 		t.Fatalf("old-dead = %+v", dead)
+	}
+	if got.TotalCount != 3 || got.AliveCount != 1 {
+		t.Fatalf("counts total=%d alive=%d", got.TotalCount, got.AliveCount)
 	}
 }
 
@@ -243,7 +246,7 @@ func TestListGroupNodesDelayAndAIAutoProbe(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	mc := NewClient("", srv.URL, "")
+	mc := NewClient(srv.URL, "")
 	proxyList, err := mc.ListGroupNodes("PROXY", true)
 	if err != nil {
 		t.Fatalf("ListGroupNodes PROXY: %v", err)
@@ -323,7 +326,7 @@ func TestGroupDelay504IsMeasuredTimeout(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	got, err := NewClient("", srv.URL, "").ListGroupNodes("DEAD", true)
+	got, err := NewClient(srv.URL, "").ListGroupNodes("DEAD", true)
 	if err != nil {
 		t.Fatalf("ListGroupNodes: %v", err)
 	}
@@ -390,7 +393,7 @@ func TestListGroupNodesListsAutoGroups(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	mc := NewClient("", srv.URL, "")
+	mc := NewClient(srv.URL, "")
 	history, err := mc.ListGroupNodes("PROXY", false)
 	if err != nil {
 		t.Fatalf("ListGroupNodes history: %v", err)
@@ -496,7 +499,7 @@ func TestProviderHealthcheckFallback(t *testing.T) {
 			}))
 			defer srv.Close()
 
-			res, err := NewClient("", srv.URL, "").OptimizeBestNode()
+			res, err := NewClient(srv.URL, "").OptimizeBestNode()
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("expected error, got %+v", res)
@@ -551,7 +554,7 @@ func TestSingleNode404WithoutProviderDoesNotHealthcheck(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if _, err := NewClient("", srv.URL, "").OptimizeBestNode(); err == nil {
+	if _, err := NewClient(srv.URL, "").OptimizeBestNode(); err == nil {
 		t.Fatal("expected optimize to fail when the only node 404s")
 	}
 	mu.Lock()
@@ -608,7 +611,7 @@ func TestSelectGroupNode(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	mc := NewClient("", srv.URL, "")
+	mc := NewClient(srv.URL, "")
 	if err := mc.SelectGroupNode("PROXY", "US01"); err != nil {
 		t.Fatalf("SelectGroupNode PROXY: %v", err)
 	}
@@ -662,7 +665,7 @@ func TestPatchModeAndReloadConfigPath(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	mc := NewClient("", srv.URL, "")
+	mc := NewClient(srv.URL, "")
 	if err := mc.PatchMode("tun"); err == nil {
 		t.Fatal("expected invalid mode to fail")
 	}
@@ -735,6 +738,122 @@ func providerOnlyAIPayload() map[string]any {
 				"all": []string{"US01"},
 			},
 		},
+	}
+}
+
+func TestNodeCountsSkipAutoDirectAndReject(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/proxies" && r.URL.Path != "/providers/proxies" {
+			http.NotFound(rw, r)
+			return
+		}
+		if r.URL.Path == "/providers/proxies" {
+			_, _ = rw.Write([]byte(`{"providers":{}}`))
+			return
+		}
+		_ = json.NewEncoder(rw).Encode(map[string]any{
+			"proxies": map[string]any{
+				"PROXY": map[string]any{
+					"name": "PROXY", "type": "Selector", "now": "US01",
+					"all": []string{"⚡ AUTO", "DIRECT", "REJECT", "US01", "dead"},
+				},
+				"⚡ AUTO": map[string]any{
+					"name": "⚡ AUTO", "type": "URLTest", "now": "US01",
+					"all": []string{"US01"}, "history": []any{map[string]any{"delay": 10}},
+				},
+				"DIRECT": map[string]any{"name": "DIRECT", "type": "Direct"},
+				"REJECT": map[string]any{"name": "REJECT", "type": "Reject"},
+				"US01": map[string]any{
+					"name": "US01", "type": "Vless",
+					"history": []any{map[string]any{"delay": 40}},
+				},
+				"dead": map[string]any{
+					"name": "dead", "type": "Vless",
+					"history": []any{map[string]any{"delay": 0}},
+				},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	got, err := NewClient(srv.URL, "").ListGroupNodes("PROXY", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.TotalCount != 2 || got.AliveCount != 1 {
+		t.Fatalf("total=%d alive=%d nodes=%+v", got.TotalCount, got.AliveCount, got.Nodes)
+	}
+}
+
+func TestPickExternalGroupSkipsSpeedTest(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/providers/proxies" {
+			_, _ = rw.Write([]byte(`{"providers":{}}`))
+			return
+		}
+		if r.URL.Path != "/proxies" {
+			http.NotFound(rw, r)
+			return
+		}
+		_ = json.NewEncoder(rw).Encode(map[string]any{
+			"proxies": map[string]any{
+				speedTestGroupName: map[string]any{
+					"name": speedTestGroupName, "type": "Selector", "now": "DIRECT",
+					"all": []string{"DIRECT", "a", "b", "c", "d"},
+				},
+				"日常": map[string]any{
+					"name": "日常", "type": "Selector", "now": "a",
+					"all": []string{"a"},
+				},
+				"a":      map[string]any{"name": "a", "type": "Vless", "history": []any{map[string]any{"delay": 1}}},
+				"b":      map[string]any{"name": "b", "type": "Vless"},
+				"c":      map[string]any{"name": "c", "type": "Vless"},
+				"d":      map[string]any{"name": "d", "type": "Vless"},
+				"DIRECT": map[string]any{"name": "DIRECT", "type": "Direct"},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	got, err := NewClient(srv.URL, "").ListGroupNodes("日常", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ExternalGroup != "日常" {
+		t.Fatalf("external group = %q", got.ExternalGroup)
+	}
+}
+
+func TestDelayURLOverride(t *testing.T) {
+	const custom = "http://127.0.0.1/generate_204"
+	var gotURL string
+	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/proxies" {
+			_ = json.NewEncoder(rw).Encode(map[string]any{"proxies": map[string]any{}})
+			return
+		}
+		if r.URL.Path == "/providers/proxies" {
+			_, _ = rw.Write([]byte(`{"providers":{}}`))
+			return
+		}
+		if r.URL.Path == "/proxies/US01/delay" {
+			gotURL = r.URL.Query().Get("url")
+			_, _ = rw.Write([]byte(`{"delay":12}`))
+			return
+		}
+		http.NotFound(rw, r)
+	}))
+	defer srv.Close()
+
+	mc := NewClient(srv.URL, "")
+	mc.SetDelayTestURL("  ")
+	if delay := mc.TestNodeDelay("US01"); delay != 12 || gotURL != TestURL {
+		t.Fatalf("blank override delay=%d url=%q", delay, gotURL)
+	}
+	gotURL = ""
+	mc.SetDelayTestURL(custom)
+	if delay := mc.TestNodeDelay("US01"); delay != 12 || gotURL != custom {
+		t.Fatalf("delay=%d url=%q", delay, gotURL)
 	}
 }
 

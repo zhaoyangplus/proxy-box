@@ -9,21 +9,21 @@ import (
 	"strings"
 	"time"
 
+	"gopkg.in/yaml.v3"
 	"proxy-box/internal/configstore"
 	"proxy-box/internal/mihomo"
-	"gopkg.in/yaml.v3"
 )
 
 const (
-	MarkerStart            = "/* === PROXY-BOX-AI-START === */"
-	LegacyMarkerStart      = "/* === CURSOR-BOX-AI-START === */"
-	MarkerEnd              = "/* === PROXY-BOX-AI-END === */"
-	ScriptVersion          = "// ProxyBox-Script-Version: 5"
-	AIGroupName            = "🤖 AI-IDE"
-	AIAutoName             = "⚡ AI-Auto"
-	VergeDedicatedPort     = 17897
-	ClashMiDedicatedPort   = 17890
-	DedicatedListenerName  = "proxybox-ai-dedicated"
+	MarkerStart           = "/* === PROXY-BOX-AI-START === */"
+	LegacyMarkerStart     = "/* === CURSOR-BOX-AI-START === */"
+	MarkerEnd             = "/* === PROXY-BOX-AI-END === */"
+	ScriptVersion         = "// ProxyBox-Script-Version: 5"
+	AIGroupName           = "🤖 AI-IDE"
+	AIAutoName            = "⚡ AI-Auto"
+	VergeDedicatedPort    = 17897
+	ClashMiDedicatedPort  = 17890
+	DedicatedListenerName = "proxybox-ai-dedicated"
 )
 
 func ScriptFilePath(clashDir string) string {
@@ -465,7 +465,7 @@ func Inject(clashDir, controllerPipe, externalController, secret string) (reload
 	touchScriptTimestamp(clashDir)
 
 	if controllerPipe != "" || externalController != "" {
-		mc := mihomo.NewClient(controllerPipe, externalController, secret)
+		mc := mihomo.NewClient(externalController, secret)
 		reloadedViaAPI = mc.ReloadConfig()
 	}
 	return reloadedViaAPI, nil
@@ -487,7 +487,7 @@ func Remove(clashDir, controllerPipe, externalController, secret string) error {
 			_ = os.Remove(bakPath)
 			touchScriptTimestamp(clashDir)
 			if controllerPipe != "" || externalController != "" {
-				mc := mihomo.NewClient(controllerPipe, externalController, secret)
+				mc := mihomo.NewClient(externalController, secret)
 				mc.ReloadConfig()
 			}
 			return nil

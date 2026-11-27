@@ -14,13 +14,13 @@ import (
 	"time"
 	"unsafe"
 
+	"golang.org/x/sys/windows"
+	"golang.org/x/sys/windows/registry"
+	"gopkg.in/yaml.v3"
 	"proxy-box/internal/clashscript"
 	"proxy-box/internal/configstore"
 	"proxy-box/internal/configurator"
 	"proxy-box/internal/mihomo"
-	"golang.org/x/sys/windows"
-	"golang.org/x/sys/windows/registry"
-	"gopkg.in/yaml.v3"
 )
 
 type ProxyClientInfo struct {
@@ -117,7 +117,7 @@ func OptimizeClientNode(c ProxyClientInfo) (*mihomo.OptimizeResult, error) {
 	if c.ID == "v2rayn" {
 		return nil, fmt.Errorf("v2rayN 未暴露 Mihomo 控制接口，请在 v2rayN 主界面选择美/日/新等非香港节点")
 	}
-	mc := mihomo.NewClient(c.ControllerPipe, c.ExternalController, c.Secret)
+	mc := mihomo.NewClient(c.ExternalController, c.Secret)
 	if !mc.Available() {
 		return nil, fmt.Errorf("未能连接到 %s 内核控制接口，请确认 %s 已运行", c.Name, c.Name)
 	}
@@ -129,7 +129,7 @@ func ListClientNodes(c ProxyClientInfo, runDelayTest bool) (*mihomo.NodeListResu
 	if c.ID == "v2rayn" {
 		return nil, fmt.Errorf("v2rayN 暂不支持双向独立节点选择，请使用 Clash Verge 或 Clash Mi 启用独立通道")
 	}
-	mc := mihomo.NewClient(c.ControllerPipe, c.ExternalController, c.Secret)
+	mc := mihomo.NewClient(c.ExternalController, c.Secret)
 	if !mc.Available() {
 		return nil, fmt.Errorf("未能连接到 %s 内核控制接口，请确认 %s 已运行", c.Name, c.Name)
 	}
@@ -141,7 +141,7 @@ func SelectClientNode(c ProxyClientInfo, targetNode string) (*mihomo.LiveNodeSta
 	if c.ID == "v2rayn" {
 		return nil, fmt.Errorf("v2rayN 暂不支持双向独立节点选择")
 	}
-	mc := mihomo.NewClient(c.ControllerPipe, c.ExternalController, c.Secret)
+	mc := mihomo.NewClient(c.ExternalController, c.Secret)
 	if !mc.Available() {
 		return nil, fmt.Errorf("未能连接到 %s 内核控制接口", c.Name)
 	}
@@ -654,7 +654,7 @@ func detectClashVerge(cfg configstore.AppConfig, procs map[string]*procDetail) P
 
 	// Query live Mihomo node & group status over Named Pipe or HTTP controller
 	if info.Running && (info.ControllerPipe != "" || info.ExternalController != "") {
-		mc := mihomo.NewClient(info.ControllerPipe, info.ExternalController, info.Secret)
+		mc := mihomo.NewClient(info.ExternalController, info.Secret)
 		live := mc.GetLiveStatus()
 		info.ControllerReachable = live.Connected
 		info.IsolatedGroup = live.IsolatedGroup
@@ -864,7 +864,7 @@ func detectClashMi(cfg configstore.AppConfig, procs map[string]*procDetail, sysE
 		}
 		// Query Clash Mi live Mihomo node via external-controller
 		if info.ExternalController != "" {
-			mc := mihomo.NewClient("", info.ExternalController, info.Secret)
+			mc := mihomo.NewClient(info.ExternalController, info.Secret)
 			live := mc.GetLiveStatus()
 			info.ControllerReachable = live.Connected
 			info.IsolatedGroup = live.IsolatedGroup

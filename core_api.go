@@ -297,7 +297,7 @@ func (a *appRuntime) followGlobal() (string, error) {
 		return "", err
 	}
 	st := a.core.Status()
-	mc := mihomo.NewClient("", fmt.Sprintf("127.0.0.1:%d", st.Ports.Controller), settings.Secret)
+	mc := mihomo.NewClient(fmt.Sprintf("127.0.0.1:%d", st.Ports.Controller), settings.Secret)
 	if !mc.Available() {
 		return "", errors.New("未能连接到内置内核")
 	}
@@ -933,7 +933,7 @@ func groupClient(client detector.ProxyClientInfo) (*mihomo.Client, error) {
 	if client.ID == "v2rayn" {
 		return nil, errors.New("v2rayN 暂不支持按组选择节点")
 	}
-	mc := mihomo.NewClient(client.ControllerPipe, client.ExternalController, client.Secret)
+	mc := mihomo.NewClient(client.ExternalController, client.Secret)
 	if !mc.Available() {
 		return nil, fmt.Errorf("未能连接到 %s 内核控制接口", client.Name)
 	}

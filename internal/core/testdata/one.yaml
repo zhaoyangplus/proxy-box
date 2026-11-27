@@ -33,7 +33,7 @@ proxy-groups:
     type: url-test
     use:
       - 'alpha'
-    url: 'https://www.gstatic.com/generate_204'
+    url: 'http://www.gstatic.com/generate_204'
     interval: 300
     lazy: true
   - name: '🤖 AI-IDE'
@@ -47,7 +47,7 @@ proxy-groups:
     type: url-test
     use:
       - 'alpha'
-    url: 'https://www.gstatic.com/generate_204'
+    url: 'http://www.gstatic.com/generate_204'
     interval: 300
     lazy: true
     exclude-filter: '(?i)香港|🇭🇰|Hong Kong|港\d|hktj|hkbn|hkt|澳门|🇲🇴|Macau|中国|大陆|🇨🇳|China|俄罗斯|🇷🇺|Russia|(^|[^a-z])(hk|mo|cn|ru)([^a-z]|$)|剩余|流量|到期|官网|套餐|重置|订阅|网址'

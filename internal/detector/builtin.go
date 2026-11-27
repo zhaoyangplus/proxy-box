@@ -120,7 +120,7 @@ func assembleBuiltin(procs map[string]*procDetail, paths []string, settings conf
 		} else {
 			info.PortReachable, info.HTTPVerified = probe(info.ProxyHost, mixed)
 		}
-		mc := mihomo.NewClient("", info.ExternalController, info.Secret)
+		mc := mihomo.NewClient(info.ExternalController, info.Secret)
 		live := mc.GetLiveStatus()
 		info.ControllerReachable = live.Connected
 		info.IsolatedGroup = live.IsolatedGroup
