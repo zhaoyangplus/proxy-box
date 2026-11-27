@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"net"
 	"net/http"
@@ -34,9 +35,6 @@ import (
 var embeddedUI embed.FS
 
 const appWindowTitle = "Proxy Box - 本地代理工作台"
-
-// appVersion can be overridden at build time via: -ldflags "-X main.appVersion=v1.0.0"
-var appVersion = "v1.0.0"
 
 type sseEvent struct {
 	Type       string                    `json:"type"`
@@ -96,15 +94,7 @@ func main() {
 	restarted := flag.Bool("restarted", false, "Internal flag indicating process was restarted after self-update")
 	flag.Parse()
 
-	if *showVersion {
-		fmt.Println("Proxy Box", appVersion)
-		return
-	}
-
-	updater.CleanupOldBinary()
-
-	if *selfTest {
-		runSelfTest()
+	if takeEarlyCLI(os.Stdout, *showVersion, *selfTest, updater.CleanupOldBinary, runSelfTest) {
 		return
 	}
 
@@ -582,107 +572,36 @@ func startLocalAPIServer(hub *sseHub, rt *appRuntime, appUpdater *updater.Update
 
 	mux.HandleFunc("/api/open-url", handleOpenURL)
 
-	mux.HandleFunc("/api/update/check", func(rw http.ResponseWriter, r *http.Request) {
-		snap := detector.DetectAll()
-		proxyURL := ""
-		if snap.ActiveClient.PortReachable {
-			proxyURL = snap.ActiveClient.ProxyURL
-		}
-		ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
-		defer cancel()
+	registerUpdateRoutes(mux, hub, appUpdater, onBeforeRestart, onAfterRestart)
 
-		res, err := appUpdater.CheckLatest(ctx, proxyURL)
-		if err != nil {
-			writeErr(rw, err)
-			return
-		}
-		writeJSON(rw, http.StatusOK, res)
-	})
-
-	mux.HandleFunc("/api/update/status", func(rw http.ResponseWriter, r *http.Request) {
-		writeJSON(rw, http.StatusOK, appUpdater.GetProgress())
-	})
-
-	mux.HandleFunc("/api/update/apply", func(rw http.ResponseWriter, r *http.Request) {
-		var req struct {
-			DownloadURL   string `json:"downloadUrl"`
-			TargetVersion string `json:"targetVersion"`
-			AssetSize     int64  `json:"assetSize"`
-		}
-		_ = json.NewDecoder(r.Body).Decode(&req)
-
-		snap := detector.DetectAll()
-		proxyURL := ""
-		if snap.ActiveClient.PortReachable {
-			proxyURL = snap.ActiveClient.ProxyURL
-		}
-
-		downloadURL := strings.TrimSpace(req.DownloadURL)
-		targetVer := strings.TrimSpace(req.TargetVersion)
-		assetSize := req.AssetSize
-
-		if downloadURL == "" {
-			if last := appUpdater.LastCheck(); last != nil && last.DownloadURL != "" {
-				downloadURL = last.DownloadURL
-				targetVer = last.LatestVersion
-				assetSize = last.AssetSize
-			} else {
-				ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
-				res, err := appUpdater.CheckLatest(ctx, proxyURL)
-				cancel()
-				if err != nil {
-					writeErr(rw, err)
-					return
-				}
-				if !res.HasUpdate {
-					writeErr(rw, fmt.Errorf("当前已是最新版本 (%s)", res.CurrentVersion))
-					return
-				}
-				downloadURL = res.DownloadURL
-				targetVer = res.LatestVersion
-				assetSize = res.AssetSize
-			}
-		}
-
-		if downloadURL == "" {
-			writeErr(rw, fmt.Errorf("未找到可下载的 Windows 程序附件，请前往 GitHub Releases 手动下载"))
-			return
-		}
-
-		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
-			defer cancel()
-			err := appUpdater.DownloadAndApply(
-				ctx,
-				downloadURL,
-				targetVer,
-				assetSize,
-				proxyURL,
-				func(p updater.DownloadProgress) {
-					cp := p
-					hub.broadcast(sseEvent{
-						Type:   "update",
-						Update: &cp,
-					})
-				},
-				onBeforeRestart,
-			)
-			if err == nil && onAfterRestart != nil {
-				onAfterRestart()
-			}
-		}()
-
-		writeJSON(rw, http.StatusOK, map[string]any{
-			"ok":      true,
-			"message": "已开始下载新版本更新包...",
-		})
-	})
-
+	token, err := newSessionToken()
+	if err != nil {
+		_ = ln.Close()
+		return "", err
+	}
+	guard := newAPIGuard(token, ln.Addr().String())
 	go func() {
-		_ = http.Serve(ln, mux)
+		_ = http.Serve(ln, guard.wrap(mux))
 	}()
 
-	return "http://" + ln.Addr().String(), nil
+	return guard.bootstrapURL(), nil
+}
+
+func takeEarlyCLI(w io.Writer, showVersion, selfTest bool, cleanup func(), selfTestFn func()) bool {
+	if showVersion {
+		fmt.Fprintln(w, versionLine())
+		return true
+	}
+	if cleanup != nil {
+		cleanup()
+	}
+	if selfTest {
+		if selfTestFn != nil {
+			selfTestFn()
+		}
+		return true
+	}
+	return false
 }
 
 var detectSnapshot = detector.DetectAll

@@ -31,6 +31,7 @@
 纯 Go 静态编译（`CGO_ENABLED=0`，单文件 `.exe`，免安装环境，可直接跨 Windows 10/11 电脑分发运行）：
 
 ```powershell
-$env:CGO_ENABLED="0"
-go build -ldflags="-s -w -H=windowsgui -X main.appVersion=v1.0.0" -o ProxyBox.exe .
+.\build.ps1
 ```
+
+`build.ps1` 读取仓库根目录的 `VERSION`，编译 `dist\ProxyBox.exe`，并写出 `dist\ProxyBox-<VERSION>-win64.zip`。已有的 `dist\mihomo.exe` 会保留。
