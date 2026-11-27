@@ -47,6 +47,8 @@ type appRuntime struct {
 	cancelStart context.CancelFunc
 	shutdownMu  sync.Mutex
 	opMu        sync.Mutex
+	flight      *subFlight
+	trayState   trayStateCache
 }
 
 func newAppRuntime(hub *sseHub) *appRuntime {
@@ -59,6 +61,7 @@ func newAppRuntime(hub *sseHub) *appRuntime {
 		setProxy:     sysproxy.Set,
 		ensureBinary: core.EnsureBinary,
 		importBinary: core.ImportBinary,
+		flight:       newSubFlight(),
 	}
 }
 
