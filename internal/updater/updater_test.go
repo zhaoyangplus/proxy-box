@@ -1,12 +1,18 @@
 package updater
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -120,5 +126,265 @@ func TestValidatePEAndReplaceExecutable(t *testing.T) {
 	}
 	if _, err := os.Stat(origExe + ".old"); err != nil {
 		t.Fatalf("expected backup .old file to exist: %v", err)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func httpResponse(req *http.Request, status int, hdr http.Header, body []byte) *http.Response {
+	if hdr == nil {
+		hdr = make(http.Header)
+	}
+	if body == nil {
+		body = []byte{}
+	}
+	return &http.Response{
+		StatusCode:    status,
+		Status:        http.StatusText(status),
+		Header:        hdr,
+		Body:          io.NopCloser(bytes.NewReader(body)),
+		ContentLength: int64(len(body)),
+		Request:       req,
+	}
+}
+
+func peBytes(fill byte, n int) []byte {
+	if n < 64 {
+		n = 64
+	}
+	buf := bytes.Repeat([]byte{fill}, n)
+	buf[0], buf[1] = 'M', 'Z'
+	return buf
+}
+
+func digestOf(b []byte) string {
+	sum := sha256.Sum256(b)
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+func releaseBody(downloadURL, digest string, size int) string {
+	raw, _ := json.Marshal(ghRelease{
+		TagName: "v2.4.0",
+		Name:    "Proxy Box v2.4.0",
+		Assets: []ghAsset{{
+			Name:               "ProxyBox.exe",
+			Size:               int64(size),
+			BrowserDownloadURL: downloadURL,
+			Digest:             digest,
+		}},
+	})
+	return string(raw)
+}
+
+func TestCheckLatestPinsRepoAndDigest(t *testing.T) {
+	const digest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	var path string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path = r.URL.Path
+		_, _ = io.WriteString(w, releaseBody(
+			"https://github.com/zhaoyangplus/proxy-box/releases/download/v2.4.0/ProxyBox.exe",
+			digest,
+			80,
+		))
+	}))
+	defer srv.Close()
+
+	u := New("v2.3.0")
+	u.APIBaseURL = srv.URL
+	res, err := u.CheckLatest(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if path != "/repos/"+DefaultOwner+"/"+DefaultRepo+"/releases/latest" {
+		t.Fatalf("path %s", path)
+	}
+	if res.Digest != digest {
+		t.Fatalf("digest %q", res.Digest)
+	}
+}
+
+func TestPrepareRejectsUnsafeAssetURL(t *testing.T) {
+	payload := peBytes(0x22, 80)
+	digest := digestOf(payload)
+	cases := []struct {
+		name string
+		url  string
+		want string
+	}{
+		{"http", "http://github.com/zhaoyangplus/proxy-box/releases/download/v2.4.0/ProxyBox.exe", "HTTPS"},
+		{"foreign", "https://example.com/ProxyBox.exe", "example.com"},
+		{"lookalike", "https://github.com.evil.com/ProxyBox.exe", "github.com.evil.com"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			u := New("v1.0.0")
+			u.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				if r.URL.Host != "api.github.com" {
+					t.Errorf("download started for %s", r.URL)
+				}
+				return httpResponse(r, http.StatusOK, nil, []byte(releaseBody(tc.url, digest, len(payload)))), nil
+			})
+			_, err := u.PrepareDownload(context.Background(), "")
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err %v", err)
+			}
+		})
+	}
+}
+
+func TestPrepareRejectsMissingDigest(t *testing.T) {
+	assetURL := "https://github.com/zhaoyangplus/proxy-box/releases/download/v2.4.0/ProxyBox.exe"
+	u := New("v1.0.0")
+	u.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Host != "api.github.com" {
+			t.Errorf("download started for %s", r.URL)
+		}
+		return httpResponse(r, http.StatusOK, nil, []byte(releaseBody(assetURL, "", 80))), nil
+	})
+	_, err := u.PrepareDownload(context.Background(), "")
+	if err == nil || !strings.Contains(err.Error(), "SHA-256") || !strings.Contains(err.Error(), "手动下载") {
+		t.Fatalf("err %v", err)
+	}
+}
+
+func TestApplyRejectsForeignRedirect(t *testing.T) {
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "ProxyBox.exe")
+	original := peBytes(0x11, 80)
+	if err := os.WriteFile(exe, original, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	payload := peBytes(0x22, 96)
+	assetURL := "https://github.com/zhaoyangplus/proxy-box/releases/download/v2.4.0/ProxyBox.exe"
+	u := New("v1.0.0")
+	u.binaryPath = exe
+	u.spawnFn = func(string) error {
+		t.Fatal("spawned after a refused redirect")
+		return nil
+	}
+	u.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		switch r.URL.Host {
+		case "api.github.com":
+			return httpResponse(r, http.StatusOK, nil, []byte(releaseBody(assetURL, digestOf(payload), len(payload)))), nil
+		case "github.com":
+			hdr := http.Header{"Location": []string{"https://evil.example/ProxyBox.exe"}}
+			return httpResponse(r, http.StatusFound, hdr, nil), nil
+		default:
+			return nil, errors.New("unexpected host " + r.URL.Host)
+		}
+	})
+	asset, err := u.PrepareDownload(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = u.DownloadAndApply(context.Background(), asset, "", nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "evil.example") {
+		t.Fatalf("err %v", err)
+	}
+	got, err := os.ReadFile(exe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, original) {
+		t.Fatal("current executable changed")
+	}
+}
+
+func TestApplyDigestMismatchLeavesBinary(t *testing.T) {
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "ProxyBox.exe")
+	original := peBytes(0x11, 80)
+	if err := os.WriteFile(exe, original, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	payload := peBytes(0x22, 96)
+	assetURL := "https://github.com/zhaoyangplus/proxy-box/releases/download/v2.4.0/ProxyBox.exe"
+	u := New("v1.0.0")
+	u.binaryPath = exe
+	u.spawnFn = func(string) error {
+		t.Fatal("spawned after a bad digest")
+		return nil
+	}
+	u.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		switch r.URL.Host {
+		case "api.github.com":
+			return httpResponse(r, http.StatusOK, nil, []byte(releaseBody(assetURL, digestOf([]byte("other")), len(payload)))), nil
+		case "github.com":
+			return httpResponse(r, http.StatusOK, nil, payload), nil
+		default:
+			return nil, errors.New("unexpected host " + r.URL.Host)
+		}
+	})
+	asset, err := u.PrepareDownload(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = u.DownloadAndApply(context.Background(), asset, "", nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "SHA-256") {
+		t.Fatalf("err %v", err)
+	}
+	got, err := os.ReadFile(exe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, original) {
+		t.Fatal("current executable changed")
+	}
+	if _, err := os.Stat(exe + ".new"); !os.IsNotExist(err) {
+		t.Fatalf("temp file left behind: %v", err)
+	}
+	if _, err := os.Stat(exe + ".old"); !os.IsNotExist(err) {
+		t.Fatalf("backup replaced the current executable: %v", err)
+	}
+}
+
+func TestApplyHappyPath(t *testing.T) {
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "ProxyBox.exe")
+	original := peBytes(0x11, 80)
+	if err := os.WriteFile(exe, original, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	payload := peBytes(0x33, 128)
+	assetURL := "https://github.com/zhaoyangplus/proxy-box/releases/download/v2.4.0/ProxyBox.exe"
+	cdnURL := "https://release-assets.githubusercontent.com/github-production-release-asset/ProxyBox.exe"
+	var spawned string
+	u := New("v1.0.0")
+	u.binaryPath = exe
+	u.spawnFn = func(path string) error {
+		spawned = path
+		return nil
+	}
+	u.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		switch r.URL.Host {
+		case "api.github.com":
+			return httpResponse(r, http.StatusOK, nil, []byte(releaseBody(assetURL, digestOf(payload), len(payload)))), nil
+		case "github.com":
+			hdr := http.Header{"Location": []string{cdnURL}}
+			return httpResponse(r, http.StatusFound, hdr, nil), nil
+		case "release-assets.githubusercontent.com":
+			return httpResponse(r, http.StatusOK, nil, payload), nil
+		default:
+			return nil, errors.New("unexpected host " + r.URL.Host)
+		}
+	})
+	asset, err := u.PrepareDownload(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := u.DownloadAndApply(context.Background(), asset, "", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(exe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatal("installed bytes do not match the release asset")
+	}
+	if spawned != exe {
+		t.Fatalf("spawned %q", spawned)
 	}
 }

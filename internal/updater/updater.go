@@ -2,7 +2,10 @@ package updater
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,7 +29,19 @@ const (
 	DefaultRepo      = "proxy-box"
 	DefaultAssetName = "ProxyBox.exe"
 	defaultAPIBase   = "https://api.github.com"
+
+	errNoAsset  = "未找到可下载的 Windows 程序附件，请前往 GitHub Releases 手动下载"
+	errNoDigest = "该版本没有提供 SHA-256 摘要，已拒绝应用内更新。请前往 GitHub Releases 页面手动下载"
 )
+
+// GitHub release assets start on github.com or api.github.com and redirect to
+// release-assets.githubusercontent.com. Older assets still use objects.githubusercontent.com.
+var allowedGitHubHosts = map[string]struct{}{
+	"github.com":                           {},
+	"api.github.com":                       {},
+	"objects.githubusercontent.com":        {},
+	"release-assets.githubusercontent.com": {},
+}
 
 // CheckResult holds metadata about the latest GitHub Release compared to the running build.
 type CheckResult struct {
@@ -40,6 +55,7 @@ type CheckResult struct {
 	AssetName      string `json:"assetName"`
 	AssetSize      int64  `json:"assetSize"`
 	DownloadURL    string `json:"downloadUrl"`
+	Digest         string `json:"digest,omitempty"`
 	CheckedAt      string `json:"checkedAt"`
 }
 
@@ -70,20 +86,30 @@ type ghAsset struct {
 	Name               string `json:"name"`
 	Size               int64  `json:"size"`
 	BrowserDownloadURL string `json:"browser_download_url"`
+	Digest             string `json:"digest"`
+}
+
+// ReleaseAsset is a checked release file the updater is allowed to install.
+type ReleaseAsset struct {
+	Version string
+	URL     string
+	Size    int64
+	Digest  []byte
 }
 
 // Updater checks GitHub Releases and performs atomic in-place Windows binary upgrades.
 type Updater struct {
-	Owner          string
-	Repo           string
 	CurrentVersion string
 	AssetName      string
 	APIBaseURL     string
+	Transport      http.RoundTripper
 
 	mu         sync.Mutex
 	inProgress bool
 	progress   DownloadProgress
 	lastCheck  *CheckResult
+	binaryPath string
+	spawnFn    func(exePath string) error
 }
 
 func New(currentVersion string) *Updater {
@@ -91,8 +117,6 @@ func New(currentVersion string) *Updater {
 		currentVersion = "v1.0.0"
 	}
 	return &Updater{
-		Owner:          DefaultOwner,
-		Repo:           DefaultRepo,
 		CurrentVersion: currentVersion,
 		AssetName:      DefaultAssetName,
 		APIBaseURL:     defaultAPIBase,
@@ -104,11 +128,11 @@ func New(currentVersion string) *Updater {
 }
 
 func (u *Updater) RepoURL() string {
-	return fmt.Sprintf("https://github.com/%s/%s", u.Owner, u.Repo)
+	return fmt.Sprintf("https://github.com/%s/%s", DefaultOwner, DefaultRepo)
 }
 
 func (u *Updater) ReleasesURL() string {
-	return fmt.Sprintf("https://github.com/%s/%s/releases", u.Owner, u.Repo)
+	return fmt.Sprintf("https://github.com/%s/%s/releases", DefaultOwner, DefaultRepo)
 }
 
 func (u *Updater) GetProgress() DownloadProgress {
@@ -157,7 +181,7 @@ func (u *Updater) CheckLatest(ctx context.Context, proxyURL string) (*CheckResul
 	if apiBase == "" {
 		apiBase = defaultAPIBase
 	}
-	endpoint := fmt.Sprintf("%s/repos/%s/%s/releases/latest", apiBase, u.Owner, u.Repo)
+	endpoint := fmt.Sprintf("%s/repos/%s/%s/releases/latest", apiBase, DefaultOwner, DefaultRepo)
 
 	resp, err := u.doGetWithFallback(ctx, endpoint, proxyURL, 15*time.Second, true)
 	if err != nil {
@@ -202,6 +226,7 @@ func (u *Updater) CheckLatest(ctx context.Context, proxyURL string) (*CheckResul
 		AssetName:      asset.Name,
 		AssetSize:      asset.Size,
 		DownloadURL:    asset.BrowserDownloadURL,
+		Digest:         strings.TrimSpace(asset.Digest),
 		CheckedAt:      time.Now().Format("15:04:05"),
 	}
 
@@ -213,13 +238,54 @@ func (u *Updater) CheckLatest(ctx context.Context, proxyURL string) (*CheckResul
 	return res, nil
 }
 
-// DownloadAndApply downloads the new executable, verifies its PE header and size,
-// atomically swaps it with the running binary, invokes onBeforeRestart, and spawns the new process.
+// PrepareDownload uses the last successful check, or runs one, and refuses any asset
+// that is not an https GitHub URL with a sha256 digest.
+func (u *Updater) PrepareDownload(ctx context.Context, proxyURL string) (ReleaseAsset, error) {
+	res := u.LastCheck()
+	if res == nil {
+		checked, err := u.CheckLatest(ctx, proxyURL)
+		if err != nil {
+			return ReleaseAsset{}, err
+		}
+		res = checked
+	}
+	return releaseAssetFromCheck(res)
+}
+
+func releaseAssetFromCheck(res *CheckResult) (ReleaseAsset, error) {
+	if res == nil {
+		return ReleaseAsset{}, errors.New("没有可用的更新检查结果")
+	}
+	if !res.HasUpdate {
+		return ReleaseAsset{}, fmt.Errorf("当前已是最新版本 (%s)", res.CurrentVersion)
+	}
+	rawURL := strings.TrimSpace(res.DownloadURL)
+	if rawURL == "" {
+		return ReleaseAsset{}, errors.New(errNoAsset)
+	}
+	sum, err := parseSHA256Digest(res.Digest)
+	if err != nil {
+		return ReleaseAsset{}, errors.New(errNoDigest)
+	}
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return ReleaseAsset{}, errors.New("更新下载地址无效")
+	}
+	if err := allowedGitHubURL(parsed); err != nil {
+		return ReleaseAsset{}, err
+	}
+	return ReleaseAsset{
+		Version: strings.TrimSpace(res.LatestVersion),
+		URL:     parsed.String(),
+		Size:    res.AssetSize,
+		Digest:  sum,
+	}, nil
+}
+
+// DownloadAndApply downloads asset, checks the PE header, size, and SHA-256, then replaces the running binary.
 func (u *Updater) DownloadAndApply(
 	ctx context.Context,
-	downloadURL string,
-	targetVersion string,
-	expectedSize int64,
+	asset ReleaseAsset,
 	proxyURL string,
 	onProgress func(DownloadProgress),
 	onBeforeRestart func(),
@@ -238,6 +304,7 @@ func (u *Updater) DownloadAndApply(
 		u.mu.Unlock()
 	}()
 
+	targetVersion := asset.Version
 	fail := func(err error) error {
 		u.setProgress(DownloadProgress{
 			Status:         "error",
@@ -249,12 +316,20 @@ func (u *Updater) DownloadAndApply(
 		return err
 	}
 
-	downloadURL = strings.TrimSpace(downloadURL)
-	if downloadURL == "" {
-		return fail(errors.New("未找到可下载的 Windows 程序附件，请前往 GitHub Releases 手动下载"))
+	parsed, err := url.Parse(strings.TrimSpace(asset.URL))
+	if err != nil {
+		return fail(errors.New("更新下载地址无效"))
 	}
+	if err := allowedGitHubURL(parsed); err != nil {
+		return fail(err)
+	}
+	if len(asset.Digest) != sha256.Size {
+		return fail(errors.New(errNoDigest))
+	}
+	downloadURL := parsed.String()
+	expectedSize := asset.Size
 
-	exePath, err := resolveExecutablePath()
+	exePath, err := u.executable()
 	if err != nil {
 		return fail(fmt.Errorf("无法定位当前程序路径: %w", err))
 	}
@@ -292,11 +367,13 @@ func (u *Updater) DownloadAndApply(
 	buf := make([]byte, 32*1024)
 	var downloaded int64
 	lastEmit := time.Time{}
+	hasher := sha256.New()
+	writer := io.MultiWriter(outFile, hasher)
 
 	for {
 		n, rErr := resp.Body.Read(buf)
 		if n > 0 {
-			if _, wErr := outFile.Write(buf[:n]); wErr != nil {
+			if _, wErr := writer.Write(buf[:n]); wErr != nil {
 				_ = outFile.Close()
 				_ = os.Remove(newPath)
 				return fail(fmt.Errorf("写入更新文件失败: %w", wErr))
@@ -356,6 +433,10 @@ func (u *Updater) DownloadAndApply(
 		_ = os.Remove(newPath)
 		return fail(err)
 	}
+	if subtle.ConstantTimeCompare(hasher.Sum(nil), asset.Digest) != 1 {
+		_ = os.Remove(newPath)
+		return fail(errors.New("下载文件的 SHA-256 与发布摘要不一致，已中止更新"))
+	}
 
 	if err := replaceExecutable(exePath, newPath); err != nil {
 		_ = os.Remove(newPath)
@@ -372,19 +453,15 @@ func (u *Updater) DownloadAndApply(
 		Message:         fmt.Sprintf("已升级至 %s，正在重启 Proxy Box...", targetVersion),
 	}, onProgress)
 
-	// Allow UI to display restarting status before tearing down local server & window
-	time.Sleep(550 * time.Millisecond)
+	if u.spawnFn == nil {
+		time.Sleep(550 * time.Millisecond)
+	}
 
 	if onBeforeRestart != nil {
 		onBeforeRestart()
 	}
 
-	cmd := exec.Command(exePath, "--restarted")
-	cmd.Dir = filepath.Dir(exePath)
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		CreationFlags: windows.CREATE_NEW_PROCESS_GROUP | windows.DETACHED_PROCESS,
-	}
-	if err := cmd.Start(); err != nil {
+	if err := u.spawn(exePath); err != nil {
 		return fail(fmt.Errorf("已替换新版本但自动重启失败，请手动重新打开程序: %w", err))
 	}
 	return nil
@@ -392,21 +469,7 @@ func (u *Updater) DownloadAndApply(
 
 func (u *Updater) doGetWithFallback(ctx context.Context, rawURL, proxyURL string, timeout time.Duration, isAPI bool) (*http.Response, error) {
 	doOnce := func(pURL string) (*http.Response, error) {
-		tr := &http.Transport{
-			TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12},
-		}
-		if pURL != "" {
-			if parsed, err := url.Parse(pURL); err == nil {
-				tr.Proxy = http.ProxyURL(parsed)
-			}
-		} else {
-			tr.Proxy = http.ProxyFromEnvironment
-		}
-
-		client := &http.Client{
-			Transport: tr,
-			Timeout:   timeout,
-		}
+		client := u.httpClient(pURL, timeout, !isAPI)
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 		if err != nil {
 			return nil, err
@@ -419,6 +482,9 @@ func (u *Updater) doGetWithFallback(ctx context.Context, rawURL, proxyURL string
 		return client.Do(req)
 	}
 
+	if u.Transport != nil {
+		return doOnce("")
+	}
 	proxyURL = strings.TrimSpace(proxyURL)
 	if proxyURL != "" {
 		resp, err := doOnce(proxyURL)
@@ -429,6 +495,87 @@ func (u *Updater) doGetWithFallback(ctx context.Context, rawURL, proxyURL string
 		return doOnce("")
 	}
 	return doOnce("")
+}
+
+func (u *Updater) httpClient(proxyURL string, timeout time.Duration, checkGitHub bool) *http.Client {
+	var tr http.RoundTripper
+	if u.Transport != nil {
+		tr = u.Transport
+	} else {
+		base := &http.Transport{
+			TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12},
+		}
+		if proxyURL != "" {
+			if parsed, err := url.Parse(proxyURL); err == nil {
+				base.Proxy = http.ProxyURL(parsed)
+			}
+		} else {
+			base.Proxy = http.ProxyFromEnvironment
+		}
+		tr = base
+	}
+	client := &http.Client{Transport: tr, Timeout: timeout}
+	if checkGitHub {
+		client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return errors.New("更新下载重定向次数过多")
+			}
+			return allowedGitHubURL(req.URL)
+		}
+	}
+	return client
+}
+
+func (u *Updater) executable() (string, error) {
+	if u.binaryPath != "" {
+		return u.binaryPath, nil
+	}
+	return resolveExecutablePath()
+}
+
+func (u *Updater) spawn(exePath string) error {
+	if u.spawnFn != nil {
+		return u.spawnFn(exePath)
+	}
+	cmd := exec.Command(exePath, "--restarted")
+	cmd.Dir = filepath.Dir(exePath)
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		CreationFlags: windows.CREATE_NEW_PROCESS_GROUP | windows.DETACHED_PROCESS,
+	}
+	return cmd.Start()
+}
+
+func allowedGitHubURL(u *url.URL) error {
+	if u == nil || u.Hostname() == "" {
+		return errors.New("更新下载地址无效")
+	}
+	if !strings.EqualFold(u.Scheme, "https") {
+		return errors.New("更新下载地址必须使用 HTTPS")
+	}
+	if u.User != nil {
+		return errors.New("更新下载地址无效")
+	}
+	host := strings.ToLower(u.Hostname())
+	if _, ok := allowedGitHubHosts[host]; !ok {
+		return fmt.Errorf("已拒绝非 GitHub 主机 %s", host)
+	}
+	if p := u.Port(); p != "" && p != "443" {
+		return errors.New("更新下载地址端口不被允许")
+	}
+	return nil
+}
+
+func parseSHA256Digest(raw string) ([]byte, error) {
+	raw = strings.TrimSpace(raw)
+	const prefix = "sha256:"
+	if len(raw) < len(prefix) || !strings.EqualFold(raw[:len(prefix)], prefix) {
+		return nil, errors.New("missing sha256 digest")
+	}
+	sum, err := hex.DecodeString(raw[len(prefix):])
+	if err != nil || len(sum) != sha256.Size {
+		return nil, errors.New("missing sha256 digest")
+	}
+	return sum, nil
 }
 
 func resolveExecutablePath() (string, error) {
