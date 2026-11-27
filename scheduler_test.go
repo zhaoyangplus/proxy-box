@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -182,6 +183,28 @@ func TestSchedulerSkipsBusySubscription(t *testing.T) {
 	s.RunOnce(context.Background())
 	if !called {
 		t.Fatal("did not run after the manual update released the subscription")
+	}
+}
+
+func TestSchedulerLoopFiresUntilStopped(t *testing.T) {
+	var n atomic.Int32
+	s := newSubScheduler(nil)
+	s.tick = 150 * time.Millisecond
+	s.load = func() ([]configstore.Subscription, error) {
+		return []configstore.Subscription{{ID: "a", Enabled: true, UpdateIntervalMin: 1}}, nil
+	}
+	s.update = func(context.Context, configstore.Subscription) (configstore.Subscription, error) {
+		n.Add(1)
+		return configstore.Subscription{ID: "a"}, nil
+	}
+	s.Start()
+	deadline := time.Now().Add(2 * time.Second)
+	for n.Load() < 2 && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+	}
+	s.Stop()
+	if n.Load() < 2 {
+		t.Fatalf("scheduler loop ran %d updates", n.Load())
 	}
 }
 
