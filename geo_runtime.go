@@ -207,6 +207,9 @@ func (a *appRuntime) applyBypass(ctx context.Context, gen int) error {
 	}); err != nil {
 		return a.failApply(ctx, gen, errors.New("绕过大陆切换失败，已恢复原配置"))
 	}
+	if gen != 0 {
+		a.finishGeo(gen)
+	}
 	a.clearGeoError()
 	a.broadcastCore("geo", "已开启绕过大陆", 0, 0)
 	return nil
@@ -327,10 +330,17 @@ func (a *appRuntime) markGeoUntrusted(gen int) {
 
 func (a *appRuntime) failGeo(gen int, err error) {
 	msg := publicErr(err)
-	a.storeGeoError(gen, msg)
-	if a.geoCurrent(gen) {
-		a.broadcastCore("geo", msg, 0, 0)
+	g := a.geoCtl()
+	g.mu.Lock()
+	if gen != 0 && g.gen != gen {
+		g.mu.Unlock()
+		return
 	}
+	g.busy = false
+	g.errText = msg
+	g.cancel = nil
+	g.mu.Unlock()
+	a.broadcastCore("geo", msg, 0, 0)
 }
 
 func subsHaveNodes() bool {
