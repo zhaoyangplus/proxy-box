@@ -306,7 +306,7 @@ func TestDownloadFailureLeavesGeoFilesReady(t *testing.T) {
 		t.Fatal(err)
 	}
 	if preflight.Load() || !ready || busy || settings.BypassCN || !core.GeoFilesReady(rt.coreDir) || !strings.Contains(geoErr, "地理数据下载失败") {
-		t.Fatalf("preflight %v ready %v busy %v bypass %v err %q", preflight, ready, busy, settings.BypassCN, geoErr)
+		t.Fatalf("preflight %v ready %v busy %v bypass %v err %q", preflight.Load(), ready, busy, settings.BypassCN, geoErr)
 	}
 }
 
