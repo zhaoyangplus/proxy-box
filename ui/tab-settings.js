@@ -51,7 +51,7 @@
     refs.mixed.textContent = String(ports.mixed);
     refs.controller.textContent = String(ports.controller);
     refs.ai.textContent = String(ports.ai);
-    refs.speed.textContent = String(ports.speed);
+    refs.speedPort.textContent = String(ports.speed);
     var client = PB.state.snapshot && PB.state.snapshot.activeClient;
     refs.file.textContent = client && client.exePath ? client.exePath : "未找到 mihomo.exe";
     refs.fileState.textContent = client && client.exePath ? "已就绪" : "未导入";
@@ -150,7 +150,7 @@
     refs.mixed = PB.el("b", { text: "27890" });
     refs.controller = PB.el("b", { text: "27891" });
     refs.ai = PB.el("b", { text: "27892" });
-    refs.speed = PB.el("b", { text: "27893" });
+    refs.speedPort = PB.el("b", { text: "27893" });
     refs.file = PB.el("div", { class: "pb-mono pb-muted" });
     refs.fileState = PB.el("span", { class: "pb-badge pb-badge-muted", text: "未导入" });
     refs.delay = input(DELAY_DEFAULT, "延迟测试 URL");
@@ -188,7 +188,7 @@
           port("日常代理", refs.mixed),
           port("控制端口", refs.controller),
           port("AI 专属", refs.ai),
-          port("测速端口", refs.speed)
+          port("测速端口", refs.speedPort)
         ),
         PB.el("p", { class: "pb-hint", text: "端口由内核配置决定。更改后需要重启内核才会生效。" }),
         PB.el("div", { class: "pb-row" },
