@@ -373,6 +373,117 @@ func TestGlobalFallsBackToProxyGroupForProviderNode(t *testing.T) {
 	}
 }
 
+func TestNodesBuiltinClientIgnoresActiveClient(t *testing.T) {
+	useTempConfig(t)
+	var vergeHits, builtinHits []string
+	vergeSrv := httptest.NewServer(selectorHandler("verge-node", &vergeHits))
+	defer vergeSrv.Close()
+	builtinSrv := httptest.NewServer(selectorHandler("builtin-node", &builtinHits))
+	defer builtinSrv.Close()
+
+	vergeClient := detector.ProxyClientInfo{
+		ID:                 "clash_verge",
+		Name:               "Clash Verge",
+		Running:            true,
+		ExternalController: strings.TrimPrefix(vergeSrv.URL, "http://"),
+		Secret:             "verge-secret-marker",
+	}
+	builtinOn := detector.ProxyClientInfo{
+		ID:                 "builtin",
+		Name:               "内置内核",
+		Running:            true,
+		ExternalController: strings.TrimPrefix(builtinSrv.URL, "http://"),
+		Secret:             "builtin-secret-marker",
+	}
+	snap := detector.SystemSnapshot{
+		ActiveClient: vergeClient,
+		Clients:      []detector.ProxyClientInfo{vergeClient, builtinOn},
+	}
+	rt := &appRuntime{
+		core:   &fakeCore{mode: core.ModeRule},
+		detect: func() detector.SystemSnapshot { return snap },
+	}
+
+	rec := postJSON(rt.handleNodesList, `{"group":"PROXY"}`)
+	assertListedNode(t, rec, "verge-node")
+	if len(builtinHits) != 0 || !containsStr(vergeHits, "GET /proxies") {
+		t.Fatalf("active client hits verge %v builtin %v", vergeHits, builtinHits)
+	}
+
+	vergeHits, builtinHits = nil, nil
+	rec = postJSON(rt.handleNodesList, `{"group":"PROXY","client":"builtin"}`)
+	assertListedNode(t, rec, "builtin-node")
+	if len(vergeHits) != 0 || !containsStr(builtinHits, "GET /proxies") {
+		t.Fatalf("builtin list hits verge %v builtin %v", vergeHits, builtinHits)
+	}
+
+	vergeHits, builtinHits = nil, nil
+	rec = postJSON(rt.handleNodesSelect, `{"group":"PROXY","nodeName":"verge-node"}`)
+	if rec.Code != http.StatusOK || !containsStr(vergeHits, "PUT /proxies/PROXY") || len(builtinHits) != 0 {
+		t.Fatalf("active select code %d verge %v builtin %v body %s", rec.Code, vergeHits, builtinHits, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "verge-secret-marker") || strings.Contains(rec.Body.String(), "builtin-secret-marker") {
+		t.Fatalf("secret in select response %s", rec.Body.String())
+	}
+
+	vergeHits, builtinHits = nil, nil
+	rec = postJSON(rt.handleNodesSelect, `{"group":"PROXY","nodeName":"builtin-node","client":"builtin"}`)
+	if rec.Code != http.StatusOK || !containsStr(builtinHits, "PUT /proxies/PROXY") || len(vergeHits) != 0 {
+		t.Fatalf("builtin select code %d verge %v builtin %v body %s", rec.Code, vergeHits, builtinHits, rec.Body.String())
+	}
+
+	builtinOff := builtinOn
+	builtinOff.Running = false
+	snap.Clients = []detector.ProxyClientInfo{vergeClient, builtinOff}
+	vergeHits, builtinHits = nil, nil
+	rec = postJSON(rt.handleNodesList, `{"group":"PROXY","client":"builtin"}`)
+	if rec.Code == http.StatusOK || !strings.Contains(rec.Body.String(), "内置内核未运行") {
+		t.Fatalf("stopped list %s", rec.Body.String())
+	}
+	rec = postJSON(rt.handleNodesSelect, `{"group":"PROXY","nodeName":"builtin-node","client":"builtin"}`)
+	if rec.Code == http.StatusOK || !strings.Contains(rec.Body.String(), "内置内核未运行") {
+		t.Fatalf("stopped select %s", rec.Body.String())
+	}
+	if len(vergeHits) != 0 || len(builtinHits) != 0 {
+		t.Fatalf("stopped builtin called a controller: verge %v builtin %v", vergeHits, builtinHits)
+	}
+
+	snap.Clients = []detector.ProxyClientInfo{vergeClient}
+	rec = postJSON(rt.handleNodesList, `{"group":"PROXY","client":"builtin"}`)
+	if rec.Code == http.StatusOK || !strings.Contains(rec.Body.String(), "内置内核未运行") || len(vergeHits) != 0 {
+		t.Fatalf("missing builtin code %d hits %v body %s", rec.Code, vergeHits, rec.Body.String())
+	}
+}
+
+func selectorHandler(now string, hits *[]string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		*hits = append(*hits, r.Method+" "+r.URL.Path)
+		if r.Method == http.MethodPut {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		if r.URL.Path == "/providers/proxies" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = io.WriteString(w, `{"proxies":{"PROXY":{"name":"PROXY","type":"Selector","now":"`+now+`","all":["`+now+`","DIRECT"]},"`+now+`":{"name":"`+now+`","type":"HTTP"},"DIRECT":{"name":"DIRECT","type":"Direct"}}}`)
+	}
+}
+
+func assertListedNode(t *testing.T, rec *httptest.ResponseRecorder, now string) {
+	t.Helper()
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list %s", rec.Body.String())
+	}
+	var res mihomo.NodeListResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+		t.Fatal(err)
+	}
+	if res.CurrentSelect != now {
+		t.Fatalf("current = %s body %s", res.CurrentSelect, rec.Body.String())
+	}
+}
+
 func TestNodeSelectMessageUsesSwitchedNode(t *testing.T) {
 	live := &mihomo.LiveNodeStatus{ResolvedNode: "SG03", ExternalNode: "HK01"}
 	if got := nodeSelectMessage("PROXY", "alpha", live); got != "已切换 PROXY 节点：alpha" {

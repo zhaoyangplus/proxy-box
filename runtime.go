@@ -41,6 +41,7 @@ type appRuntime struct {
 	ensureBinary func(ctx context.Context, coreDir string, proxyURLs []string, onProgress core.ProgressFunc) (string, error)
 	importBinary func(srcPath, coreDir string) (string, error)
 	proxyURLs    func() []string
+	detect       func() detector.SystemSnapshot
 
 	mu          sync.Mutex
 	cancelStart context.CancelFunc
@@ -184,6 +185,13 @@ func (a *appRuntime) broadcastCore(phase, message string, downloaded, total int6
 		Type: "core",
 		Core: &coreEvent{Phase: phase, Message: message, Downloaded: downloaded, Total: total},
 	})
+}
+
+func (a *appRuntime) snapshot() detector.SystemSnapshot {
+	if a != nil && a.detect != nil {
+		return a.detect()
+	}
+	return detector.DetectAll()
 }
 
 func (a *appRuntime) coreMode() string {

@@ -671,10 +671,16 @@ func (a *appRuntime) handleNodesList(rw http.ResponseWriter, r *http.Request) {
 	var req struct {
 		TestDelay bool   `json:"testDelay"`
 		Group     string `json:"group"`
+		Client    string `json:"client"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req)
-	snap := detector.DetectAll()
-	res, err := listClientGroup(snap.ActiveClient, req.Group, req.TestDelay)
+	snap := a.snapshot()
+	client, err := nodeClient(snap, req.Client)
+	if err != nil {
+		writeUserErr(rw, err)
+		return
+	}
+	res, err := listClientGroup(client, req.Group, req.TestDelay)
 	if err != nil {
 		writeUserErr(rw, err)
 		return
@@ -686,13 +692,19 @@ func (a *appRuntime) handleNodesSelect(rw http.ResponseWriter, r *http.Request) 
 	var req struct {
 		NodeName string `json:"nodeName"`
 		Group    string `json:"group"`
+		Client   string `json:"client"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeUserErr(rw, err)
 		return
 	}
-	snap := detector.DetectAll()
-	live, err := a.selectClientGroup(snap.ActiveClient, req.Group, req.NodeName)
+	snap := a.snapshot()
+	client, err := nodeClient(snap, req.Client)
+	if err != nil {
+		writeUserErr(rw, err)
+		return
+	}
+	live, err := a.selectClientGroup(client, req.Group, req.NodeName)
 	if err != nil {
 		writeUserErr(rw, err)
 		return
@@ -709,7 +721,7 @@ func (a *appRuntime) handleNodesSelect(rw http.ResponseWriter, r *http.Request) 
 		}
 		_ = configstore.SaveConfig(cfg)
 	}
-	fresh := detector.DetectAll()
+	fresh := a.snapshot()
 	msg := nodeSelectMessage(group, req.NodeName, live)
 	if a.hub != nil {
 		a.hub.broadcast(sseEvent{
@@ -725,6 +737,22 @@ func (a *appRuntime) handleNodesSelect(rw http.ResponseWriter, r *http.Request) 
 		"live":     live,
 		"snapshot": fresh,
 	})
+}
+
+func nodeClient(snap detector.SystemSnapshot, clientID string) (detector.ProxyClientInfo, error) {
+	if strings.TrimSpace(clientID) != "builtin" {
+		return snap.ActiveClient, nil
+	}
+	for _, client := range snap.Clients {
+		if client.ID != "builtin" {
+			continue
+		}
+		if !client.Running {
+			return detector.ProxyClientInfo{}, errors.New("内置内核未运行")
+		}
+		return client, nil
+	}
+	return detector.ProxyClientInfo{}, errors.New("内置内核未运行")
 }
 
 func listClientGroup(client detector.ProxyClientInfo, group string, testDelay bool) (*mihomo.NodeListResult, error) {
