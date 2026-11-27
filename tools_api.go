@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 
 	"proxy-box/internal/configstore"
 	"proxy-box/internal/configurator"
 	"proxy-box/internal/detector"
+	"proxy-box/internal/diagnostics"
 )
 
 const stoppedSwitchMessage = "已开启，启动内核后自动生效"
@@ -252,6 +254,59 @@ func (a *appRuntime) aiDedicatedPort() int {
 		return settings.AIDedicatedPort
 	}
 	return 27892
+}
+
+func (a *appRuntime) handleDiagnostics(rw http.ResponseWriter, r *http.Request) {
+	if a == nil || a.core == nil || !a.core.Status().Running {
+		writeUserErr(rw, errors.New("内核未运行，无法诊断"))
+		return
+	}
+	channel, err := diagChannel(r)
+	if err != nil {
+		writeUserErr(rw, err)
+		return
+	}
+	port := a.core.Status().Ports.AIDedicated
+	if channel == "daily" {
+		port = a.core.Status().Ports.Mixed
+	}
+	if port <= 0 {
+		writeUserErr(rw, errors.New("内核端口未知，无法诊断"))
+		return
+	}
+	run := diagnostics.RunDiagnostics
+	if a.runDiag != nil {
+		run = a.runDiag
+	}
+	rep := run("内置内核", "127.0.0.1", port)
+	rep.Channel = channel
+	rep.Port = port
+	writeJSON(rw, http.StatusOK, rep)
+}
+
+func diagChannel(r *http.Request) (string, error) {
+	ch := ""
+	if r != nil && r.URL != nil {
+		ch = strings.TrimSpace(r.URL.Query().Get("channel"))
+	}
+	if ch == "" && r != nil && r.Body != nil && (r.Method == http.MethodPost || r.Method == http.MethodPut) {
+		var body struct {
+			Channel string `json:"channel"`
+		}
+		err := json.NewDecoder(r.Body).Decode(&body)
+		if err != nil && !errors.Is(err, io.EOF) {
+			return "", errors.New("请求格式不正确")
+		}
+		ch = body.Channel
+	}
+	switch strings.ToLower(strings.TrimSpace(ch)) {
+	case "", "ai":
+		return "ai", nil
+	case "daily":
+		return "daily", nil
+	default:
+		return "", errors.New("诊断通道只能是 ai 或 daily")
+	}
 }
 
 func managedApplyOptions(cfg configstore.AppConfig, port int, syncUserEnv bool) configurator.ApplyOptions {

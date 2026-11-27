@@ -439,6 +439,7 @@ func startLocalAPIServer(hub *sseHub, rt *appRuntime, appUpdater *updater.Update
 		mux.HandleFunc("/api/tools/toggle", rt.handleToolsToggle)
 		mux.HandleFunc("/api/one-click", rt.handleOneClick)
 		mux.HandleFunc("/api/restore-all", rt.handleRestoreAll)
+		mux.HandleFunc("/api/diagnostics", rt.handleDiagnostics)
 	}
 
 	mux.HandleFunc("/api/events", func(rw http.ResponseWriter, r *http.Request) {
@@ -571,12 +572,6 @@ func startLocalAPIServer(hub *sseHub, rt *appRuntime, appUpdater *updater.Update
 			"ok":      true,
 			"message": "已在桌面生成快捷方式: " + filepath.Base(lnk),
 		})
-	})
-
-	mux.HandleFunc("/api/diagnostics", func(rw http.ResponseWriter, r *http.Request) {
-		snap := detector.DetectAll()
-		rep := diagnostics.RunDiagnostics(snap.ActiveClient.Name, snap.ActiveClient.ProxyHost, snap.ActiveClient.MixedPort)
-		writeJSON(rw, http.StatusOK, rep)
 	})
 
 	mux.HandleFunc("/api/open-backups", func(rw http.ResponseWriter, r *http.Request) {

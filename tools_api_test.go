@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -15,6 +17,7 @@ import (
 	"proxy-box/internal/configurator"
 	"proxy-box/internal/core"
 	"proxy-box/internal/detector"
+	"proxy-box/internal/diagnostics"
 )
 
 func useTempHome(t *testing.T) {
@@ -450,6 +453,61 @@ func TestQuickSyncWritesOnlyEnabledApp(t *testing.T) {
 	if !bytes.Contains(mustRead(t, cursorSettings(t)), []byte("http://127.0.0.1:27892")) {
 		t.Fatal("enabled launch did not write settings")
 	}
+}
+
+func TestDiagnosticsChannel(t *testing.T) {
+	var ports []int
+	rt := &appRuntime{
+		core: &fakeCore{running: true, ports: core.Ports{Mixed: 27890, AIDedicated: 27892}},
+		runDiag: func(name, host string, port int) diagnostics.DiagnosticReport {
+			ports = append(ports, port)
+			if name != "内置内核" || host != "127.0.0.1" {
+				t.Errorf("diag %s %s", name, host)
+			}
+			return diagnostics.DiagnosticReport{ClientName: name, ProxyURL: "http://" + host}
+		},
+	}
+	assertDiag := func(method, target, body, channel string, port int) {
+		t.Helper()
+		rec := callDiag(rt.handleDiagnostics, method, target, body)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s %s -> %d %s", method, target, rec.Code, rec.Body.String())
+		}
+		var got diagnostics.DiagnosticReport
+		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+			t.Fatal(err)
+		}
+		if got.Channel != channel || got.Port != port {
+			t.Fatalf("channel %s port %d body %s", got.Channel, got.Port, rec.Body.String())
+		}
+	}
+	assertDiag(http.MethodGet, "/api/diagnostics", "", "ai", 27892)
+	assertDiag(http.MethodGet, "/api/diagnostics?channel=daily", "", "daily", 27890)
+	assertDiag(http.MethodPost, "/api/diagnostics", `{"channel":"ai"}`, "ai", 27892)
+	assertDiag(http.MethodPost, "/api/diagnostics", `{"channel":"daily"}`, "daily", 27890)
+	if len(ports) != 4 || ports[0] != 27892 || ports[1] != 27890 || ports[2] != 27892 || ports[3] != 27890 {
+		t.Fatalf("ports %v", ports)
+	}
+
+	bad := callDiag(rt.handleDiagnostics, http.MethodGet, "/api/diagnostics?channel=other", "")
+	if bad.Code != http.StatusBadRequest || !strings.Contains(bad.Body.String(), "诊断通道只能是 ai 或 daily") {
+		t.Fatalf("bad channel %d %s", bad.Code, bad.Body.String())
+	}
+	rt.core = &fakeCore{}
+	stopped := callDiag(rt.handleDiagnostics, http.MethodGet, "/api/diagnostics", "")
+	if stopped.Code != http.StatusBadRequest || !strings.Contains(stopped.Body.String(), "内核未运行") {
+		t.Fatalf("stopped %d %s", stopped.Code, stopped.Body.String())
+	}
+	if len(ports) != 4 {
+		t.Fatal("diagnostics ran while the core was stopped")
+	}
+}
+
+func callDiag(h http.HandlerFunc, method, target, body string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(method, target, strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	h(rec, req)
+	return rec
 }
 
 func mustRead(t *testing.T, path string) []byte {
