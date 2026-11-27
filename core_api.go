@@ -35,15 +35,16 @@ type coreSettingsView struct {
 }
 
 type coreStatusResponse struct {
-	OK              bool             `json:"ok"`
-	Running         bool             `json:"running"`
-	PID             int              `json:"pid"`
-	Version         string           `json:"version"`
-	Mode            string           `json:"mode"`
-	MixedPort       int              `json:"mixedPort"`
-	ControllerPort  int              `json:"controllerPort"`
-	AIDedicatedPort int              `json:"aiDedicatedPort"`
-	Settings        coreSettingsView `json:"settings"`
+	OK                bool             `json:"ok"`
+	Running           bool             `json:"running"`
+	PID               int              `json:"pid"`
+	Version           string           `json:"version"`
+	Mode              string           `json:"mode"`
+	MixedPort         int              `json:"mixedPort"`
+	ControllerPort    int              `json:"controllerPort"`
+	AIDedicatedPort   int              `json:"aiDedicatedPort"`
+	Settings          coreSettingsView `json:"settings"`
+	SystemProxyActive bool             `json:"systemProxyActive"`
 }
 
 type subsResponse struct {
@@ -147,15 +148,16 @@ func (a *appRuntime) coreStatusResponse() (coreStatusResponse, error) {
 	}
 	settings.Mode = mode
 	return coreStatusResponse{
-		OK:              true,
-		Running:         st.Running,
-		PID:             st.PID,
-		Version:         st.Version,
-		Mode:            mode,
-		MixedPort:       mixed,
-		ControllerPort:  ctrl,
-		AIDedicatedPort: ai,
-		Settings:        viewSettings(settings),
+		OK:                true,
+		Running:           st.Running,
+		PID:               st.PID,
+		Version:           st.Version,
+		Mode:              mode,
+		MixedPort:         mixed,
+		ControllerPort:    ctrl,
+		AIDedicatedPort:   ai,
+		Settings:          viewSettings(settings),
+		SystemProxyActive: st.Running && settings.SystemProxy,
 	}, nil
 }
 

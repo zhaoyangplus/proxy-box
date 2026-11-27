@@ -114,6 +114,54 @@ func TestPublicErrIsChinese(t *testing.T) {
 	}
 }
 
+func TestCoreStatusSystemProxyActiveFollowsRunningCore(t *testing.T) {
+	useTempConfig(t)
+	settings, err := configstore.LoadCoreSettings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings.SystemProxy = true
+	if err := configstore.SaveCoreSettings(settings); err != nil {
+		t.Fatal(err)
+	}
+	rt := &appRuntime{core: &fakeCore{}}
+	rec := postJSON(rt.handleCoreStatus, "")
+	var body coreStatusResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if rec.Code != http.StatusOK || body.SystemProxyActive || !body.Settings.SystemProxy {
+		t.Fatalf("stopped code %d body %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"systemProxyActive":false`) || !strings.Contains(rec.Body.String(), `"systemProxy":true`) {
+		t.Fatalf("stopped body %s", rec.Body.String())
+	}
+
+	rt.core = &fakeCore{running: true}
+	rec = postJSON(rt.handleCoreStatus, "")
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if !body.SystemProxyActive || !body.Settings.SystemProxy {
+		t.Fatalf("running body %s", rec.Body.String())
+	}
+
+	settings.SystemProxy = false
+	if err := configstore.SaveCoreSettings(settings); err != nil {
+		t.Fatal(err)
+	}
+	rec = postJSON(rt.handleCoreStatus, "")
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.SystemProxyActive || body.Settings.SystemProxy {
+		t.Fatalf("preference off body %s", rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), configstoreSecret(t)) || strings.Contains(rec.Body.String(), `"secret"`) {
+		t.Fatalf("secret in status %s", rec.Body.String())
+	}
+}
+
 func TestSysproxyEnableRejectedWhenCoreStopped(t *testing.T) {
 	called := false
 	rt := &appRuntime{
