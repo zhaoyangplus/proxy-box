@@ -469,6 +469,7 @@ func startLocalAPIServer(hub *sseHub, rt *appRuntime, appUpdater *updater.Update
 	mux.Handle("/", http.FileServer(http.FS(uiSub)))
 	if rt != nil {
 		rt.register(mux)
+		mux.HandleFunc("/api/tools/toggle", rt.handleToolsToggle)
 	}
 
 	mux.HandleFunc("/api/events", func(rw http.ResponseWriter, r *http.Request) {

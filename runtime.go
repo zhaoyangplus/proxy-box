@@ -151,6 +151,9 @@ func (a *appRuntime) startCore(ctx context.Context, settings configstore.CoreSet
 	if err := configstore.SaveCoreSettings(settings); err != nil {
 		return st, err
 	}
+	if err := a.applyEnabledTargetsLocked(st.Ports.AIDedicated); err != nil {
+		return st, err
+	}
 	a.kickGeoDownload()
 	if settings.SystemProxy {
 		if err := a.enableSystemProxy(runCtx, st.Ports.Mixed); err != nil {

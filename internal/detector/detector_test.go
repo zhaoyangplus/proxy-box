@@ -251,6 +251,49 @@ func TestIDESyncSkipsBuiltinWithoutNodes(t *testing.T) {
 	}
 }
 
+func TestDisabledAppStaysUnmanaged(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("APPDATA", filepath.Join(root, "roaming"))
+	t.Setenv("USERPROFILE", filepath.Join(root, "home"))
+	t.Setenv("HOME", filepath.Join(root, "home"))
+	exe := filepath.Join(root, "Cursor.exe")
+	if err := os.WriteFile(exe, []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	settings := filepath.Join(os.Getenv("APPDATA"), "Cursor", "User", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(settings), 0755); err != nil {
+		t.Fatal(err)
+	}
+	body := []byte(`{"http.proxy":"http://127.0.0.1:27892","cursor.general.disableHttp2":true,"terminal.integrated.env.windows":{"HTTP_PROXY":"http://127.0.0.1:27892"}}`)
+	if err := os.WriteFile(settings, body, 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := configstore.AppConfig{
+		CustomCursorExe: exe,
+		ManagedApps:     map[string]bool{"cursor": false, "claude_code": false},
+	}
+	st := configstore.StateManifest{Targets: map[string]configstore.TargetBackupState{
+		"cursor": {Managed: true},
+	}}
+	info := detectCursor(cfg, st, map[string]*procDetail{}, "http://127.0.0.1:27892")
+	if info.EnabledByUser || info.StatusText != "未托管，保持默认设置" {
+		t.Fatalf("disabled %+v", info)
+	}
+	if !info.ProxyConfigured || !info.ManagedByBox {
+		t.Fatalf("proxy %v managed %v", info.ProxyConfigured, info.ManagedByBox)
+	}
+	cfg.ManagedApps["cursor"] = true
+	on := detectCursor(cfg, st, map[string]*procDetail{}, "http://127.0.0.1:27892")
+	if !on.EnabledByUser || on.StatusText != "已就绪（HTTP/1.1 + 端口匹配）" {
+		t.Fatalf("enabled status %q flag %v", on.StatusText, on.EnabledByUser)
+	}
+
+	claude := detectClaudeCode(cfg, configstore.StateManifest{}, map[string]*procDetail{}, "http://127.0.0.1:27892")
+	if claude.EnabledByUser || claude.ProxyConfigured || claude.ManagedByBox || claude.StatusText != "未托管，保持默认设置" {
+		t.Fatalf("claude %+v", claude)
+	}
+}
+
 func portsMatching(d *procDetail, match func(string) bool) []int {
 	var out []int
 	for _, inst := range d.Instances {
