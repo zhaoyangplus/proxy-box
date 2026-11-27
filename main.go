@@ -279,8 +279,8 @@ func main() {
 		DataPath:  dataPath,
 		WindowOptions: webview2.WindowOptions{
 			Title:  appWindowTitle,
-			Width:  1140,
-			Height: 810,
+			Width:  1180,
+			Height: 780,
 			Center: true,
 		},
 	})
