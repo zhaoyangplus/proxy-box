@@ -1,0 +1,11 @@
+#ndList { contain: layout style paint; }
+.metric.spd-good { color: var(--blue-text); }
+.metric.spd-mid { color: var(--orange-text); }
+.metric.spd-low,
+.metric.spd-bad { color: var(--red-text); }
+.metric.spd-good .i,
+.metric.spd-mid .i,
+.metric.spd-low .i,
+.metric.spd-bad .i { color: currentColor; }
+.metric.spd-pulse { animation: nd-spd-pulse .9s ease-in-out infinite; }
+@keyframes nd-spd-pulse { 50% { opacity: .45; } }
