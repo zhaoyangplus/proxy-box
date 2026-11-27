@@ -62,7 +62,7 @@ func (a *appRuntime) handleSpeedTestStart(rw http.ResponseWriter, r *http.Reques
 		writeUserErr(rw, err)
 		return
 	}
-	cfg := configstore.LoadConfig()
+	cfg, _ := configstore.LoadConfig()
 	maxMB := req.MaxMB
 	if maxMB == 0 {
 		maxMB = cfg.SpeedTestMaxMB

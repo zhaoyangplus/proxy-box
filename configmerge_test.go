@@ -17,7 +17,7 @@ func TestMergeAppConfigKeepsAbsentFields(t *testing.T) {
 	configstore.SetBaseDir(dir)
 	t.Cleanup(func() { configstore.SetBaseDir("") })
 
-	current := configstore.LoadConfig()
+	current := mustAppConfig(t)
 	current.CustomCursorExe = `D:\Cursor\Cursor.exe`
 	current.CustomCodexExe = `D:\Codex\codex.exe`
 	current.SyncUserEnv = true
@@ -31,7 +31,7 @@ func TestMergeAppConfigKeepsAbsentFields(t *testing.T) {
 	if err := configstore.SaveConfig(current); err != nil {
 		t.Fatal(err)
 	}
-	current = configstore.LoadConfig()
+	current = mustAppConfig(t)
 
 	merged, err := mergeAppConfig(current, []byte(`{"customCursorExe":"E:\\Cursor.exe","preferredClient":"builtin","excludeRegionsRegex":"HK"}`))
 	if err != nil {
@@ -67,7 +67,7 @@ func TestMergeAppConfigKeepsAbsentFields(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status %d body %s", rec.Code, rec.Body.String())
 	}
-	stored := configstore.LoadConfig()
+	stored := mustAppConfig(t)
 	if stored.MinimizeToTray || stored.CustomCursorExe != `D:\Cursor\Cursor.exe` || stored.ManualNodeName != "US-01" {
 		t.Fatalf("stored = %+v", stored)
 	}
