@@ -787,6 +787,14 @@
     dom.groupAI.classList.toggle("is-on", state.group === GROUP_AI);
   }
 
+  function canTestNode(node) {
+    if (!node || node.isAuto) return false;
+    const name = String(node.name || "").toUpperCase();
+    if (name === "DIRECT" || name === "REJECT") return false;
+    const type = String(node.type || "").toLowerCase();
+    return type !== "direct" && type !== "reject";
+  }
+
   function paintRows() {
     const rows = ordered(state.nodes);
     state.painted = rows;
@@ -809,8 +817,10 @@
       delay.children[0].className = "pb-delay " + info.cls;
       delay.children[0].textContent = info.text;
       const busy = testing === node.name;
+      const allowTest = canTestNode(node);
+      delay.children[1].hidden = !allowTest;
       delay.children[1].textContent = busy ? "测速中" : "测速";
-      delay.children[1].disabled = busy || !canTest;
+      delay.children[1].disabled = !allowTest || busy || !canTest;
       frag.appendChild(tr);
     }
     dom.tbody.replaceChildren(frag);
@@ -843,7 +853,7 @@
     const node = state.painted[Number(tr.dataset.i)];
     if (!node) return;
     if (ev.target.closest("button")) {
-      testOne(node);
+      if (canTestNode(node)) testOne(node);
       return;
     }
     selectNode(node);
