@@ -562,33 +562,8 @@ func startLocalAPIServer(hub *sseHub, rt *appRuntime, appUpdater *updater.Update
 		})
 	})
 
-	mux.HandleFunc("/api/open-backups", func(rw http.ResponseWriter, r *http.Request) {
-		dir, err := configstore.BaseDir()
-		if err != nil {
-			writeErr(rw, err)
-			return
-		}
-		_ = launcher.OpenAppOrPath(dir)
-		writeJSON(rw, http.StatusOK, map[string]any{"ok": true})
-	})
-
-	mux.HandleFunc("/api/open-path", func(rw http.ResponseWriter, r *http.Request) {
-		var req struct {
-			Path   string `json:"path"`
-			Parent bool   `json:"parent"`
-		}
-		_ = json.NewDecoder(r.Body).Decode(&req)
-		target := req.Path
-		if req.Parent {
-			target = filepath.Dir(target)
-		}
-		_ = os.MkdirAll(target, 0755)
-		if err := launcher.OpenAppOrPath(target); err != nil {
-			writeErr(rw, err)
-			return
-		}
-		writeJSON(rw, http.StatusOK, map[string]any{"ok": true})
-	})
+	mux.HandleFunc("/api/open-backups", handleOpenBackups)
+	mux.HandleFunc("/api/open-path", handleOpenPath)
 
 	mux.HandleFunc("/api/browse-exe", func(rw http.ResponseWriter, r *http.Request) {
 		p := openFileDialogExe()
@@ -605,20 +580,7 @@ func startLocalAPIServer(hub *sseHub, rt *appRuntime, appUpdater *updater.Update
 		})
 	})
 
-	mux.HandleFunc("/api/open-url", func(rw http.ResponseWriter, r *http.Request) {
-		var req struct {
-			URL string `json:"url"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeErr(rw, err)
-			return
-		}
-		if err := launcher.OpenURL(req.URL); err != nil {
-			writeErr(rw, err)
-			return
-		}
-		writeJSON(rw, http.StatusOK, map[string]any{"ok": true})
-	})
+	mux.HandleFunc("/api/open-url", handleOpenURL)
 
 	mux.HandleFunc("/api/update/check", func(rw http.ResponseWriter, r *http.Request) {
 		snap := detector.DetectAll()
@@ -770,6 +732,63 @@ func runSelfTest() {
 		"diagnostics": rep,
 	}, "", "  ")
 	fmt.Println(string(out))
+}
+
+var openAppOrPathFn = launcher.OpenAppOrPath
+var openURLFn = launcher.OpenURL
+
+func handleOpenBackups(rw http.ResponseWriter, r *http.Request) {
+	dir, err := configstore.BaseDir()
+	if err != nil {
+		writeErr(rw, err)
+		return
+	}
+	if err := openAppOrPathFn(dir); err != nil {
+		writeUserErr(rw, err)
+		return
+	}
+	writeJSON(rw, http.StatusOK, map[string]any{"ok": true})
+}
+
+func handleOpenPath(rw http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Path   string `json:"path"`
+		Parent bool   `json:"parent"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	target := strings.TrimSpace(req.Path)
+	if target == "" {
+		writeUserErr(rw, fmt.Errorf("路径为空"))
+		return
+	}
+	target = filepath.Clean(target)
+	if req.Parent {
+		target = filepath.Dir(target)
+	}
+	if err := os.MkdirAll(target, 0755); err != nil {
+		writeUserErr(rw, err)
+		return
+	}
+	if err := openAppOrPathFn(target); err != nil {
+		writeUserErr(rw, err)
+		return
+	}
+	writeJSON(rw, http.StatusOK, map[string]any{"ok": true})
+}
+
+func handleOpenURL(rw http.ResponseWriter, r *http.Request) {
+	var req struct {
+		URL string `json:"url"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(rw, err)
+		return
+	}
+	if err := openURLFn(req.URL); err != nil {
+		writeUserErr(rw, err)
+		return
+	}
+	writeJSON(rw, http.StatusOK, map[string]any{"ok": true})
 }
 
 func writeJSON(rw http.ResponseWriter, code int, v any) {
