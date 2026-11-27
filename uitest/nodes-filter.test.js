@@ -576,3 +576,52 @@ test("html builders escape a hostile name in cards, rows, and empty chips", func
   assert.ok(chips.indexOf("&lt;img src=x onerror=alert(1)&gt;") >= 0);
   assert.ok(chips.indexOf('data-rm="query"') >= 0);
 });
+
+test("speed status applies each result once and ignores a stale frame", function () {
+  const local = { running: true, done: 1, total: 3, current: "甲", taskId: "t1", seen: {} };
+  const first = F.reconcileSpeed(local, {
+    progress: { running: true, done: 2, total: 3, currentNode: "乙", taskId: "t1", lastResult: { nodeName: "甲", speedMBps: 4, testedAt: 10 } }
+  });
+  assert.equal(first.changed, true);
+  assert.equal(first.polling, true);
+  assert.equal(first.speed.done, 2);
+  assert.equal(first.apply.length, 1);
+  assert.equal(first.apply[0].nodeName, "甲");
+  const again = F.reconcileSpeed({
+    running: true, done: 2, total: 3, current: "乙", taskId: "t1", seen: first.seen
+  }, {
+    progress: { running: true, done: 2, total: 3, currentNode: "乙", taskId: "t1", lastResult: { nodeName: "甲", speedMBps: 4, testedAt: 10 } },
+    results: { 甲: { nodeName: "甲", speedMBps: 4, testedAt: 10 } }
+  });
+  assert.equal(again.changed, false);
+  assert.equal(again.apply.length, 0);
+  assert.equal(again.polling, true);
+  const stale = F.reconcileSpeed({
+    running: true, done: 2, total: 3, current: "乙", taskId: "t1", seen: first.seen
+  }, { progress: { running: true, done: 1, total: 3, taskId: "t1", currentNode: "甲" } });
+  assert.equal(stale.changed, false);
+  assert.equal(stale.speed.done, 2);
+  const early = F.reconcileSpeed({ running: true, done: 0, total: 2, taskId: "", seen: {} }, {
+    progress: { running: false, done: 0, total: 0 },
+    results: {}
+  });
+  assert.equal(early.changed, false);
+  assert.equal(early.polling, true);
+  assert.equal(early.speed.running, true);
+  const done = F.reconcileSpeed({
+    running: true, done: 2, total: 3, taskId: "t1", seen: first.seen
+  }, {
+    progress: { running: false, done: 3, total: 3, taskId: "t1" },
+    results: { 乙: { nodeName: "乙", speedMBps: 8, error: "", testedAt: 11 } }
+  });
+  assert.equal(done.changed, true);
+  assert.equal(done.polling, false);
+  assert.equal(done.speed.running, false);
+  assert.equal(done.apply.length, 1);
+  assert.equal(done.apply[0].nodeName, "乙");
+  const late = F.reconcileSpeed({
+    running: false, done: 3, total: 3, taskId: "t1", finishedTask: done.speed.finishedTask, seen: done.seen
+  }, { progress: { running: true, done: 2, total: 3, taskId: "t1", currentNode: "乙" } });
+  assert.equal(late.changed, false);
+  assert.equal(late.polling, false);
+});

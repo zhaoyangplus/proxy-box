@@ -45,6 +45,7 @@
   var delayMem = {};
   var picked = { daily: null, ai: null };
   var speed = idleSpeed();
+  var speedTimer = 0;
   var delayJob = { daily: null, ai: null };
   var delayBusy = { daily: {}, ai: {} };
   var active = false;
@@ -556,32 +557,78 @@
     }).catch(function () {});
   }
 
-  function loadStatus() {
-    return PB.api("GET", "/api/speedtest/status").then(function (data) {
-      var progress = data && data.progress ? data.progress : {};
-      var results = data && data.results ? data.results : {};
-      Object.keys(results).forEach(function (name) { applyResult(results[name]); });
-      if (!progress.running) {
-        speed = idleSpeed();
-        clearOwner();
-        return;
-      }
-      speed.running = true;
+  function speedLocal() {
+    return {
+      running: speed.running,
+      done: speed.done,
+      total: speed.total,
+      current: speed.current,
+      taskId: speed.taskId,
+      finishedTask: speed.finishedTask || "",
+      seen: speed.seen || {}
+    };
+  }
+
+  function watchSpeed(polling) {
+    if (!polling) {
+      if (speedTimer) clearInterval(speedTimer);
+      speedTimer = 0;
+      return;
+    }
+    if (speedTimer) return;
+    speedTimer = setInterval(function () { pullSpeed(); }, 2000);
+  }
+
+  function assignSpeedChannel() {
+    if (!speed.running || speed.channel) return;
+    var owner = readOwner();
+    if (owner && owner.taskId && owner.taskId === speed.taskId && (owner.channel === "daily" || owner.channel === "ai")) {
+      speed.channel = owner.channel;
+      return;
+    }
+    if (speed.current && findIn(channel(), speed.current)) speed.channel = channel();
+    else speed.channel = otherChannel(channel());
+  }
+
+  function ingestSpeed(remote) {
+    var outcome = F.reconcileSpeed(speedLocal(), remote || {});
+    watchSpeed(outcome.polling);
+    if (!outcome.changed) return;
+    var prev = speed.current;
+    outcome.apply.forEach(applyResult);
+    speed.running = outcome.speed.running;
+    speed.done = outcome.speed.done;
+    speed.total = outcome.speed.total;
+    speed.current = outcome.speed.current;
+    speed.taskId = outcome.speed.taskId || "";
+    speed.finishedTask = outcome.speed.finishedTask || "";
+    speed.seen = outcome.seen;
+    if (!speed.running) {
       speed.stopping = false;
-      speed.done = Number(progress.done) || 0;
-      speed.total = Number(progress.total) || 0;
-      speed.current = progress.currentNode ? String(progress.currentNode) : "";
-      speed.taskId = progress.taskId ? String(progress.taskId) : "";
       speed.pending = null;
-      var owner = readOwner();
-      if (owner && owner.taskId && owner.taskId === speed.taskId && (owner.channel === "daily" || owner.channel === "ai")) {
-        speed.channel = owner.channel;
-      } else if (speed.current && findIn(channel(), speed.current)) {
-        speed.channel = channel();
-      } else {
-        speed.channel = otherChannel(channel());
-      }
+      speed.channel = "";
+      clearOwner();
+    } else assignSpeedChannel();
+    if (!active) return;
+    paintActions();
+    paintBadges();
+    if (!speed.running || channel() === speed.channel) {
+      if (prev) patchNode(prev);
+      if (speed.current) patchNode(speed.current);
+      outcome.apply.forEach(function (item) {
+        if (item && item.nodeName) patchNode(String(item.nodeName));
+      });
+    }
+  }
+
+  function pullSpeed() {
+    return PB.api("GET", "/api/speedtest/status").then(function (data) {
+      ingestSpeed({ progress: data && data.progress, results: data && data.results });
     }).catch(function () {});
+  }
+
+  function loadStatus() {
+    return pullSpeed();
   }
 
   function loadNodes() {
@@ -911,11 +958,14 @@
     speed.total = names ? names.length : 0;
     speed.current = names && names.length === 1 ? names[0] : "";
     speed.pending = null;
+    speed.finishedTask = "";
+    speed.seen = {};
     if (names && names.length) {
       speed.pending = {};
       for (var i = 0; i < names.length; i++) speed.pending[names[i]] = 1;
     }
     rememberOwner();
+    watchSpeed(true);
     paintActions();
     paintBadges();
     if (speed.current) patchNode(speed.current);
@@ -929,6 +979,7 @@
       speed.channel = "";
       speed.pending = null;
       speed.current = "";
+      watchSpeed(false);
       clearOwner();
       PB.toast((err && err.message) || "测网速失败", "err");
       if (active) {
@@ -953,27 +1004,7 @@
   function onSpeedMsg(msg) {
     var progress = msg && (msg.speedtest || msg.Speedtest);
     if (!progress) return;
-    var prev = speed.current;
-    if (progress.lastResult) applyResult(progress.lastResult);
-    speed.running = !!progress.running;
-    speed.done = Number(progress.done) || 0;
-    speed.total = Number(progress.total) || speed.total;
-    speed.current = progress.currentNode ? String(progress.currentNode) : "";
-    if (progress.taskId) speed.taskId = String(progress.taskId);
-    if (!speed.running) {
-      speed.stopping = false;
-      speed.current = "";
-      speed.pending = null;
-      clearOwner();
-    }
-    if (!active) return;
-    paintActions();
-    paintBadges();
-    if (channel() === speed.channel || !speed.running) {
-      if (prev) patchNode(prev);
-      if (speed.current) patchNode(speed.current);
-      if (progress.lastResult && progress.lastResult.nodeName) patchNode(String(progress.lastResult.nodeName));
-    }
+    ingestSpeed({ progress: progress });
   }
 
   function selectNode(name) {
@@ -1211,6 +1242,12 @@
       paintList();
     }
   };
+
+  if (typeof PB.on === "function") {
+    PB.on("reconnect", function () {
+      if (speed.running) pullSpeed();
+    });
+  }
 
   PB.registerTab("nodes", tab);
 })();

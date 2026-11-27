@@ -738,6 +738,7 @@
       if (again) {
         refreshCore().catch(function () {});
         refreshSnapshot().catch(function () {});
+        emit("reconnect", {});
       }
     };
     es.onmessage = function (ev) {

@@ -654,6 +654,79 @@
     return html;
   }
 
+  function resultSignature(item) {
+    if (!item) return "";
+    var mbps = Number(item.speedMBps);
+    if (!isFinite(mbps)) mbps = 0;
+    return mbps + "\u0001" + (item.error ? String(item.error) : "") + "\u0001" + (item.testedAt == null ? "" : String(item.testedAt));
+  }
+
+  function speedFields(source) {
+    source = source || {};
+    return {
+      running: !!source.running,
+      done: Number(source.done) || 0,
+      total: Number(source.total) || 0,
+      current: source.current ? String(source.current) : "",
+      taskId: source.taskId ? String(source.taskId) : "",
+      finishedTask: source.finishedTask ? String(source.finishedTask) : ""
+    };
+  }
+
+  function reconcileSpeed(local, remote) {
+    local = local || {};
+    remote = remote || {};
+    var progress = remote.progress || {};
+    var known = speedFields(local);
+    var running = !!progress.running;
+    var done = Number(progress.done) || 0;
+    var taskId = progress.taskId ? String(progress.taskId) : known.taskId;
+    var current = progress.currentNode ? String(progress.currentNode) : "";
+    var seen = local.seen || {};
+    if (known.running && !running && !known.taskId && !progress.taskId) {
+      return { changed: false, polling: true, speed: known, apply: [], seen: seen };
+    }
+    if (running && known.finishedTask && taskId === known.finishedTask && done <= known.done) {
+      return { changed: false, polling: false, speed: known, apply: [], seen: seen };
+    }
+    if (running && known.running && taskId && known.taskId && taskId === known.taskId && done < known.done) {
+      return { changed: false, polling: true, speed: known, apply: [], seen: seen };
+    }
+    var results = {};
+    var raw = remote.results || {};
+    Object.keys(raw).forEach(function (name) {
+      if (raw[name]) results[name] = raw[name];
+    });
+    if (progress.lastResult && progress.lastResult.nodeName && !results[progress.lastResult.nodeName]) {
+      results[progress.lastResult.nodeName] = progress.lastResult;
+    }
+    var nextSeen = {};
+    Object.keys(seen).forEach(function (name) { nextSeen[name] = seen[name]; });
+    var apply = [];
+    Object.keys(results).forEach(function (name) {
+      var item = results[name];
+      var id = item && item.nodeName ? String(item.nodeName) : String(name);
+      var key = resultSignature(item);
+      if (nextSeen[id] !== key) apply.push(item);
+      nextSeen[id] = key;
+    });
+    var speed = {
+      running: running,
+      done: done,
+      total: Number(progress.total) || known.total,
+      current: running ? current : "",
+      taskId: taskId,
+      finishedTask: running ? "" : (taskId || known.finishedTask)
+    };
+    var changed = apply.length > 0
+      || known.running !== speed.running
+      || known.done !== speed.done
+      || known.total !== speed.total
+      || known.current !== speed.current
+      || known.taskId !== speed.taskId;
+    return { changed: changed, polling: running, speed: speed, apply: apply, seen: nextSeen };
+  }
+
   function buildNodeName(el, name) {
     var text = name == null ? "" : String(name);
     return el("span", { class: "pbn-name", text: text });
@@ -695,6 +768,7 @@
     clearChip: clearChip,
     nodeCardHTML: nodeCardHTML,
     nodeRowHTML: nodeRowHTML,
+    reconcileSpeed: reconcileSpeed,
     buildNodeName: buildNodeName,
   };
 
