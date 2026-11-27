@@ -1142,9 +1142,7 @@ func openFileDialogCore() string {
 }
 
 func fileDialogFilter(desc, pattern string) []uint16 {
-	filter := append(windows.StringToUTF16(desc), 0)
-	filter = append(filter, windows.StringToUTF16(pattern)...)
-	return append(filter, 0, 0)
+	return append(append(windows.StringToUTF16(desc), windows.StringToUTF16(pattern)...), 0)
 }
 
 func openFileDialog(titleText string, filter []uint16) string {
