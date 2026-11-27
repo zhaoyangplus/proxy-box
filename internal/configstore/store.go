@@ -16,7 +16,7 @@ import (
 
 // AppConfig stores user preferences and custom path overrides for CursorBox.
 type AppConfig struct {
-	PreferredClient      string `json:"preferredClient,omitempty"` // "auto", "clash_verge", "clash_mi", "v2rayn"
+	PreferredClient      string `json:"preferredClient,omitempty"` // "auto", "clash_verge", "clash_mi", "v2rayn", "builtin"
 	CustomClashDir       string `json:"customClashDir,omitempty"`
 	CustomClashExe       string `json:"customClashExe,omitempty"`
 	CustomClashMiDir     string `json:"customClashMiDir,omitempty"`

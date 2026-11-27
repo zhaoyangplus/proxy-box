@@ -22,6 +22,7 @@ import (
 	"proxy-box/internal/detector"
 	"proxy-box/internal/diagnostics"
 	"proxy-box/internal/launcher"
+	"proxy-box/internal/sysproxy"
 	"proxy-box/internal/tray"
 	"proxy-box/internal/updater"
 
@@ -43,6 +44,7 @@ type sseEvent struct {
 	ShouldDiag bool                      `json:"shouldDiag"`
 	Snapshot   *detector.SystemSnapshot  `json:"snapshot,omitempty"`
 	Update     *updater.DownloadProgress `json:"update,omitempty"`
+	Core       *coreEvent                `json:"core,omitempty"`
 }
 
 type sseHub struct {
@@ -157,13 +159,17 @@ func main() {
 		})
 	}
 	defer releaseMutex()
+	_ = sysproxy.RecoverIfStale(false)
 
 	var w webview2.WebView
 	var trayMgr *tray.Manager
 
 	appUpdater := updater.New(appVersion)
 	hub := newSSEHub()
-	srvURL, err := startLocalAPIServer(hub, appUpdater, func() {
+	rt := newAppRuntime(hub)
+	defer rt.Shutdown()
+	srvURL, err := startLocalAPIServer(hub, rt, appUpdater, func() {
+		rt.Shutdown()
 		releaseMutex()
 		if trayMgr != nil {
 			trayMgr.Cleanup()
@@ -183,6 +189,7 @@ func main() {
 		showMessageBox("Proxy Box 启动失败", "无法启动本地控制服务: "+err.Error(), 0x10)
 		return
 	}
+	go rt.bootCore()
 
 	dataPath := filepath.Join(os.Getenv("LOCALAPPDATA"), "ProxyBox", "WebView2Data")
 	_ = os.MkdirAll(dataPath, 0755)
@@ -247,6 +254,7 @@ func main() {
 			}
 			hub.broadcast(sseEvent{Type: "open_update"})
 		case tray.MenuQuit:
+			rt.Shutdown()
 			trayMgr.Cleanup()
 			if w != nil {
 				w.Terminate()
@@ -256,6 +264,7 @@ func main() {
 		return configstore.LoadConfig().MinimizeToTray
 	})
 
+	trayMgr.SetShutdown(rt.Shutdown)
 	trayMgr.Start("Proxy Box - 本地代理工作台")
 	defer trayMgr.Cleanup()
 
@@ -371,7 +380,10 @@ func startLiveWatcher(hub *sseHub, trayMgr *tray.Manager) {
 					break
 				}
 			}
-			if hasManaged {
+			subs, subErr := configstore.LoadSubscriptions()
+			if currClient.ID == "builtin" && (subErr != nil || !detector.IDESyncAllowed(currClient, subs)) {
+				reasons = append(reasons, "内置内核还没有可用订阅或节点，未改写 IDE 配置")
+			} else if hasManaged {
 				_, _ = configurator.ApplyAll(configurator.ApplyOptions{
 					ProxyURL:    currClient.ProxyURL,
 					Cursor:      true,
@@ -448,7 +460,7 @@ func startLiveWatcher(hub *sseHub, trayMgr *tray.Manager) {
 	}
 }
 
-func startLocalAPIServer(hub *sseHub, appUpdater *updater.Updater, onBeforeRestart func(), onAfterRestart func()) (string, error) {
+func startLocalAPIServer(hub *sseHub, rt *appRuntime, appUpdater *updater.Updater, onBeforeRestart func(), onAfterRestart func()) (string, error) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return "", err
@@ -461,6 +473,9 @@ func startLocalAPIServer(hub *sseHub, appUpdater *updater.Updater, onBeforeResta
 
 	mux := http.NewServeMux()
 	mux.Handle("/", http.FileServer(http.FS(uiSub)))
+	if rt != nil {
+		rt.register(mux)
+	}
 
 	mux.HandleFunc("/api/events", func(rw http.ResponseWriter, r *http.Request) {
 		flusher, ok := rw.(http.Flusher)
@@ -522,63 +537,6 @@ func startLocalAPIServer(hub *sseHub, appUpdater *updater.Updater, onBeforeResta
 			"ok":       true,
 			"result":   res,
 			"message":  res.Message,
-			"snapshot": fresh,
-		})
-	})
-
-	mux.HandleFunc("/api/nodes/list", func(rw http.ResponseWriter, r *http.Request) {
-		var req struct {
-			TestDelay bool `json:"testDelay"`
-		}
-		_ = json.NewDecoder(r.Body).Decode(&req)
-		snap := detector.DetectAll()
-		res, err := detector.ListClientNodes(snap.ActiveClient, req.TestDelay)
-		if err != nil {
-			writeErr(rw, err)
-			return
-		}
-		writeJSON(rw, http.StatusOK, res)
-	})
-
-	mux.HandleFunc("/api/nodes/select", func(rw http.ResponseWriter, r *http.Request) {
-		var req struct {
-			NodeName string `json:"nodeName"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeErr(rw, err)
-			return
-		}
-		snap := detector.DetectAll()
-		live, err := detector.SelectClientNode(snap.ActiveClient, req.NodeName)
-		if err != nil {
-			writeErr(rw, err)
-			return
-		}
-		cfg := configstore.LoadConfig()
-		if req.NodeName == clashscript.AIAutoName {
-			cfg.NodeSelectionMode = "auto"
-			cfg.ManualNodeName = ""
-		} else {
-			cfg.NodeSelectionMode = "manual"
-			cfg.ManualNodeName = req.NodeName
-		}
-		_ = configstore.SaveConfig(cfg)
-
-		fresh := detector.DetectAll()
-		msg := fmt.Sprintf("Proxy Box 专属通道已锁定节点：%s（外部代理软件节点不受影响）", live.ResolvedNode)
-		if req.NodeName == clashscript.AIAutoName {
-			msg = fmt.Sprintf("Proxy Box 专属通道已切回自动优选：%s", live.ResolvedNode)
-		}
-		hub.broadcast(sseEvent{
-			Type:       "sync",
-			Reason:     msg,
-			ShouldDiag: true,
-			Snapshot:   &fresh,
-		})
-		writeJSON(rw, http.StatusOK, map[string]any{
-			"ok":       true,
-			"message":  msg,
-			"live":     live,
 			"snapshot": fresh,
 		})
 	})
@@ -897,22 +855,7 @@ func startLocalAPIServer(hub *sseHub, appUpdater *updater.Updater, onBeforeResta
 		writeJSON(rw, http.StatusOK, map[string]any{"path": p})
 	})
 
-	mux.HandleFunc("/api/save-config", func(rw http.ResponseWriter, r *http.Request) {
-		var incoming configstore.AppConfig
-		if err := json.NewDecoder(r.Body).Decode(&incoming); err != nil {
-			writeErr(rw, err)
-			return
-		}
-		current := configstore.LoadConfig()
-		if incoming.PreferredClient == "" {
-			incoming.PreferredClient = current.PreferredClient
-		}
-		if err := configstore.SaveConfig(incoming); err != nil {
-			writeErr(rw, err)
-			return
-		}
-		writeJSON(rw, http.StatusOK, map[string]any{"ok": true})
-	})
+	mux.HandleFunc("/api/save-config", handleSaveConfig)
 
 	mux.HandleFunc("/api/version", func(rw http.ResponseWriter, r *http.Request) {
 		writeJSON(rw, http.StatusOK, map[string]any{
@@ -1114,8 +1057,8 @@ func setWindowsClipboard(text string) error {
 	if ptr == 0 {
 		return fmt.Errorf("GlobalLock failed")
 	}
-	dst := unsafe.Slice((*uint16)(unsafe.Pointer(ptr)), len(utf16))
-	copy(dst, utf16)
+	rtlMoveMemory := kernel32.NewProc("RtlMoveMemory")
+	_, _, _ = rtlMoveMemory.Call(ptr, uintptr(unsafe.Pointer(&utf16[0])), byteSize)
 	globalUnlock.Call(hMem)
 
 	r, _, err := openClip.Call(0)
@@ -1191,15 +1134,23 @@ type openFileNameW struct {
 }
 
 func openFileDialogExe() string {
+	return openFileDialog("选择应用程序可执行文件 (.exe)", fileDialogFilter("可执行程序 (*.exe)", "*.exe"))
+}
+
+func openFileDialogCore() string {
+	return openFileDialog("选择 mihomo.exe 或 zip 压缩包", fileDialogFilter("内核文件 (*.exe;*.zip)", "*.exe;*.zip"))
+}
+
+func fileDialogFilter(desc, pattern string) []uint16 {
+	return append(append(windows.StringToUTF16(desc), windows.StringToUTF16(pattern)...), 0)
+}
+
+func openFileDialog(titleText string, filter []uint16) string {
 	comdlg32 := windows.NewLazySystemDLL("comdlg32.dll")
 	getOpenFileName := comdlg32.NewProc("GetOpenFileNameW")
 
 	buf := make([]uint16, windows.MAX_PATH*2)
-	filter := append(windows.StringToUTF16("可执行程序 (*.exe)"), 0)
-	filter = append(filter, windows.StringToUTF16("*.exe")...)
-	filter = append(filter, 0, 0)
-	title, _ := windows.UTF16PtrFromString("选择应用程序可执行文件 (.exe)")
-
+	title, _ := windows.UTF16PtrFromString(titleText)
 	ofn := openFileNameW{
 		LStructSize: uint32(unsafe.Sizeof(openFileNameW{})),
 		LpstrFilter: &filter[0],
