@@ -36,6 +36,19 @@ test("core start settles to error, running, or stopped without reviving download
   assert.equal(O.applyCorePhase({ phase: "running", cancelRequested: true }, { phase: "stopped" }), "stopped");
 });
 
+test("overview signatures ignore key order and notice a changed node", function () {
+  const list = { currentSelect: "甲", resolvedNode: "甲", nodes: [{ name: "甲", delayMs: 10, untested: false, speedMBps: 0 }] };
+  const copy = { nodes: [{ untested: false, speedMBps: 0, delayMs: 10, name: "甲" }], resolvedNode: "甲", currentSelect: "甲" };
+  assert.equal(O.listSignature(list), O.listSignature(copy));
+  copy.nodes[0].delayMs = 90;
+  assert.notEqual(O.listSignature(list), O.listSignature(copy));
+  assert.equal(O.listSignature(undefined), "?");
+  const subs = [{ id: "a", name: "甲", enabled: true, nodeCount: 2, updatedAt: "t", lastError: "" }];
+  assert.equal(O.subsSignature(subs), O.subsSignature([{ lastError: "", updatedAt: "t", nodeCount: 2, enabled: true, name: "甲", id: "a" }]));
+  subs[0].nodeCount = 3;
+  assert.notEqual(O.subsSignature(subs), O.subsSignature([{ id: "a", name: "甲", enabled: true, nodeCount: 2 }]));
+});
+
 test("mode text follows the three routing modes", function () {
   assert.equal(O.modeText("rule"), O.MODE_TEXT.rule);
   assert.equal(O.modeText("global"), O.MODE_TEXT.global);

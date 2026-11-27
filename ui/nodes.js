@@ -52,6 +52,10 @@
   var sawCore = null;
   var loadGen = { daily: 0, ai: 0 };
   var loading = { daily: false, ai: false };
+  var dataSig = { daily: "", ai: "" };
+  var dataSeen = { daily: false, ai: false };
+  var painted = [];
+  var paintedView = "";
   var listEl = null;
   var unbindQ = null;
   var regionSeen = "";
@@ -294,6 +298,23 @@
         '<div class="empty-chips">' + F.emptyChipsHTML(f, subName) + '</div><button type="button" class="btn sm prominent" data-clear-all>清除筛选</button>');
       return;
     }
+    var stamped = new Array(rows.length);
+    for (var s = 0; s < rows.length; s++) {
+      stamped[s] = { name: rows[s].name, sig: F.rowSignature(rows[s], cardOpt(rows[s])) };
+    }
+    var plan = F.diffRows(painted, stamped);
+    var grid = listEl.querySelector(".nd-grid, .nd-table");
+    if (plan.same && grid && paintedView === view) {
+      painted = stamped;
+      return;
+    }
+    if (!plan.reorder && plan.changed.length && grid && paintedView === view && patchRows(plan.changed, rows)) {
+      painted = stamped;
+      return;
+    }
+    var scroller = document.getElementById("scroll");
+    var top = scroller ? scroller.scrollTop : 0;
+    var focusName = focusedRow();
     var parts = new Array(rows.length);
     var asList = view === "list";
     for (var i = 0; i < rows.length; i++) {
@@ -303,6 +324,41 @@
     listEl.innerHTML = asList
       ? '<div class="nd-table">' + listHead() + parts.join("") + "</div>"
       : '<div class="nd-grid">' + parts.join("") + "</div>";
+    if (scroller) scroller.scrollTop = top;
+    if (focusName) {
+      var next = findEl(focusName);
+      if (next) {
+        try { next.focus({ preventScroll: true }); } catch (err) { next.focus(); }
+      }
+    }
+    painted = stamped;
+    paintedView = view;
+  }
+
+  function focusedRow() {
+    if (typeof document === "undefined" || !document.activeElement || !document.activeElement.closest) return "";
+    var row = document.activeElement.closest("[data-id]");
+    return row ? row.getAttribute("data-id") || "" : "";
+  }
+
+  function patchRows(names, rows) {
+    for (var i = 0; i < names.length; i++) {
+      var name = names[i];
+      var node = null;
+      for (var n = 0; n < rows.length; n++) if (rows[n].name === name) node = rows[n];
+      var el = findEl(name);
+      if (!node || !el) return false;
+      var html = view === "list" ? F.nodeRowHTML(node, cardOpt(node)) : F.nodeCardHTML(node, cardOpt(node));
+      var focus = el.contains(document.activeElement);
+      el.outerHTML = html;
+      if (focus) {
+        var next = findEl(name);
+        if (next) {
+          try { next.focus({ preventScroll: true }); } catch (err) { next.focus(); }
+        }
+      }
+    }
+    return true;
   }
 
   function listHead() {
@@ -651,7 +707,7 @@
       if (ticket === loadGen[ch]) loading[ch] = false;
       if (!active || ticket !== loadGen[ch]) return;
       takeList(ch, data && data.nodes, started, false);
-      if (channel() === ch) refreshView();
+      if (channel() === ch) revealNodes(ch);
     }).catch(function (err) {
       if (ticket === loadGen[ch]) loading[ch] = false;
       if (!active || ticket !== loadGen[ch] || channel() !== ch) return;
@@ -663,6 +719,34 @@
       if (listEl) listEl.innerHTML = emptyBox("warn", "节点加载失败", msg, "");
       PB.toast(msg, "err");
     });
+  }
+
+  function nodeDataSig(ch) {
+    var list = pools[ch] || [];
+    var parts = new Array(list.length);
+    for (var i = 0; i < list.length; i++) parts[i] = F.rowSignature(list[i], {});
+    return parts.join("\u0002");
+  }
+
+  function menuOpen() {
+    var pop = document.getElementById("pop");
+    return !!(pop && !pop.hidden && pop.classList.contains("open"));
+  }
+
+  function revealNodes(ch) {
+    var sig = nodeDataSig(ch);
+    if (dataSeen[ch] && sig === dataSig[ch]) {
+      paintActions();
+      paintBadges();
+      return;
+    }
+    dataSeen[ch] = true;
+    dataSig[ch] = sig;
+    paintSort();
+    if (!menuOpen()) paintFilters();
+    paintActions();
+    paintBadges();
+    paintList();
   }
 
   function setSort(key, dir) {
@@ -1197,6 +1281,14 @@
     });
   }
 
+  var queueNodes = globalThis.PBUtil && PBUtil.coalesce
+    ? PBUtil.coalesce(function () {
+        if (active && coreOn() && !delayJob[channel()]) loadNodes();
+      })
+    : function () {
+        if (active && coreOn() && !delayJob[channel()]) loadNodes();
+      };
+
   var tab = {
     enter: function (root) {
       active = true;
@@ -1235,7 +1327,7 @@
     onSSE: function (msg) {
       if (!msg) return;
       if (msg.type === "speedtest") onSpeedMsg(msg);
-      else if (msg.type === "sync" && active && coreOn() && !delayJob[channel()]) loadNodes();
+      else if (msg.type === "sync") queueNodes();
     },
     paintForBench: function (next) {
       view = next === "list" ? "list" : "card";

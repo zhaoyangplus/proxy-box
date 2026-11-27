@@ -152,12 +152,15 @@ test("an equivalent sync does not mark settings dirty, and an edit does", functi
   delay.value = "http://example.test/204";
   delay.onInput(delay.value, delay);
   assert.equal(saveBar(page.root).className.includes("show"), true);
+  const speed = field(page.root, "下载测速 URL");
   page.PB.state.snapshot.appConfig = {
     delayTestURL: "http://www.gstatic.com/generate_204",
     speedTestURL: "https://speed.cloudflare.com/__down?bytes=10485760",
     speedTestMaxMB: 25
   };
   page.PB.tab.onSSE({ type: "sync" });
+  assert.equal(field(page.root, "延迟测试地址"), delay);
   assert.equal(delay.value, "http://example.test/204");
+  assert.equal(speed.value, "https://speed.cloudflare.com/__down?bytes=10485760");
   assert.equal(saveBar(page.root).className.includes("show"), true);
 });

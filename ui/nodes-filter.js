@@ -654,6 +654,38 @@
     return html;
   }
 
+  function rowSignature(node, opt) {
+    node = node || {};
+    opt = opt || {};
+    return [
+      node.name, node.type, node.provider, node.subName, node.delayMs, node.untested ? 1 : 0,
+      node.selected ? 1 : 0, node.resolvedTo, node.speedMBps, node.speedTested ? 1 : 0,
+      node.speedError, node.region, opt.delayBusy ? 1 : 0, opt.speedPhase || ""
+    ].join("\u0001");
+  }
+
+  function diffRows(prev, next) {
+    prev = prev || [];
+    next = next || [];
+    var prevAt = Object.create(null);
+    for (var i = 0; i < prev.length; i++) prevAt[prev[i].name] = { sig: prev[i].sig, index: i };
+    var changed = [];
+    var reorder = prev.length !== next.length;
+    var seen = Object.create(null);
+    for (var n = 0; n < next.length; n++) {
+      var row = next[n];
+      seen[row.name] = true;
+      var old = prevAt[row.name];
+      if (!old) reorder = true;
+      else if (old.sig !== row.sig) changed.push(row.name);
+      if (!reorder && (!prev[n] || prev[n].name !== row.name)) reorder = true;
+    }
+    if (!reorder) {
+      for (var p = 0; p < prev.length; p++) if (!seen[prev[p].name]) reorder = true;
+    }
+    return { same: !reorder && !changed.length, reorder: reorder, changed: reorder ? [] : changed };
+  }
+
   function resultSignature(item) {
     if (!item) return "";
     var mbps = Number(item.speedMBps);
@@ -769,6 +801,8 @@
     nodeCardHTML: nodeCardHTML,
     nodeRowHTML: nodeRowHTML,
     reconcileSpeed: reconcileSpeed,
+    rowSignature: rowSignature,
+    diffRows: diffRows,
     buildNodeName: buildNodeName,
   };
 

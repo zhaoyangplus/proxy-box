@@ -17,6 +17,8 @@
   var bypassBusy = false;
   var listGen = 0;
   var subsGen = 0;
+  var listSig = { daily: "", ai: "" };
+  var subsSig = "";
   var lastSig = "";
   var wasRunning = false;
 
@@ -199,11 +201,18 @@
       PB.api("POST", "/api/nodes/list", { client: "builtin", group: O.GROUP.ai, testDelay: false })
     ]).then(function (pair) {
       if (gen !== listGen) return;
+      var dailySig = O.listSignature(pair[0]);
+      var aiSig = O.listSignature(pair[1]);
+      if (dailySig === listSig.daily && aiSig === listSig.ai && lists.daily && lists.ai) return;
+      listSig.daily = dailySig;
+      listSig.ai = aiSig;
       lists.daily = pair[0];
       lists.ai = pair[1];
       paint();
     }, function () {
       if (gen !== listGen) return;
+      listSig.daily = "";
+      listSig.ai = "";
       lists.daily = null;
       lists.ai = null;
       paint();
@@ -214,7 +223,11 @@
     var gen = ++subsGen;
     return PB.api("GET", "/api/subs").then(function (data) {
       if (gen !== subsGen) return;
-      subs = O.subsSummary((data && data.subscriptions) || [], Date.now());
+      var raw = (data && data.subscriptions) || [];
+      var sig = O.subsSignature(raw);
+      if (sig === subsSig && subs && subs.state === "ok") return;
+      subsSig = sig;
+      subs = O.subsSummary(raw, Date.now());
       paint();
     }, function () {
       if (gen !== subsGen) return;
@@ -394,6 +407,10 @@
     });
   }
 
+  var queueOverview = globalThis.PBUtil && PBUtil.coalesce
+    ? PBUtil.coalesce(function () { loadNodes(); loadSubs(); })
+    : function () { loadNodes(); loadSubs(); };
+
   PB.registerTab("overview", {
     enter: function (node) {
       root = node;
@@ -434,10 +451,7 @@
         if (msg.core.phase === "running") loadNodes();
         paint();
       }
-      if (msg.type === "sync") {
-        loadNodes();
-        loadSubs();
-      }
+      if (msg.type === "sync") queueOverview();
     }
   });
 })();

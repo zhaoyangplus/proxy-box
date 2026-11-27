@@ -577,6 +577,26 @@ test("html builders escape a hostile name in cards, rows, and empty chips", func
   assert.ok(chips.indexOf('data-rm="query"') >= 0);
 });
 
+test("node rows patch changed names and rebuild when the order changes", function () {
+  const prev = [
+    { name: "甲", sig: F.rowSignature({ name: "甲", delayMs: 10, untested: false }, {}) },
+    { name: "乙", sig: F.rowSignature({ name: "乙", delayMs: 20, untested: false }, {}) }
+  ];
+  const same = [
+    { name: "甲", sig: prev[0].sig },
+    { name: "乙", sig: prev[1].sig }
+  ];
+  assert.deepEqual(F.diffRows(prev, same), { same: true, reorder: false, changed: [] });
+  const next = [
+    { name: "甲", sig: F.rowSignature({ name: "甲", delayMs: 80, untested: false }, {}) },
+    { name: "乙", sig: prev[1].sig }
+  ];
+  assert.deepEqual(F.diffRows(prev, next), { same: false, reorder: false, changed: ["甲"] });
+  const moved = [same[1], same[0]];
+  assert.equal(F.diffRows(prev, moved).reorder, true);
+  assert.equal(F.rowSignature({ name: "甲", delayMs: "10" }, {}), F.rowSignature({ name: "甲", delayMs: 10 }, {}));
+});
+
 test("speed status applies each result once and ignores a stale frame", function () {
   const local = { running: true, done: 1, total: 3, current: "甲", taskId: "t1", seen: {} };
   const first = F.reconcileSpeed(local, {

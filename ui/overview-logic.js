@@ -239,6 +239,29 @@
     return "未接管系统流量";
   }
 
+  function listSignature(list) {
+    if (list === undefined) return "?";
+    if (list === null) return "-";
+    var nodes = list.nodes || [];
+    var parts = [list.currentSelect || "", list.resolvedNode || ""];
+    for (var i = 0; i < nodes.length; i++) {
+      var node = nodes[i] || {};
+      parts.push(node.name || "", node.delayMs, node.untested ? 1 : 0, node.speedMBps, node.speedTested ? 1 : 0, node.resolvedTo || "");
+    }
+    return parts.join("\u0001");
+  }
+
+  function subsSignature(list) {
+    if (list == null) return "-";
+    var parts = [];
+    for (var i = 0; i < list.length; i++) {
+      var sub = list[i] || {};
+      var usage = sub.usage || {};
+      parts.push([sub.id, sub.name, sub.enabled ? 1 : 0, sub.nodeCount, sub.updatedAt, sub.lastError, usage.expire].join("\u0001"));
+    }
+    return parts.join("\u0002");
+  }
+
   function subsSummary(list, now) {
     if (list == null) return { state: "error", text: "暂时无法读取订阅" };
     var enabled = 0;
@@ -391,6 +414,8 @@
     geoStatus: geoStatus,
     sysSub: sysSub,
     subsSummary: subsSummary,
+    listSignature: listSignature,
+    subsSignature: subsSignature,
     subsText: subsText,
     appsSummary: appsSummary,
     cssPercent: cssPercent,

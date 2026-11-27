@@ -693,6 +693,16 @@
     });
   }
 
+  var snapshotTimer = 0;
+
+  function scheduleSnapshot() {
+    if (snapshotTimer) return;
+    snapshotTimer = setTimeout(function () {
+      snapshotTimer = 0;
+      refreshSnapshot().catch(function () {});
+    }, 160);
+  }
+
   function refreshSnapshot() {
     return api("GET", "/api/snapshot").then(function (snap) {
       state.snapshot = snap || null;
@@ -716,7 +726,7 @@
     if (msg.type === "core" && msg.core) applyCoreEvent(msg.core);
     if (msg.type === "sync") {
       if (msg.snapshot) state.snapshot = msg.snapshot;
-      else refreshSnapshot().catch(function () {});
+      else scheduleSnapshot();
     }
     if (msg.type === "open_update" && typeof PB.openUpdate === "function") PB.openUpdate();
     emit(msg.type, msg);

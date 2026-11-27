@@ -158,6 +158,19 @@
     };
   }
 
+  function coalesce(fn, ms) {
+    var wait = ms == null ? 160 : Number(ms);
+    if (!isFinite(wait) || wait < 0) wait = 160;
+    var timer = 0;
+    return function () {
+      if (timer) return;
+      timer = setTimeout(function () {
+        timer = 0;
+        fn();
+      }, wait);
+    };
+  }
+
   return {
     THEME_KEY: THEME_KEY,
     esc: esc,
@@ -177,6 +190,7 @@
     themeFromStorage: themeFromStorage,
     segHTML: segHTML,
     segThumbPlacement: segThumbPlacement,
-    navIndicatorPlacement: navIndicatorPlacement
+    navIndicatorPlacement: navIndicatorPlacement,
+    coalesce: coalesce
   };
 });

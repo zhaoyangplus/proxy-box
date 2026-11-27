@@ -77,6 +77,29 @@
     return Object.keys(changedFields(a, b)).length === 0;
   }
 
+  function draftSignature(config) {
+    var next = draftFrom(config);
+    var parts = new Array(KEYS.length);
+    for (var i = 0; i < KEYS.length; i++) parts[i] = String(next[KEYS[i]]);
+    return parts.join("\u0001");
+  }
+
+  function mergeServer(baseline, draft, server) {
+    var prev = draftFrom(baseline);
+    var edited = draftFrom(draft);
+    var incoming = draftFrom(server);
+    var next = {};
+    var untouched = [];
+    for (var i = 0; i < KEYS.length; i++) {
+      var key = KEYS[i];
+      if (sameValue(prev[key], edited[key])) {
+        next[key] = incoming[key];
+        if (!sameValue(prev[key], incoming[key])) untouched.push(key);
+      } else next[key] = edited[key];
+    }
+    return { baseline: incoming, draft: next, untouched: untouched };
+  }
+
   function leaveDecision(input) {
     input = input || {};
     var target = input.target == null ? "" : String(input.target);
@@ -137,6 +160,8 @@
     draftFrom: draftFrom,
     changedFields: changedFields,
     sameDraft: sameDraft,
+    draftSignature: draftSignature,
+    mergeServer: mergeServer,
     leaveDecision: leaveDecision,
     validate: validate,
     portsFrom: portsFrom

@@ -4,20 +4,68 @@
   if (!L) throw new Error("ui/subs-logic.js must load before ui/subs.js");
 
   var list = [];
+  var shown = [];
   var loaded = false;
   var busy = Object.create(null);
   var allBusy = false;
   var rootEl = null;
+  var lastSig = "";
 
   function paintBadge() {
     var n = L.errorCount(list);
     PB.setBadge("subs", n ? String(n) : "", n ? "err" : "");
   }
 
+  function findCard(id) {
+    if (!rootEl || !rootEl.querySelectorAll) return null;
+    var cards = rootEl.querySelectorAll(".sub-card");
+    for (var i = 0; i < cards.length; i++) if (cards[i].getAttribute("data-sid") === id) return cards[i];
+    return null;
+  }
+
+  function paintStats(now) {
+    if (!rootEl || !rootEl.querySelectorAll) return;
+    var stats = L.summarize(list, now);
+    var values = rootEl.querySelectorAll(".stat-v");
+    if (!values.length) return;
+    if (values[0]) values[0].innerHTML = stats.enabled + "<small>/ " + stats.total + "</small>";
+    if (values[1]) values[1].innerHTML = stats.nodes + "<small>个</small>";
+    if (values[2]) values[2].textContent = stats.next;
+  }
+
   function show() {
     paintBadge();
     if (!rootEl || PB.current() !== "subs") return;
+    var sig = L.subsSignature(list, busy);
+    if (sig === lastSig && rootEl.querySelector && rootEl.querySelector(".subs")) return;
+    var plan = L.diffSubs(shown, list, busy);
+    if (!plan.reorder && plan.changed.length && rootEl.querySelector && rootEl.querySelector(".sub-card")) {
+      var now = Date.now();
+      var missed = false;
+      for (var i = 0; i < plan.changed.length; i++) {
+        var id = plan.changed[i];
+        var card = findCard(id);
+        var sub = null;
+        for (var n = 0; n < list.length; n++) if (list[n] && String(list[n].id) === id) sub = list[n];
+        if (!card || !sub) { missed = true; break; }
+        var focus = typeof document !== "undefined" && document.activeElement && card.contains && card.contains(document.activeElement);
+        card.outerHTML = L.cardHTML(sub, now, busy);
+        if (focus) {
+          var next = findCard(id);
+          var button = next && next.querySelector && next.querySelector("[data-act='toggle']");
+          if (button && button.focus) button.focus();
+        }
+      }
+      if (!missed) {
+        paintStats(now);
+        shown = list.slice();
+        lastSig = sig;
+        return;
+      }
+    }
     rootEl.innerHTML = L.pageHTML(list, { now: Date.now(), busy: busy, loaded: loaded });
+    shown = list.slice();
+    lastSig = sig;
   }
 
   function remember(data) {
@@ -261,6 +309,8 @@
     };
   }
 
+  var queueSubs = globalThis.PBUtil && PBUtil.coalesce ? PBUtil.coalesce(function () { load(); }) : function () { load(); };
+
   PB.registerTab("subs", {
     enter: function (root) {
       rootEl = root;
@@ -271,7 +321,7 @@
       load();
     },
     onSSE: function (msg) {
-      if (msg && msg.type === "subs") load();
+      if (msg && msg.type === "subs") queueSubs();
     }
   });
 

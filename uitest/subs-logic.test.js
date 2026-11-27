@@ -160,3 +160,13 @@ test("update summary counts per-item results", function () {
   assert.equal(S.updateSummary([{ ok: true }, { ok: true }]).text, "已更新全部 2 个订阅");
   assert.equal(S.errorCount([{ lastError: "失败" }, { lastError: "  " }, { lastError: "" }]), 1);
 });
+
+test("subscription signature stays put until a visible field changes", function () {
+  const list = [{ id: "a", name: "甲", url: "https://example.test/a", enabled: true, nodeCount: 2, updatedAt: "t", lastError: "" }];
+  const copy = [{ lastError: "", updatedAt: "t", nodeCount: 2, enabled: true, url: "https://example.test/a", name: "甲", id: "a" }];
+  assert.equal(S.subsSignature(list, {}), S.subsSignature(copy, {}));
+  assert.deepEqual(S.diffSubs(list, copy, {}), { same: true, reorder: false, changed: [] });
+  copy[0].nodeCount = 4;
+  assert.deepEqual(S.diffSubs(list, copy, {}), { same: false, reorder: false, changed: ["a"] });
+  assert.equal(S.diffSubs(list, [{ id: "b", name: "乙", enabled: true }], {}).reorder, true);
+});
