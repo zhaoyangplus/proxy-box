@@ -172,40 +172,76 @@ func (a *appRuntime) loadTrayMenuState() TrayMenuState {
 func (a *appRuntime) fetchProxyNodes(port int, secret string) ([]TrayNode, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), trayControllerWait)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://127.0.0.1:"+strconv.Itoa(port)+"/proxies", nil)
+	client := &http.Client{Transport: &http.Transport{Proxy: nil, DisableKeepAlives: true}}
+	var (
+		proxiesBody   []byte
+		providersBody []byte
+		proxiesCode   int
+		providersCode int
+		proxiesErr    error
+		providersErr  error
+		wg            sync.WaitGroup
+	)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		proxiesBody, proxiesCode, proxiesErr = readTrayController(ctx, client, port, secret, "/proxies")
+	}()
+	go func() {
+		defer wg.Done()
+		providersBody, providersCode, providersErr = readTrayController(ctx, client, port, secret, "/providers/proxies")
+	}()
+	wg.Wait()
+	if proxiesErr != nil {
+		return nil, proxiesErr
+	}
+	if proxiesCode < 200 || proxiesCode >= 300 {
+		return nil, fmt.Errorf("proxy http %d", proxiesCode)
+	}
+	// Provider nodes are absent from /proxies. A failed providers call still returns that list.
+	if providersErr != nil || providersCode < 200 || providersCode >= 300 {
+		providersBody = nil
+	}
+	return nodesFromProxies(proxiesBody, providersBody)
+}
+
+func readTrayController(ctx context.Context, client *http.Client, port int, secret, path string) ([]byte, int, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://127.0.0.1:"+strconv.Itoa(port)+path, nil)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	if secret != "" {
 		req.Header.Set("Authorization", "Bearer "+secret)
 	}
-	client := &http.Client{Transport: &http.Transport{Proxy: nil, DisableKeepAlives: true}}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return nil, err
+		return nil, resp.StatusCode, err
 	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("proxy http %d", resp.StatusCode)
-	}
-	return nodesFromProxies(body)
+	return body, resp.StatusCode, nil
 }
 
-func nodesFromProxies(body []byte) ([]TrayNode, error) {
+type trayProxy struct {
+	Type string   `json:"type"`
+	Now  string   `json:"now"`
+	All  []string `json:"all"`
+}
+
+func nodesFromProxies(proxiesBody, providersBody []byte) ([]TrayNode, error) {
 	var doc struct {
-		Proxies map[string]struct {
-			Type string   `json:"type"`
-			Now  string   `json:"now"`
-			All  []string `json:"all"`
-		} `json:"proxies"`
+		Proxies map[string]trayProxy `json:"proxies"`
 	}
-	if err := json.Unmarshal(body, &doc); err != nil {
+	if err := json.Unmarshal(proxiesBody, &doc); err != nil {
 		return nil, err
 	}
+	if doc.Proxies == nil {
+		doc.Proxies = map[string]trayProxy{}
+	}
+	mergeTrayProviders(doc.Proxies, providersBody)
 	grp, ok := doc.Proxies[core.ProxyGroupName]
 	if !ok {
 		return nil, fmt.Errorf("代理组 %s 不存在", core.ProxyGroupName)
@@ -223,6 +259,34 @@ func nodesFromProxies(body []byte) ([]TrayNode, error) {
 		nodes = append(nodes, TrayNode{Name: name, Selected: name == grp.Now})
 	}
 	return nodes, nil
+}
+
+func mergeTrayProviders(proxies map[string]trayProxy, body []byte) {
+	if len(body) == 0 || proxies == nil {
+		return
+	}
+	var resp struct {
+		Providers map[string]struct {
+			Proxies []struct {
+				Name string `json:"name"`
+				Type string `json:"type"`
+			} `json:"proxies"`
+		} `json:"providers"`
+	}
+	if json.Unmarshal(body, &resp) != nil || len(resp.Providers) == 0 {
+		return
+	}
+	for _, prov := range resp.Providers {
+		for _, item := range prov.Proxies {
+			if item.Name == "" {
+				continue
+			}
+			if _, exists := proxies[item.Name]; exists {
+				continue
+			}
+			proxies[item.Name] = trayProxy{Type: item.Type}
+		}
+	}
 }
 
 func (a *appRuntime) handleTrayCommand(menuID int, arg string, balloon func(title, info string)) {

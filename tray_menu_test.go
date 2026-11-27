@@ -1,6 +1,8 @@
 package main
 
 import (
+	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -96,14 +98,14 @@ func TestNodesFromProxies(t *testing.T) {
 		"alpha":{"type":"HTTP"},
 		"SKIP":{"type":"Selector"}
 	}}`)
-	nodes, err := nodesFromProxies(body)
+	nodes, err := nodesFromProxies(body, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(nodes) != 3 || nodes[0].Name != "⚡ AUTO" || nodes[1].Name != "DIRECT" || !nodes[2].Selected || nodes[2].Name != "alpha" {
 		t.Fatalf("nodes %+v", nodes)
 	}
-	if _, err := nodesFromProxies([]byte(`{"proxies":{}}`)); err == nil {
+	if _, err := nodesFromProxies([]byte(`{"proxies":{}}`), nil); err == nil {
 		t.Fatal("missing PROXY group")
 	}
 }
@@ -121,11 +123,11 @@ func TestTrayStateTimesOutAndCaches(t *testing.T) {
 	if !state.CoreRunning || !state.NodesLoaded || state.Mode != core.ModeGlobal || len(state.Nodes) != 1 || !state.Nodes[0].Selected {
 		t.Fatalf("state %+v", state)
 	}
-	if hits.Load() != 1 {
+	if hits.Load() != 2 {
 		t.Fatalf("hits %d", hits.Load())
 	}
 	again := rt.cachedTrayState()
-	if hits.Load() != 1 || again.Nodes[0].Name != "alpha" {
+	if hits.Load() != 2 || again.Nodes[0].Name != "alpha" {
 		t.Fatalf("cache hits %d state %+v", hits.Load(), again)
 	}
 
@@ -149,6 +151,195 @@ func TestTrayStateTimesOutAndCaches(t *testing.T) {
 	if _, ok := findMenuLabel(items, "路由模式"); !ok {
 		t.Fatal("stall hid the mode menu")
 	}
+}
+
+func TestTrayMenuIncludesProviderNodes(t *testing.T) {
+	useTempConfig(t)
+	settings, err := configstore.LoadCoreSettings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings.Secret = "tray-secret"
+	if err := configstore.SaveCoreSettings(settings); err != nil {
+		t.Fatal(err)
+	}
+	proxies := `{
+		"proxies": {
+			"PROXY": {"type":"Selector","now":"prov-b","all":["prov-b","skip-group","local","⚡ AUTO","prov-a"]},
+			"local": {"type":"HTTP"}
+		}
+	}`
+	providers := `{
+		"providers": {
+			"late": {"proxies":[
+				{"name":"prov-a","type":"SS"},
+				{"name":"skip-group","type":"Selector"},
+				{"name":"⚡ AUTO","type":"URLTest"}
+			]},
+			"early": {"proxies":[
+				{"name":"prov-b","type":"VMess"},
+				{"name":"local","type":"Trojan"}
+			]}
+		}
+	}`
+	var authMiss atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer tray-secret" {
+			authMiss.Add(1)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		switch r.URL.Path {
+		case "/proxies":
+			_, _ = io.WriteString(w, proxies)
+		case "/providers/proxies":
+			_, _ = io.WriteString(w, providers)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	rt := &appRuntime{core: &fakeCore{running: true, mode: core.ModeRule, ports: core.Ports{Controller: mustPort(t, srv.URL)}}}
+	state := rt.loadTrayMenuState()
+	want := []TrayNode{
+		{Name: "prov-b", Selected: true},
+		{Name: "local", Selected: false},
+		{Name: "⚡ AUTO", Selected: false},
+		{Name: "prov-a", Selected: false},
+	}
+	if authMiss.Load() != 0 || !state.NodesLoaded || len(state.Nodes) != len(want) {
+		t.Fatalf("authMiss %d state %+v", authMiss.Load(), state)
+	}
+	for i := range want {
+		if state.Nodes[i] != want[i] {
+			t.Fatalf("nodes %+v", state.Nodes)
+		}
+	}
+	items := buildTrayMenu(state)
+	menu := menuByLabel(t, items, "节点")
+	if len(menu.Children) != len(want) {
+		t.Fatalf("children %+v", menu.Children)
+	}
+	picked, ok := findTrayItem(items, tray.MenuNodeBase)
+	if !ok || picked.Label != "prov-b" || picked.Arg != "prov-b" || !picked.Checked {
+		t.Fatalf("checked %+v", picked)
+	}
+	second, _ := findTrayItem(items, tray.MenuNodeBase+1)
+	if second.Label != "local" || second.Checked {
+		t.Fatalf("second %+v", second)
+	}
+	if _, ok := findTrayItem(items, tray.MenuNodeBase+len(want)); ok {
+		t.Fatal("selector group was listed")
+	}
+}
+
+func TestTrayMenuHidesWhenProviderNodesExceedLimit(t *testing.T) {
+	useTempConfig(t)
+	showProxies, showProviders := trayControllerBodies(0, 30, "prov-03")
+	show := loadTrayNodes(t, showProxies, showProviders, http.StatusOK)
+	if len(show.Nodes) != 30 || !show.NodesLoaded || !show.Nodes[3].Selected || show.Nodes[3].Name != "prov-03" {
+		t.Fatalf("30 provider nodes %+v", show)
+	}
+	for i, node := range show.Nodes {
+		if node.Name != fmt.Sprintf("prov-%02d", i) {
+			t.Fatalf("order %+v", show.Nodes)
+		}
+	}
+	shown := buildTrayMenu(show)
+	menu := menuByLabel(t, shown, "节点")
+	if len(menu.Children) != 30 {
+		t.Fatalf("menu %d", len(menu.Children))
+	}
+	picked, ok := findTrayItem(shown, tray.MenuNodeBase+3)
+	if !ok || !picked.Checked || picked.Label != "prov-03" {
+		t.Fatalf("checked %+v", picked)
+	}
+
+	hideProxies, hideProviders := trayControllerBodies(20, 11, "prov-00")
+	hide := loadTrayNodes(t, hideProxies, hideProviders, http.StatusOK)
+	if !hide.NodesLoaded || len(hide.Nodes) != 31 || hide.Nodes[0].Name != "local-00" || hide.Nodes[30].Name != "prov-10" {
+		t.Fatalf("31 nodes %+v", hide.Nodes)
+	}
+	if _, ok := findMenuLabel(buildTrayMenu(hide), "节点"); ok {
+		t.Fatal("31 nodes still showed the node menu")
+	}
+}
+
+func TestTrayMenuKeepsProxiesWhenProvidersFail(t *testing.T) {
+	useTempConfig(t)
+	proxies := `{"proxies":{"PROXY":{"type":"Selector","now":"alpha","all":["alpha","only-provider"]},"alpha":{"type":"HTTP"}}}`
+	providers := `{"providers":{"sub":{"proxies":[{"name":"only-provider","type":"SS"}]}}}`
+
+	miss := loadTrayNodes(t, proxies, providers, http.StatusNotFound)
+	if !miss.NodesLoaded || len(miss.Nodes) != 1 || miss.Nodes[0].Name != "alpha" || !miss.Nodes[0].Selected {
+		t.Fatalf("404 state %+v", miss)
+	}
+	if _, ok := findMenuLabel(buildTrayMenu(miss), "节点"); !ok {
+		t.Fatal("404 hid the node menu")
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/providers/proxies" {
+			time.Sleep(2 * time.Second)
+			return
+		}
+		_, _ = io.WriteString(w, proxies)
+	}))
+	defer srv.Close()
+	rt := &appRuntime{core: &fakeCore{running: true, mode: core.ModeRule, ports: core.Ports{Controller: mustPort(t, srv.URL)}}}
+	start := time.Now()
+	late := rt.loadTrayMenuState()
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("providers wait %s", elapsed)
+	}
+	if !late.NodesLoaded || len(late.Nodes) != 1 || late.Nodes[0].Name != "alpha" || !late.Nodes[0].Selected {
+		t.Fatalf("timeout state %+v", late)
+	}
+	if _, ok := findMenuLabel(buildTrayMenu(late), "节点"); !ok {
+		t.Fatal("timeout hid the node menu")
+	}
+}
+
+func loadTrayNodes(t *testing.T, proxies, providers string, providersStatus int) TrayMenuState {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/proxies":
+			_, _ = io.WriteString(w, proxies)
+		case "/providers/proxies":
+			if providersStatus != 0 && providersStatus != http.StatusOK {
+				w.WriteHeader(providersStatus)
+			}
+			_, _ = io.WriteString(w, providers)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	rt := &appRuntime{core: &fakeCore{running: true, mode: core.ModeRule, ports: core.Ports{Controller: mustPort(t, srv.URL)}}}
+	return rt.loadTrayMenuState()
+}
+
+func trayControllerBodies(localN, provN int, now string) (string, string) {
+	all := make([]string, 0, localN+provN)
+	proxies := map[string]any{}
+	for i := 0; i < localN; i++ {
+		name := fmt.Sprintf("local-%02d", i)
+		all = append(all, name)
+		proxies[name] = map[string]any{"type": "HTTP"}
+	}
+	prov := make([]map[string]string, 0, provN)
+	for i := 0; i < provN; i++ {
+		name := fmt.Sprintf("prov-%02d", i)
+		all = append(all, name)
+		prov = append(prov, map[string]string{"name": name, "type": "SS"})
+	}
+	proxies["PROXY"] = map[string]any{"type": "Selector", "now": now, "all": all}
+	proxyBody, _ := json.Marshal(map[string]any{"proxies": proxies})
+	providerBody, _ := json.Marshal(map[string]any{
+		"providers": map[string]any{"sub": map[string]any{"proxies": prov}},
+	})
+	return string(proxyBody), string(providerBody)
 }
 
 func TestTraySystemProxyClickRefusesWhenStopped(t *testing.T) {
