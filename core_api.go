@@ -686,11 +686,14 @@ func (a *appRuntime) handleSubsUpdate(rw http.ResponseWriter, r *http.Request) {
 
 // updateSubscription downloads one subscription, writes its provider file, and stores the node count.
 // A download failure is saved on LastError and returned. A save failure is a subPersistError.
+// Only the result fields are written back. A subscription deleted during the download stays deleted.
 func (a *appRuntime) updateSubscription(ctx context.Context, sub configstore.Subscription) (configstore.Subscription, error) {
 	res, err := subscription.Update(ctx, sub, a.candidateProxies(), filepath.Join(a.coreDir, "providers"))
 	if err != nil {
 		sub.LastError = publicErr(err)
-		if saveErr := a.saveSub(sub); saveErr != nil {
+		if saveErr := a.saveSubResult(sub.ID, func(cur *configstore.Subscription) {
+			cur.LastError = sub.LastError
+		}); saveErr != nil {
 			return sub, &subPersistError{err: saveErr}
 		}
 		return sub, err
@@ -699,7 +702,12 @@ func (a *appRuntime) updateSubscription(ctx context.Context, sub configstore.Sub
 	sub.Usage = res.Usage
 	sub.UpdatedAt = time.Now()
 	sub.LastError = ""
-	if saveErr := a.saveSub(sub); saveErr != nil {
+	if saveErr := a.saveSubResult(sub.ID, func(cur *configstore.Subscription) {
+		cur.NodeCount = sub.NodeCount
+		cur.Usage = sub.Usage
+		cur.UpdatedAt = sub.UpdatedAt
+		cur.LastError = ""
+	}); saveErr != nil {
 		return sub, &subPersistError{err: saveErr}
 	}
 	return sub, nil
@@ -719,19 +727,23 @@ func (a *appRuntime) reloadSubs(ctx context.Context) ([]configstore.Subscription
 	return configstore.LoadSubscriptions()
 }
 
-func (a *appRuntime) saveSub(sub configstore.Subscription) error {
+// saveSubResult reloads the subscription list under opMu and applies apply to that id.
+// A missing id is left deleted.
+func (a *appRuntime) saveSubResult(id string, apply func(*configstore.Subscription)) error {
+	if apply == nil || id == "" {
+		return nil
+	}
 	a.opMu.Lock()
 	defer a.opMu.Unlock()
 	subs, err := configstore.LoadSubscriptions()
 	if err != nil {
 		return err
 	}
-	idx := subIndex(subs, sub.ID)
+	idx := subIndex(subs, id)
 	if idx < 0 {
-		subs = append(subs, sub)
-	} else {
-		subs[idx] = sub
+		return nil
 	}
+	apply(&subs[idx])
 	return configstore.SaveSubscriptions(subs)
 }
 
