@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -91,8 +92,8 @@ func TestLoadCoreSettingsCreatesStableSecret(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.MixedPort != 27890 || first.ControllerPort != 27891 || first.AIDedicatedPort != 27892 {
-		t.Fatalf("ports = %d %d %d", first.MixedPort, first.ControllerPort, first.AIDedicatedPort)
+	if first.MixedPort != 27890 || first.ControllerPort != 27891 || first.AIDedicatedPort != 27892 || first.SpeedTestPort != 27893 {
+		t.Fatalf("ports = %d %d %d %d", first.MixedPort, first.ControllerPort, first.AIDedicatedPort, first.SpeedTestPort)
 	}
 	if first.Mode != "rule" {
 		t.Fatalf("mode = %q", first.Mode)
@@ -154,6 +155,7 @@ func TestLoadCoreSettingsFillsZeroFields(t *testing.T) {
 			MixedPort:       27901,
 			ControllerPort:  27891,
 			AIDedicatedPort: 27892,
+			SpeedTestPort:   27893,
 			Secret:          "kept-secret",
 			Mode:            "rule",
 			BypassCN:        true,
@@ -224,7 +226,7 @@ func TestLoadCoreSettingsFillsZeroFields(t *testing.T) {
 	t.Run("complete", func(t *testing.T) {
 		dir := useDir(t)
 		path := filepath.Join(dir, "core.json")
-		original := []byte("{\"enabled\":true,\"mixedPort\":27901,\"controllerPort\":27891,\"aiDedicatedPort\":27892,\"secret\":\"kept-secret\",\"mode\":\"direct\",\"bypassCN\":true,\"systemProxy\":false}")
+		original := []byte("{\"enabled\":true,\"mixedPort\":27901,\"controllerPort\":27891,\"aiDedicatedPort\":27892,\"speedTestPort\":27893,\"secret\":\"kept-secret\",\"mode\":\"direct\",\"bypassCN\":true,\"systemProxy\":false}")
 		if err := os.WriteFile(path, original, 0644); err != nil {
 			t.Fatal(err)
 		}
@@ -400,16 +402,19 @@ func TestAppConfigStillUsesConfigJSON(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := LoadConfig()
-	if cfg.PreferredClient != "auto" || !cfg.MinimizeToTray || !cfg.IsAutoOptimizeEnabled() || !cfg.IsAutoSyncEnabled() {
+	if !cfg.MinimizeToTray || !cfg.IsAutoOptimizeEnabled() || !cfg.IsAutoSyncEnabled() {
 		t.Fatalf("defaults = %+v", cfg)
 	}
-	cfg.PreferredClient = "clash_mi"
-	cfg.ExcludeRegionsRegex = "HK"
+	if cfg.IsAppEnabled("cursor") || len(cfg.EnabledAppIDs()) != 0 {
+		t.Fatalf("fresh apps = %+v", cfg.ManagedApps)
+	}
+	cfg.CustomCursorExe = `C:\Cursor.exe`
+	cfg.DelayTestURL = "http://127.0.0.1/generate_204"
 	if err := SaveConfig(cfg); err != nil {
 		t.Fatal(err)
 	}
 	loaded := LoadConfig()
-	if loaded.PreferredClient != "clash_mi" || loaded.ExcludeRegionsRegex != "HK" {
+	if loaded.CustomCursorExe != cfg.CustomCursorExe || loaded.DelayTestURL != cfg.DelayTestURL {
 		t.Fatalf("loaded = %+v", loaded)
 	}
 	again, err := LoadCoreSettings()
@@ -418,9 +423,6 @@ func TestAppConfigStillUsesConfigJSON(t *testing.T) {
 	}
 	if again.Secret != core.Secret {
 		t.Fatal("SaveConfig changed the core secret")
-	}
-	if _, err := os.Stat(filepath.Join(dir, "config.json")); err != nil {
-		t.Fatal(err)
 	}
 	raw, err := os.ReadFile(filepath.Join(dir, "config.json"))
 	if err != nil {
@@ -433,8 +435,102 @@ func TestAppConfigStillUsesConfigJSON(t *testing.T) {
 	if _, ok := decoded["secret"]; ok {
 		t.Fatal("config.json contains secret")
 	}
-	if _, ok := decoded["url"]; ok {
-		t.Fatal("config.json contains a subscription url")
+	for _, gone := range []string{"preferredClient", "customClashDir", "customClashExe", "customClashMiDir", "customClashMiExe", "customV2rayNExe", "customPortOverride", "excludeRegionsRegex"} {
+		if _, ok := decoded[gone]; ok {
+			t.Fatalf("config.json rewrote %s", gone)
+		}
+	}
+}
+
+func TestManagedAppsMigrateFromState(t *testing.T) {
+	dir := useDir(t)
+	state := StateManifest{Targets: map[string]TargetBackupState{
+		"cursor": {Managed: true},
+		"codex":  {Managed: false},
+		"other":  {Managed: true},
+	}}
+	raw, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "state.json"), raw, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(`{"syncUserEnv":true,"preferredClient":"clash_verge","customClashDir":"D:\\Clash","excludeRegionsRegex":"HK"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := LoadConfig()
+	if !cfg.SyncUserEnv || !cfg.IsAppEnabled("cursor") || cfg.IsAppEnabled("codex") || cfg.IsAppEnabled("antigravity") || cfg.IsAppEnabled("claude_code") || cfg.IsAppEnabled("other") {
+		t.Fatalf("migrated = %+v", cfg.ManagedApps)
+	}
+	if ids := cfg.EnabledAppIDs(); len(ids) != 1 || ids[0] != "cursor" {
+		t.Fatalf("enabled = %v", ids)
+	}
+	saved, err := os.ReadFile(filepath.Join(dir, "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(saved)
+	for _, gone := range []string{"preferredClient", "customClashDir", "excludeRegionsRegex", "scriptBackedUp"} {
+		if strings.Contains(text, gone) {
+			t.Fatalf("rewrote %s in %s", gone, text)
+		}
+	}
+	second := LoadConfig()
+	if !second.IsAppEnabled("cursor") || second.IsAppEnabled("codex") {
+		t.Fatalf("second load = %+v", second.ManagedApps)
+	}
+}
+
+func TestFreshConfigDisablesEveryApp(t *testing.T) {
+	dir := useDir(t)
+	cfg := LoadConfig()
+	for _, id := range []string{"cursor", "antigravity", "claude_code", "codex"} {
+		if cfg.IsAppEnabled(id) {
+			t.Fatalf("%s enabled", id)
+		}
+	}
+	if cfg.EnabledAppIDs() != nil {
+		t.Fatalf("enabled = %v", cfg.EnabledAppIDs())
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"cursor": false`) || strings.Contains(string(raw), "preferredClient") {
+		t.Fatalf("fresh file %s", raw)
+	}
+}
+
+func TestEnabledAppIDsKeepStableOrder(t *testing.T) {
+	cfg := AppConfig{ManagedApps: map[string]bool{
+		"codex": true, "cursor": false, "antigravity": true, "claude_code": true, "extra": true,
+	}}
+	got := cfg.EnabledAppIDs()
+	want := []string{"antigravity", "claude_code", "codex"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("order %v", got)
+	}
+	if cfg.IsAppEnabled("cursor") || !cfg.IsAppEnabled("codex") || cfg.IsAppEnabled("extra") {
+		t.Fatal(cfg.ManagedApps)
+	}
+}
+
+func TestOldStateDropsScriptBackupFlag(t *testing.T) {
+	dir := useDir(t)
+	if err := os.WriteFile(filepath.Join(dir, "state.json"), []byte(`{"scriptBackedUp":true,"targets":{}}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	st := LoadState()
+	if err := SaveState(st); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "scriptBackedUp") {
+		t.Fatalf("state rewrote scriptBackedUp: %s", raw)
 	}
 }
 
@@ -469,6 +565,7 @@ func TestConcurrentSavesKeepBothFiles(t *testing.T) {
 		MixedPort:       27890,
 		ControllerPort:  27891,
 		AIDedicatedPort: 27892,
+		SpeedTestPort:   27893,
 		Secret:          "fixed-secret",
 		Mode:            "global",
 		BypassCN:        true,

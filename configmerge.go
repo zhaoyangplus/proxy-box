@@ -42,23 +42,19 @@ func mergeAppConfig(current configstore.AppConfig, body []byte) (configstore.App
 		key string
 		dst any
 	}{
-		{"preferredClient", &out.PreferredClient},
-		{"customClashDir", &out.CustomClashDir},
-		{"customClashExe", &out.CustomClashExe},
-		{"customClashMiDir", &out.CustomClashMiDir},
-		{"customClashMiExe", &out.CustomClashMiExe},
-		{"customV2rayNExe", &out.CustomV2rayNExe},
 		{"customCursorExe", &out.CustomCursorExe},
 		{"customAntigravityExe", &out.CustomAntigravityExe},
 		{"customCodexExe", &out.CustomCodexExe},
-		{"customPortOverride", &out.CustomPortOverride},
-		{"excludeRegionsRegex", &out.ExcludeRegionsRegex},
 		{"syncUserEnv", &out.SyncUserEnv},
 		{"minimizeToTray", &out.MinimizeToTray},
 		{"autoOptimizeNode", &out.AutoOptimizeNode},
 		{"autoSyncOnChange", &out.AutoSyncOnChange},
 		{"nodeSelectionMode", &out.NodeSelectionMode},
 		{"manualNodeName", &out.ManualNodeName},
+		{"managedApps", &out.ManagedApps},
+		{"delayTestURL", &out.DelayTestURL},
+		{"speedTestURL", &out.SpeedTestURL},
+		{"speedTestMaxMB", &out.SpeedTestMaxMB},
 	}
 	for _, field := range fields {
 		rawValue, ok := raw[field.key]

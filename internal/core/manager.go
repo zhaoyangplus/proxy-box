@@ -125,6 +125,7 @@ func (m *Manager) Start(ctx context.Context, binaryPath string, params ConfigPar
 	params.MixedPort = ports.Mixed
 	params.ControllerPort = ports.Controller
 	params.AIDedicatedPort = ports.AIDedicated
+	params.SpeedTestPort = ports.SpeedTest
 	body, err := Render(params, providers)
 	if err != nil {
 		return Status{}, err
@@ -218,6 +219,7 @@ func (m *Manager) Reload(ctx context.Context, params ConfigParams, providers []P
 	params.MixedPort = m.ports.Mixed
 	params.ControllerPort = m.ports.Controller
 	params.AIDedicatedPort = m.ports.AIDedicated
+	params.SpeedTestPort = m.ports.SpeedTest
 	if strings.TrimSpace(params.Mode) == "" {
 		params.Mode = m.params.Mode
 	}

@@ -45,7 +45,6 @@ func TestResponsesOmitSecret(t *testing.T) {
 	sub := configstore.Subscription{ID: "abc", Name: "local", URL: "http://127.0.0.1/sub", Enabled: true}
 	snap := detector.SystemSnapshot{
 		ActiveClient: detector.ProxyClientInfo{ID: "builtin", Name: "内置内核", Secret: secret},
-		Clients:      []detector.ProxyClientInfo{{ID: "builtin", Secret: secret}, {ID: "clash_verge", Secret: secret}},
 	}
 	values := []any{
 		status,
@@ -453,6 +452,7 @@ func TestGlobalFollowsProxySelection(t *testing.T) {
 	client := detector.ProxyClientInfo{
 		ID:                 "builtin",
 		Name:               "内置内核",
+		Running:            true,
 		ExternalController: strings.TrimPrefix(srv.URL, "http://"),
 		Secret:             "not-in-the-response",
 	}
@@ -529,85 +529,45 @@ func TestGlobalFallsBackToProxyGroupForProviderNode(t *testing.T) {
 	}
 }
 
-func TestNodesBuiltinClientIgnoresActiveClient(t *testing.T) {
+func TestNodesUseBuiltinActiveClient(t *testing.T) {
 	useTempConfig(t)
-	var vergeHits, builtinHits []string
-	vergeSrv := httptest.NewServer(selectorHandler("verge-node", &vergeHits))
-	defer vergeSrv.Close()
-	builtinSrv := httptest.NewServer(selectorHandler("builtin-node", &builtinHits))
-	defer builtinSrv.Close()
+	var hits []string
+	srv := httptest.NewServer(selectorHandler("builtin-node", &hits))
+	defer srv.Close()
 
-	vergeClient := detector.ProxyClientInfo{
-		ID:                 "clash_verge",
-		Name:               "Clash Verge",
-		Running:            true,
-		ExternalController: strings.TrimPrefix(vergeSrv.URL, "http://"),
-		Secret:             "verge-secret-marker",
-	}
 	builtinOn := detector.ProxyClientInfo{
 		ID:                 "builtin",
 		Name:               "内置内核",
 		Running:            true,
-		ExternalController: strings.TrimPrefix(builtinSrv.URL, "http://"),
+		ExternalController: strings.TrimPrefix(srv.URL, "http://"),
 		Secret:             "builtin-secret-marker",
 	}
-	snap := detector.SystemSnapshot{
-		ActiveClient: vergeClient,
-		Clients:      []detector.ProxyClientInfo{vergeClient, builtinOn},
-	}
+	snap := detector.SystemSnapshot{ActiveClient: builtinOn}
 	rt := &appRuntime{
 		core:   &fakeCore{mode: core.ModeRule},
 		detect: func() detector.SystemSnapshot { return snap },
 	}
 
-	rec := postJSON(rt.handleNodesList, `{"group":"PROXY"}`)
-	assertListedNode(t, rec, "verge-node")
-	if len(builtinHits) != 0 || !containsStr(vergeHits, "GET /proxies") {
-		t.Fatalf("active client hits verge %v builtin %v", vergeHits, builtinHits)
-	}
-
-	vergeHits, builtinHits = nil, nil
-	rec = postJSON(rt.handleNodesList, `{"group":"PROXY","client":"builtin"}`)
+	rec := postJSON(rt.handleNodesList, `{"group":"PROXY","client":"other"}`)
 	assertListedNode(t, rec, "builtin-node")
-	if len(vergeHits) != 0 || !containsStr(builtinHits, "GET /proxies") {
-		t.Fatalf("builtin list hits verge %v builtin %v", vergeHits, builtinHits)
+	if !containsStr(hits, "GET /proxies") {
+		t.Fatalf("hits %v", hits)
+	}
+	if strings.Contains(rec.Body.String(), "builtin-secret-marker") {
+		t.Fatalf("secret in list %s", rec.Body.String())
 	}
 
-	vergeHits, builtinHits = nil, nil
-	rec = postJSON(rt.handleNodesSelect, `{"group":"PROXY","nodeName":"verge-node"}`)
-	if rec.Code != http.StatusOK || !containsStr(vergeHits, "PUT /proxies/PROXY") || len(builtinHits) != 0 {
-		t.Fatalf("active select code %d verge %v builtin %v body %s", rec.Code, vergeHits, builtinHits, rec.Body.String())
-	}
-	if strings.Contains(rec.Body.String(), "verge-secret-marker") || strings.Contains(rec.Body.String(), "builtin-secret-marker") {
-		t.Fatalf("secret in select response %s", rec.Body.String())
+	hits = nil
+	rec = postJSON(rt.handleNodesSelect, `{"group":"PROXY","nodeName":"builtin-node"}`)
+	if rec.Code != http.StatusOK || !containsStr(hits, "PUT /proxies/PROXY") {
+		t.Fatalf("select code %d hits %v body %s", rec.Code, hits, rec.Body.String())
 	}
 
-	vergeHits, builtinHits = nil, nil
-	rec = postJSON(rt.handleNodesSelect, `{"group":"PROXY","nodeName":"builtin-node","client":"builtin"}`)
-	if rec.Code != http.StatusOK || !containsStr(builtinHits, "PUT /proxies/PROXY") || len(vergeHits) != 0 {
-		t.Fatalf("builtin select code %d verge %v builtin %v body %s", rec.Code, vergeHits, builtinHits, rec.Body.String())
-	}
-
-	builtinOff := builtinOn
-	builtinOff.Running = false
-	snap.Clients = []detector.ProxyClientInfo{vergeClient, builtinOff}
-	vergeHits, builtinHits = nil, nil
-	rec = postJSON(rt.handleNodesList, `{"group":"PROXY","client":"builtin"}`)
-	if rec.Code == http.StatusOK || !strings.Contains(rec.Body.String(), "内置内核未运行") {
-		t.Fatalf("stopped list %s", rec.Body.String())
-	}
-	rec = postJSON(rt.handleNodesSelect, `{"group":"PROXY","nodeName":"builtin-node","client":"builtin"}`)
-	if rec.Code == http.StatusOK || !strings.Contains(rec.Body.String(), "内置内核未运行") {
-		t.Fatalf("stopped select %s", rec.Body.String())
-	}
-	if len(vergeHits) != 0 || len(builtinHits) != 0 {
-		t.Fatalf("stopped builtin called a controller: verge %v builtin %v", vergeHits, builtinHits)
-	}
-
-	snap.Clients = []detector.ProxyClientInfo{vergeClient}
-	rec = postJSON(rt.handleNodesList, `{"group":"PROXY","client":"builtin"}`)
-	if rec.Code == http.StatusOK || !strings.Contains(rec.Body.String(), "内置内核未运行") || len(vergeHits) != 0 {
-		t.Fatalf("missing builtin code %d hits %v body %s", rec.Code, vergeHits, rec.Body.String())
+	snap.ActiveClient.Running = false
+	hits = nil
+	rec = postJSON(rt.handleNodesList, `{"group":"PROXY"}`)
+	if rec.Code == http.StatusOK || !strings.Contains(rec.Body.String(), "内置内核未运行") || len(hits) != 0 {
+		t.Fatalf("stopped list hits %v body %s", hits, rec.Body.String())
 	}
 }
 
@@ -673,10 +633,7 @@ func TestNodeDelayUsesProviderHealthcheck(t *testing.T) {
 		Secret:             "delay-secret-marker",
 	}
 	rt := &appRuntime{detect: func() detector.SystemSnapshot {
-		return detector.SystemSnapshot{
-			ActiveClient: detector.ProxyClientInfo{ID: "clash_verge", Name: "Clash Verge", Running: true, ExternalController: "127.0.0.1:1"},
-			Clients:      []detector.ProxyClientInfo{builtin},
-		}
+		return detector.SystemSnapshot{ActiveClient: builtin}
 	}}
 
 	rec := postJSON(rt.handleNodesTest, `{"client":"builtin","nodeName":" US01 "}`)
@@ -730,7 +687,7 @@ func TestNodeSelectMessageUsesSwitchedNode(t *testing.T) {
 	if got := nodeSelectMessage("PROXY", "alpha", nil); got != "已切换 PROXY 节点：alpha" {
 		t.Fatalf("nil live = %s", got)
 	}
-	if got := nodeSelectMessage(mihomo.AIGroupName, "US01", live); got != "Proxy Box 专属通道已锁定节点：SG03（外部代理软件节点不受影响）" {
+	if got := nodeSelectMessage(mihomo.AIGroupName, "US01", live); got != "Proxy Box 专属通道已锁定节点：SG03" {
 		t.Fatalf("AI = %s", got)
 	}
 	if got := nodeSelectMessage("", mihomo.AIAutoName, live); got != "Proxy Box 专属通道已切回自动优选：SG03" {

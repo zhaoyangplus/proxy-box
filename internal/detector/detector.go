@@ -8,24 +8,21 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"sort"
-	"strconv"
 	"strings"
 	"time"
 	"unsafe"
 
-	"proxy-box/internal/clashscript"
 	"proxy-box/internal/configstore"
 	"proxy-box/internal/configurator"
 	"proxy-box/internal/mihomo"
+
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
-	"gopkg.in/yaml.v3"
 )
 
 type ProxyClientInfo struct {
-	ID                  string `json:"id"`   // "clash_verge", "clash_mi", "v2rayn", "builtin"
-	Name                string `json:"name"` // "Clash Verge", "Clash Mi", "v2rayN", "内置内核"
+	ID                  string `json:"id"`   // "builtin"
+	Name                string `json:"name"` // "内置内核"
 	Installed           bool   `json:"installed"`
 	Running             bool   `json:"running"`
 	CoreRunning         bool   `json:"coreRunning"`
@@ -43,7 +40,6 @@ type ProxyClientInfo struct {
 	ActiveProfileUID    string `json:"activeProfileUid,omitempty"`
 	ActiveProfileName   string `json:"activeProfileName"`
 	ExternalController  string `json:"externalController,omitempty"`
-	ControllerPipe      string `json:"-"`
 	Secret              string `json:"-"`
 	ControllerReachable bool   `json:"controllerReachable"`
 	IsolatedGroup       bool   `json:"isolatedGroup"`
@@ -75,27 +71,17 @@ type AppTargetInfo struct {
 	Http2Disabled         bool   `json:"http2Disabled"`
 	TerminalEnvConfigured bool   `json:"terminalEnvConfigured"`
 	ManagedByBox          bool   `json:"managedByBox"`
+	EnabledByUser         bool   `json:"enabledByUser"`
 	ShortcutExists        bool   `json:"shortcutExists"`
 	StatusText            string `json:"statusText"`
 }
 
-type ClashScriptStatus struct {
-	ScriptPath      string `json:"scriptPath"`
-	Injected        bool   `json:"injected"`
-	ActiveInRuntime bool   `json:"activeInRuntime"`
-	HasBackup       bool   `json:"hasBackup"`
-}
-
 type SystemSnapshot struct {
-	PreferredClient string                `json:"preferredClient"`
-	ActiveClient    ProxyClientInfo       `json:"activeClient"`
-	Clients         []ProxyClientInfo     `json:"clients"`
-	Clash           ProxyClientInfo       `json:"clash"`
-	Targets         []AppTargetInfo       `json:"targets"`
-	ClashScript     ClashScriptStatus     `json:"clashScript"`
-	UserEnvProxy    string                `json:"userEnvProxy"`
-	AppConfig       configstore.AppConfig `json:"appConfig"`
-	CheckedAt       string                `json:"checkedAt"`
+	ActiveClient ProxyClientInfo       `json:"activeClient"`
+	Targets      []AppTargetInfo       `json:"targets"`
+	UserEnvProxy string                `json:"userEnvProxy"`
+	AppConfig    configstore.AppConfig `json:"appConfig"`
+	CheckedAt    string                `json:"checkedAt"`
 }
 
 // procInstance is one process. Several mihomo.exe processes share an exe name and must not share a path or port list.
@@ -112,90 +98,65 @@ type procDetail struct {
 	Instances []procInstance
 }
 
-// OptimizeClientNode triggers Mihomo optimal compliant node selection ONLY on CursorBox's isolated 🤖 AI-IDE group.
+func controllerClient(c ProxyClientInfo) *mihomo.Client {
+	mc := mihomo.NewClient(c.ExternalController, c.Secret)
+	mc.SetDelayTestURL(configstore.LoadConfig().DelayTestURL)
+	return mc
+}
+
+// OptimizeClientNode selects the lowest-latency compliant node on the builtin 🤖 AI-IDE group.
 func OptimizeClientNode(c ProxyClientInfo) (*mihomo.OptimizeResult, error) {
-	if c.ID == "v2rayn" {
-		return nil, fmt.Errorf("v2rayN 未暴露 Mihomo 控制接口，请在 v2rayN 主界面选择美/日/新等非香港节点")
+	if !c.Running {
+		return nil, fmt.Errorf("内置内核未运行，无法优选节点")
 	}
-	mc := mihomo.NewClient(c.ControllerPipe, c.ExternalController, c.Secret)
+	mc := controllerClient(c)
 	if !mc.Available() {
-		return nil, fmt.Errorf("未能连接到 %s 内核控制接口，请确认 %s 已运行", c.Name, c.Name)
+		return nil, fmt.Errorf("未能连接到 %s 内核控制接口，请确认内核已运行", c.Name)
 	}
 	return mc.OptimizeBestNode()
 }
 
-// ListClientNodes returns all selectable nodes in CursorBox's isolated 🤖 AI-IDE group.
+// ListClientNodes returns selectable nodes in the builtin 🤖 AI-IDE group.
 func ListClientNodes(c ProxyClientInfo, runDelayTest bool) (*mihomo.NodeListResult, error) {
-	if c.ID == "v2rayn" {
-		return nil, fmt.Errorf("v2rayN 暂不支持双向独立节点选择，请使用 Clash Verge 或 Clash Mi 启用独立通道")
+	if !c.Running {
+		return nil, fmt.Errorf("内置内核未运行")
 	}
-	mc := mihomo.NewClient(c.ControllerPipe, c.ExternalController, c.Secret)
+	mc := controllerClient(c)
 	if !mc.Available() {
-		return nil, fmt.Errorf("未能连接到 %s 内核控制接口，请确认 %s 已运行", c.Name, c.Name)
+		return nil, fmt.Errorf("未能连接到 %s 内核控制接口，请确认内核已运行", c.Name)
 	}
 	return mc.ListAINodes(runDelayTest)
 }
 
-// SelectClientNode switches ONLY CursorBox's isolated 🤖 AI-IDE group to targetNode.
+// SelectClientNode switches the builtin 🤖 AI-IDE group to targetNode.
 func SelectClientNode(c ProxyClientInfo, targetNode string) (*mihomo.LiveNodeStatus, error) {
-	if c.ID == "v2rayn" {
-		return nil, fmt.Errorf("v2rayN 暂不支持双向独立节点选择")
+	if !c.Running {
+		return nil, fmt.Errorf("内置内核未运行")
 	}
-	mc := mihomo.NewClient(c.ControllerPipe, c.ExternalController, c.Secret)
+	mc := controllerClient(c)
 	if !mc.Available() {
 		return nil, fmt.Errorf("未能连接到 %s 内核控制接口", c.Name)
 	}
 	return mc.SelectAINode(targetNode)
 }
 
-// FastConfigStamp inspects modification times & sizes of key proxy config files in <1ms
-// so the background watcher detects subscription/port/config changes immediately with near-zero CPU.
-func FastConfigStamp(cfg configstore.AppConfig) string {
-	appData := os.Getenv("APPDATA")
-	files := []string{
-		filepath.Join(appData, "io.github.clash-verge-rev.clash-verge-rev", "profiles.yaml"),
-		filepath.Join(appData, "io.github.clash-verge-rev.clash-verge-rev", "verge.yaml"),
-		filepath.Join(appData, "io.github.clash-verge-rev.clash-verge-rev", "clash-verge.yaml"),
-		filepath.Join(appData, "io.github.zzzgydi.clash-verge", "profiles.yaml"),
-		filepath.Join(appData, "io.github.zzzgydi.clash-verge", "verge.yaml"),
-		filepath.Join(appData, "clashmi", "clashmi", "profiles.json"),
-		filepath.Join(appData, "clashmi", "clashmi", "setting.json"),
-		filepath.Join(appData, "clashmi", "clashmi", "service_core_runtime_profile.yaml"),
-		filepath.Join(appData, "clashmi", "profiles.json"),
-	}
-	if cfg.CustomClashDir != "" {
-		files = append(files,
-			filepath.Join(cfg.CustomClashDir, "profiles.yaml"),
-			filepath.Join(cfg.CustomClashDir, "verge.yaml"),
-			filepath.Join(cfg.CustomClashDir, "clash-verge.yaml"),
-		)
-	}
-	if cfg.CustomClashMiDir != "" {
-		files = append(files,
-			filepath.Join(cfg.CustomClashMiDir, "profiles.json"),
-			filepath.Join(cfg.CustomClashMiDir, "service_core_runtime_profile.yaml"),
-		)
-	}
-	if cfg.CustomV2rayNExe != "" {
-		gdir := filepath.Join(filepath.Dir(cfg.CustomV2rayNExe), "guiConfigs")
-		files = append(files,
-			filepath.Join(gdir, "guiNConfig.json"),
-			filepath.Join(gdir, "guiNDB.db"),
-		)
-	}
+// FastConfigStamp watches Proxy Box's own config, core, and provider files.
+func FastConfigStamp() string {
+	var files []string
 	if base, err := configstore.BaseDir(); err == nil {
 		files = append(files,
+			filepath.Join(base, "config.json"),
 			filepath.Join(base, "core.json"),
 			filepath.Join(base, "subscriptions.json"),
 		)
 	}
-	coreDir := filepath.Join(os.Getenv("LOCALAPPDATA"), "ProxyBox", "core")
+	coreDir := proxyBoxCoreDir()
 	files = append(files, filepath.Join(coreDir, "config.yaml"))
 
 	var b strings.Builder
 	for _, f := range files {
 		if st, err := os.Stat(f); err == nil && !st.IsDir() {
-			fmt.Fprintf(&b, "%d:%d|", st.ModTime().UnixNano(), st.Size())
+			fmt.Fprintf(&b, "%s\t%d\t%d\n", f, st.ModTime().UnixNano(), st.Size())
 		}
 	}
 	stampProvidersDir(&b, filepath.Join(coreDir, "providers"))
@@ -335,749 +296,24 @@ func isHTTPProxyPort(host string, port int) (reachable bool, speaksHTTP bool) {
 	return true, false
 }
 
-func readWindowsSystemProxy() (enabled bool, host string, port int) {
-	k, err := registry.OpenKey(registry.CURRENT_USER, `Software\Microsoft\Windows\CurrentVersion\Internet Settings`, registry.QUERY_VALUE)
-	if err != nil {
-		return false, "", 0
-	}
-	defer k.Close()
-
-	en, _, _ := k.GetIntegerValue("ProxyEnable")
-	srv, _, _ := k.GetStringValue("ProxyServer")
-	enabled = en == 1
-	srv = strings.TrimSpace(srv)
-	if srv == "" {
-		return enabled, "", 0
-	}
-	for _, part := range strings.Split(srv, ";") {
-		part = strings.TrimSpace(part)
-		if strings.HasPrefix(strings.ToLower(part), "socks=") {
-			continue
-		}
-		if idx := strings.IndexByte(part, '='); idx >= 0 {
-			part = part[idx+1:]
-		}
-		part = strings.TrimPrefix(strings.TrimPrefix(part, "http://"), "https://")
-		h, pStr, err := net.SplitHostPort(part)
-		if err == nil {
-			if p, err := strconv.Atoi(pStr); err == nil && p > 0 {
-				return enabled, h, p
-			}
-		}
-	}
-	return enabled, "", 0
-}
-
 func DetectAll() SystemSnapshot {
 	cfg := configstore.LoadConfig()
 	st := configstore.LoadState()
 	procs := snapshotProcessesAndPorts()
-	sysProxyEn, sysHost, sysPort := readWindowsSystemProxy()
-
-	vergeClient := detectClashVerge(cfg, procs)
-	clashMiClient := detectClashMi(cfg, procs, sysProxyEn, sysHost, sysPort)
-	v2rayNClient := detectV2rayN(cfg, procs, sysProxyEn, sysHost, sysPort)
-	builtinClient := detectBuiltin(procs)
-
-	clients := []ProxyClientInfo{vergeClient, clashMiClient, v2rayNClient, builtinClient}
-	active := selectActiveClient(cfg.PreferredClient, clients, cfg.CustomPortOverride)
-
-	if cfg.CustomPortOverride > 0 {
-		active.MixedPort = cfg.CustomPortOverride
-		active.ProxyURL = fmt.Sprintf("http://%s:%d", active.ProxyHost, active.MixedPort)
-		active.PortReachable, active.HTTPVerified = isHTTPProxyPort(active.ProxyHost, active.MixedPort)
-	}
-
-	scriptStatus := ClashScriptStatus{
-		ScriptPath:      clashscript.ScriptFilePath(vergeClient.ConfigDir),
-		Injected:        vergeClient.RuleInjected,
-		ActiveInRuntime: vergeClient.RuleActiveInRuntime,
-		HasBackup:       clashscript.HasBackup(),
-	}
-
+	active := detectBuiltin(procs)
 	targets := []AppTargetInfo{
 		detectCursor(cfg, st, procs, active.ProxyURL),
 		detectAntigravity(cfg, st, procs, active.ProxyURL),
-		detectClaudeCode(st, procs, active.ProxyURL),
+		detectClaudeCode(cfg, st, procs, active.ProxyURL),
 		detectCodex(cfg, st, procs, active.ProxyURL),
 	}
-
 	return SystemSnapshot{
-		PreferredClient: cfg.PreferredClient,
-		ActiveClient:    active,
-		Clients:         clients,
-		Clash:           active,
-		Targets:         targets,
-		ClashScript:     scriptStatus,
-		UserEnvProxy:    readWindowsUserEnvProxy(),
-		AppConfig:       cfg,
-		CheckedAt:       time.Now().Format("15:04:05"),
+		ActiveClient: active,
+		Targets:      targets,
+		UserEnvProxy: readWindowsUserEnvProxy(),
+		AppConfig:    cfg,
+		CheckedAt:    time.Now().Format("15:04:05"),
 	}
-}
-
-func selectActiveClient(preferred string, clients []ProxyClientInfo, portOverride int) ProxyClientInfo {
-	if len(clients) == 0 {
-		return ProxyClientInfo{}
-	}
-	if preferred != "" && preferred != "auto" {
-		for _, c := range clients {
-			if c.ID == preferred {
-				return c
-			}
-		}
-	}
-	for _, c := range clients {
-		if c.ID == "builtin" && c.Running {
-			return c
-		}
-	}
-	var rest []ProxyClientInfo
-	var builtin ProxyClientInfo
-	hasBuiltin := false
-	for _, c := range clients {
-		if c.ID == "builtin" {
-			builtin = c
-			hasBuiltin = true
-			continue
-		}
-		rest = append(rest, c)
-	}
-	if len(rest) == 0 {
-		if hasBuiltin {
-			return builtin
-		}
-		return clients[0]
-	}
-	if c, ok := pickClient(rest, func(c ProxyClientInfo) bool {
-		return c.Running && c.PortReachable && c.HTTPVerified
-	}); ok {
-		return c
-	}
-	if c, ok := pickClient(rest, func(c ProxyClientInfo) bool {
-		return c.Running && c.PortReachable
-	}); ok {
-		return c
-	}
-	if c, ok := pickClient(rest, func(c ProxyClientInfo) bool { return c.Running }); ok {
-		return c
-	}
-	if c, ok := pickClient(rest, func(c ProxyClientInfo) bool { return c.Installed }); ok {
-		return c
-	}
-	if hasBuiltin && builtin.Installed {
-		return builtin
-	}
-	return rest[0]
-}
-
-func pickClient(clients []ProxyClientInfo, ok func(ProxyClientInfo) bool) (ProxyClientInfo, bool) {
-	for _, c := range clients {
-		if ok(c) {
-			return c, true
-		}
-	}
-	return ProxyClientInfo{}, false
-}
-
-func latestModTime(paths ...string) int64 {
-	var maxT int64
-	for _, p := range paths {
-		if st, err := os.Stat(p); err == nil {
-			if t := st.ModTime().UnixNano(); t > maxT {
-				maxT = t
-			}
-		}
-	}
-	return maxT
-}
-
-func detectClashVerge(cfg configstore.AppConfig, procs map[string]*procDetail) ProxyClientInfo {
-	info := ProxyClientInfo{
-		ID:              "clash_verge",
-		Name:            "Clash Verge",
-		ProxyHost:       "127.0.0.1",
-		MixedPort:       7897,
-		RuleSupportMode: "verge_auto",
-	}
-
-	appData := os.Getenv("APPDATA")
-	candidates := []string{}
-	if cfg.CustomClashDir != "" {
-		candidates = append(candidates, cfg.CustomClashDir)
-	}
-	candidates = append(candidates,
-		filepath.Join(appData, "io.github.clash-verge-rev.clash-verge-rev"),
-		filepath.Join(appData, "io.github.zzzgydi.clash-verge"),
-	)
-
-	for _, dir := range candidates {
-		if dirExists(dir) {
-			info.ConfigDir = dir
-			info.Installed = true
-			break
-		}
-	}
-
-	for _, pname := range []string{"clash-verge.exe", "clash verge.exe"} {
-		if d, ok := procs[pname]; ok {
-			info.Running = true
-			if d.Path != "" && info.ExePath == "" {
-				info.ExePath = d.Path
-			}
-		}
-	}
-	for _, cname := range []string{"verge-mihomo.exe", "verge-mihomo-alpha.exe"} {
-		if _, ok := procs[cname]; ok {
-			info.CoreRunning = true
-			info.Running = true
-		}
-	}
-
-	if cfg.CustomClashExe != "" && fileExists(cfg.CustomClashExe) {
-		info.ExePath = cfg.CustomClashExe
-		info.Installed = true
-	} else if info.ExePath == "" {
-		info.ExePath = findExecutable(
-			[]string{"Clash Verge"},
-			[]string{
-				filepath.Join(os.Getenv("LOCALAPPDATA"), "Programs", "Clash Verge", "clash-verge.exe"),
-				filepath.Join(os.Getenv("ProgramFiles"), "Clash Verge", "clash-verge.exe"),
-			},
-			[]string{`Clash Verge\clash-verge.exe`, `ClashVerge\clash-verge.exe`, `tizi\clash-verge.exe`},
-		)
-		if info.ExePath != "" {
-			info.Installed = true
-		}
-	}
-
-	if info.ConfigDir != "" {
-		info.ConfigModUnix = latestModTime(
-			filepath.Join(info.ConfigDir, "verge.yaml"),
-			filepath.Join(info.ConfigDir, "profiles.yaml"),
-			filepath.Join(info.ConfigDir, "clash-verge.yaml"),
-		)
-
-		if raw, err := os.ReadFile(filepath.Join(info.ConfigDir, "verge.yaml")); err == nil {
-			var v struct {
-				ProxyHost         string `yaml:"proxy_host"`
-				VergeMixedPort    int    `yaml:"verge_mixed_port"`
-				VergePort         int    `yaml:"verge_port"`
-				EnableTunMode     bool   `yaml:"enable_tun_mode"`
-				EnableSystemProxy bool   `yaml:"enable_system_proxy"`
-			}
-			if yaml.Unmarshal(raw, &v) == nil {
-				if v.ProxyHost != "" {
-					info.ProxyHost = v.ProxyHost
-				}
-				if v.VergeMixedPort > 0 {
-					info.MixedPort = v.VergeMixedPort
-				} else if v.VergePort > 0 {
-					info.MixedPort = v.VergePort
-				}
-				info.TunEnabled = v.EnableTunMode
-				info.SysProxyEnabled = v.EnableSystemProxy
-			}
-		}
-
-		for _, fn := range []string{"clash-verge.yaml", "config.yaml"} {
-			if raw, err := os.ReadFile(filepath.Join(info.ConfigDir, fn)); err == nil {
-				var c struct {
-					MixedPort              int    `yaml:"mixed-port"`
-					Port                   int    `yaml:"port"`
-					ExternalController     string `yaml:"external-controller"`
-					ExternalControllerPipe string `yaml:"external-controller-pipe"`
-					Secret                 string `yaml:"secret"`
-				}
-				if yaml.Unmarshal(raw, &c) == nil {
-					if info.MixedPort == 0 && c.MixedPort > 0 {
-						info.MixedPort = c.MixedPort
-					}
-					if c.ExternalControllerPipe != "" && info.ControllerPipe == "" {
-						info.ControllerPipe = c.ExternalControllerPipe
-					}
-					if c.ExternalController != "" && info.ExternalController == "" {
-						info.ExternalController = c.ExternalController
-						info.Secret = c.Secret
-					}
-				}
-			}
-		}
-
-		if info.ControllerPipe == "" && info.CoreRunning {
-			info.ControllerPipe = `\\.\pipe\verge-mihomo`
-		}
-
-		if raw, err := os.ReadFile(filepath.Join(info.ConfigDir, "profiles.yaml")); err == nil {
-			var p struct {
-				Current string `yaml:"current"`
-				Items   []struct {
-					UID  string `yaml:"uid"`
-					Name string `yaml:"name"`
-					File string `yaml:"file"`
-				} `yaml:"items"`
-			}
-			if yaml.Unmarshal(raw, &p) == nil {
-				info.ActiveProfileUID = p.Current
-				for _, item := range p.Items {
-					if item.UID == p.Current {
-						if item.Name != "" {
-							info.ActiveProfileName = item.Name
-						} else {
-							info.ActiveProfileName = item.File
-						}
-						break
-					}
-				}
-			}
-		}
-
-		info.RuleInjected = clashscript.IsInjected(info.ConfigDir)
-		info.RuleActiveInRuntime = clashscript.IsActiveInRuntime(info.ConfigDir)
-	}
-
-	info.MainPort = info.MixedPort
-	info.DedicatedPort = clashscript.VergeDedicatedPort
-
-	// Check if CursorBox's dedicated isolated listener (127.0.0.1:17897 -> 🤖 AI-IDE) is live!
-	if info.Running {
-		if dReach, dHTTP := isHTTPProxyPort(info.ProxyHost, info.DedicatedPort); dReach && dHTTP {
-			info.DedicatedPortActive = true
-			info.MixedPort = info.DedicatedPort
-			info.PortReachable = true
-			info.HTTPVerified = true
-		}
-	}
-	if !info.DedicatedPortActive {
-		info.PortReachable, info.HTTPVerified = isHTTPProxyPort(info.ProxyHost, info.MainPort)
-	}
-	info.ProxyURL = fmt.Sprintf("http://%s:%d", info.ProxyHost, info.MixedPort)
-
-	// Query live Mihomo node & group status over Named Pipe or HTTP controller
-	if info.Running && (info.ControllerPipe != "" || info.ExternalController != "") {
-		mc := mihomo.NewClient(info.ControllerPipe, info.ExternalController, info.Secret)
-		live := mc.GetLiveStatus()
-		info.ControllerReachable = live.Connected
-		info.IsolatedGroup = live.IsolatedGroup
-		info.ActiveGroup = live.GroupName
-		info.ActiveNode = live.ResolvedNode
-		info.ActiveNodeDelayMs = live.ResolvedDelayMs
-		info.ActiveNodeCompliant = live.Compliant
-		info.ExternalGroup = live.ExternalGroup
-		info.ExternalNode = live.ExternalNode
-	}
-
-	return info
-}
-
-func detectClashMi(cfg configstore.AppConfig, procs map[string]*procDetail, sysEn bool, sysHost string, sysPort int) ProxyClientInfo {
-	info := ProxyClientInfo{
-		ID:                "clash_mi",
-		Name:              "Clash Mi",
-		ProxyHost:         "127.0.0.1",
-		MixedPort:         7890,
-		ActiveProfileName: "Mihomo 内核配置",
-		RuleSupportMode:   "clashmi_override",
-	}
-
-	var procPorts []int
-	for _, pname := range []string{"clashmi.exe", "clashmiservice.exe"} {
-		if d, ok := procs[pname]; ok {
-			info.Running = true
-			if pname == "clashmiservice.exe" {
-				info.CoreRunning = true
-			}
-			if d.Path != "" && info.ExePath == "" && pname == "clashmi.exe" {
-				info.ExePath = d.Path
-			}
-			procPorts = append(procPorts, d.Ports...)
-		}
-	}
-	if d, ok := procs["mihomo.exe"]; ok {
-		for _, inst := range d.Instances {
-			if strings.Contains(strings.ToLower(inst.Path), "clash") {
-				info.CoreRunning = true
-				procPorts = append(procPorts, inst.Ports...)
-			}
-		}
-	}
-
-	if cfg.CustomClashMiExe != "" && fileExists(cfg.CustomClashMiExe) {
-		info.ExePath = cfg.CustomClashMiExe
-		info.Installed = true
-	} else if info.ExePath == "" {
-		info.ExePath = findExecutable(
-			[]string{"Clash Mi", "clashmi"},
-			[]string{
-				filepath.Join(os.Getenv("ProgramFiles"), "Clash Mi", "clashmi.exe"),
-				filepath.Join(os.Getenv("LOCALAPPDATA"), "Programs", "Clash Mi", "clashmi.exe"),
-				filepath.Join(os.Getenv("LOCALAPPDATA"), "Clash Mi", "clashmi.exe"),
-			},
-			[]string{`Clash Mi\clashmi.exe`, `clashmi\clashmi.exe`, `tizi\Clash Mi\clashmi.exe`},
-		)
-	}
-	if info.ExePath != "" {
-		info.Installed = true
-	}
-
-	appData := os.Getenv("APPDATA")
-	dirCandidates := []string{}
-	if cfg.CustomClashMiDir != "" {
-		dirCandidates = append(dirCandidates, cfg.CustomClashMiDir)
-	}
-	if info.ExePath != "" {
-		dirCandidates = append(dirCandidates, filepath.Join(filepath.Dir(info.ExePath), "data"))
-	}
-	dirCandidates = append(dirCandidates,
-		filepath.Join(appData, "clashmi", "clashmi"),
-		filepath.Join(appData, "clashmi"),
-		filepath.Join(appData, "com.karingx.clashmi"),
-	)
-
-	for _, dir := range dirCandidates {
-		if dirExists(dir) {
-			info.ConfigDir = dir
-			info.Installed = true
-			break
-		}
-	}
-
-	portFromConfig := 0
-	if info.ConfigDir != "" {
-		info.ConfigModUnix = latestModTime(
-			filepath.Join(info.ConfigDir, "profiles.json"),
-			filepath.Join(info.ConfigDir, "setting.json"),
-			filepath.Join(info.ConfigDir, "service_core_runtime_profile.yaml"),
-		)
-
-		// Read active subscription name from profiles.json
-		if raw, err := os.ReadFile(filepath.Join(info.ConfigDir, "profiles.json")); err == nil {
-			var pm struct {
-				CurrentID string `json:"current_id"`
-				Profiles  []struct {
-					ID     string `json:"id"`
-					Remark string `json:"remark"`
-				} `json:"profiles"`
-			}
-			if json.Unmarshal(raw, &pm) == nil && pm.CurrentID != "" {
-				info.ActiveProfileUID = pm.CurrentID
-				for _, p := range pm.Profiles {
-					if p.ID == pm.CurrentID && p.Remark != "" {
-						info.ActiveProfileName = p.Remark
-						break
-					}
-				}
-			}
-		}
-
-		for _, fn := range []string{"service_core_runtime_profile.yaml", "clash.yaml", "core.yaml", "config.yaml", "service_core_patch.yaml"} {
-			raw, err := os.ReadFile(filepath.Join(info.ConfigDir, fn))
-			if err != nil {
-				continue
-			}
-			if bytes.Contains(raw, []byte(clashscript.AIGroupName)) {
-				info.RuleActiveInRuntime = true
-			}
-			var m struct {
-				MixedPort          int    `yaml:"mixed-port"`
-				Port               int    `yaml:"port"`
-				ExternalController string `yaml:"external-controller"`
-				Secret             string `yaml:"secret"`
-				Tun                struct {
-					Enable bool `yaml:"enable"`
-				} `yaml:"tun"`
-			}
-			if yaml.Unmarshal(raw, &m) == nil {
-				if m.MixedPort > 0 && portFromConfig == 0 {
-					portFromConfig = m.MixedPort
-				} else if m.Port > 0 && portFromConfig == 0 {
-					portFromConfig = m.Port
-				}
-				if m.Tun.Enable {
-					info.TunEnabled = true
-				}
-				if m.ExternalController != "" && info.ExternalController == "" {
-					info.ExternalController = m.ExternalController
-					info.Secret = m.Secret
-				}
-			}
-		}
-
-		if raw, err := os.ReadFile(filepath.Join(info.ConfigDir, "setting.json")); err == nil {
-			var sj map[string]any
-			if json.Unmarshal(raw, &sj) == nil {
-				for _, k := range []string{"mixed_port", "mixedPort", "http_port", "port"} {
-					if v, ok := sj[k].(float64); ok && int(v) > 0 && portFromConfig == 0 {
-						portFromConfig = int(v)
-					}
-				}
-				if autoSys, ok := sj["auto_set_system_proxy"].(bool); ok {
-					info.SysProxyEnabled = autoSys
-				}
-			}
-		}
-	}
-
-	var candidatePorts []int
-	if portFromConfig > 0 {
-		candidatePorts = append(candidatePorts, portFromConfig)
-	}
-	sort.Ints(procPorts)
-	for _, p := range procPorts {
-		if p != 2744 && p != 2745 && p != 9090 && !containsInt(candidatePorts, p) {
-			candidatePorts = append(candidatePorts, p)
-		}
-	}
-	if info.Running && sysEn && sysPort > 0 && !containsInt(candidatePorts, sysPort) {
-		candidatePorts = append(candidatePorts, sysPort)
-		info.SysProxyEnabled = true
-	}
-	for _, defPort := range []int{7890, 7888, 3067} {
-		if !containsInt(candidatePorts, defPort) {
-			candidatePorts = append(candidatePorts, defPort)
-		}
-	}
-
-	if portFromConfig > 0 {
-		info.MixedPort = portFromConfig
-	}
-
-	info.MainPort = info.MixedPort
-	info.DedicatedPort = clashscript.ClashMiDedicatedPort
-
-	if info.Running {
-		if dReach, dHTTP := isHTTPProxyPort(info.ProxyHost, info.DedicatedPort); dReach && dHTTP {
-			info.DedicatedPortActive = true
-			info.MixedPort = info.DedicatedPort
-			info.PortReachable = true
-			info.HTTPVerified = true
-		} else {
-			for _, p := range candidatePorts {
-				reach, httpOK := isHTTPProxyPort(info.ProxyHost, p)
-				if reach && httpOK {
-					info.MainPort = p
-					info.MixedPort = p
-					info.PortReachable = true
-					info.HTTPVerified = true
-					break
-				}
-			}
-		}
-		// Query Clash Mi live Mihomo node via external-controller
-		if info.ExternalController != "" {
-			mc := mihomo.NewClient("", info.ExternalController, info.Secret)
-			live := mc.GetLiveStatus()
-			info.ControllerReachable = live.Connected
-			info.IsolatedGroup = live.IsolatedGroup
-			info.ActiveGroup = live.GroupName
-			info.ActiveNode = live.ResolvedNode
-			info.ActiveNodeDelayMs = live.ResolvedDelayMs
-			info.ActiveNodeCompliant = live.Compliant
-			info.ExternalGroup = live.ExternalGroup
-			info.ExternalNode = live.ExternalNode
-		}
-	} else if portFromConfig > 0 {
-		info.PortReachable, info.HTTPVerified = isHTTPProxyPort(info.ProxyHost, info.MixedPort)
-	}
-
-	if base, err := configstore.BaseDir(); err == nil {
-		info.RuleInjected = fileExists(filepath.Join(base, "clashmi-ai-override.js"))
-	}
-
-	info.ProxyURL = fmt.Sprintf("http://%s:%d", info.ProxyHost, info.MixedPort)
-	return info
-}
-
-func detectV2rayN(cfg configstore.AppConfig, procs map[string]*procDetail, sysEn bool, sysHost string, sysPort int) ProxyClientInfo {
-	info := ProxyClientInfo{
-		ID:                "v2rayn",
-		Name:              "v2rayN",
-		ProxyHost:         "127.0.0.1",
-		MixedPort:         10808,
-		ActiveProfileName: "活动节点 / 路由规则",
-		RuleSupportMode:   "v2rayn_clipboard",
-	}
-
-	var corePorts []int
-	if d, ok := procs["v2rayn.exe"]; ok {
-		info.Running = true
-		if d.Path != "" {
-			info.ExePath = d.Path
-		}
-		corePorts = append(corePorts, d.Ports...)
-	}
-	for _, cname := range []string{"xray.exe", "v2ray.exe", "sing-box.exe"} {
-		if d, ok := procs[cname]; ok {
-			if info.Running || strings.Contains(strings.ToLower(d.Path), "v2rayn") {
-				info.CoreRunning = true
-				corePorts = append(corePorts, d.Ports...)
-				if info.ExePath == "" && strings.Contains(strings.ToLower(d.Path), "v2rayn") {
-					dir := filepath.Dir(d.Path)
-					for i := 0; i < 3; i++ {
-						cand := filepath.Join(dir, "v2rayN.exe")
-						if fileExists(cand) {
-							info.ExePath = cand
-							break
-						}
-						dir = filepath.Dir(dir)
-					}
-				}
-			}
-		}
-	}
-
-	if cfg.CustomV2rayNExe != "" && fileExists(cfg.CustomV2rayNExe) {
-		info.ExePath = cfg.CustomV2rayNExe
-	} else if info.ExePath == "" {
-		info.ExePath = findV2rayNExe()
-	}
-
-	if info.ExePath != "" {
-		info.Installed = true
-		guiCfgDir := filepath.Join(filepath.Dir(info.ExePath), "guiConfigs")
-		if dirExists(guiCfgDir) {
-			info.ConfigDir = guiCfgDir
-		} else {
-			info.ConfigDir = filepath.Dir(info.ExePath)
-		}
-	}
-
-	var candidatePorts []int
-	if info.ConfigDir != "" {
-		info.ConfigModUnix = latestModTime(
-			filepath.Join(info.ConfigDir, "guiNConfig.json"),
-			filepath.Join(info.ConfigDir, "guiNDB.db"),
-		)
-
-		guiCfgPath := filepath.Join(info.ConfigDir, "guiNConfig.json")
-		if raw, err := os.ReadFile(guiCfgPath); err == nil {
-			var g struct {
-				SysProxyType int `json:"SysProxyType"`
-				TunModeItem  struct {
-					EnableTun bool `json:"EnableTun"`
-				} `json:"TunModeItem"`
-				Inbound []struct {
-					LocalPort int    `json:"LocalPort"`
-					Protocol  string `json:"Protocol"`
-				} `json:"Inbound"`
-			}
-			if json.Unmarshal(raw, &g) == nil {
-				info.TunEnabled = g.TunModeItem.EnableTun
-				info.SysProxyEnabled = g.SysProxyType == 1
-
-				hasV7DB := fileExists(filepath.Join(info.ConfigDir, "guiNDB.db"))
-				for _, inb := range g.Inbound {
-					if inb.LocalPort <= 0 {
-						continue
-					}
-					proto := strings.ToLower(inb.Protocol)
-					switch proto {
-					case "http", "mixed":
-						candidatePorts = append([]int{inb.LocalPort}, candidatePorts...)
-						info.MixedPort = inb.LocalPort
-					case "socks", "socks5":
-						if hasV7DB {
-							candidatePorts = append(candidatePorts, inb.LocalPort, inb.LocalPort+1)
-							info.MixedPort = inb.LocalPort
-							info.ModeHint = "v7+ 混合端口"
-						} else {
-							candidatePorts = append(candidatePorts, inb.LocalPort+1, inb.LocalPort)
-							info.MixedPort = inb.LocalPort + 1
-							info.ModeHint = "v6 HTTP 端口"
-						}
-					default:
-						candidatePorts = append(candidatePorts, inb.LocalPort, inb.LocalPort+1)
-					}
-				}
-			}
-		}
-	}
-
-	for _, p := range corePorts {
-		if !containsInt(candidatePorts, p) {
-			candidatePorts = append(candidatePorts, p)
-		}
-	}
-	if info.Running && sysEn && sysPort > 0 && !containsInt(candidatePorts, sysPort) {
-		candidatePorts = append(candidatePorts, sysPort)
-	}
-	for _, def := range []int{10808, 10809} {
-		if !containsInt(candidatePorts, def) {
-			candidatePorts = append(candidatePorts, def)
-		}
-	}
-
-	if info.Running || info.CoreRunning {
-		for _, p := range candidatePorts {
-			reach, httpOK := isHTTPProxyPort(info.ProxyHost, p)
-			if reach && httpOK {
-				info.MixedPort = p
-				info.PortReachable = true
-				info.HTTPVerified = true
-				break
-			}
-		}
-	} else if info.Installed {
-		info.PortReachable, info.HTTPVerified = isHTTPProxyPort(info.ProxyHost, info.MixedPort)
-	}
-
-	if base, err := configstore.BaseDir(); err == nil {
-		info.RuleInjected = fileExists(filepath.Join(base, "v2rayn-ai-rules.json"))
-	}
-
-	info.MainPort = info.MixedPort
-	info.ProxyURL = fmt.Sprintf("http://%s:%d", info.ProxyHost, info.MixedPort)
-	return info
-}
-
-func findV2rayNExe() string {
-	if k, err := registry.OpenKey(registry.CURRENT_USER, `Software\Microsoft\Windows\CurrentVersion\Run`, registry.QUERY_VALUE); err == nil {
-		names, _ := k.ReadValueNames(-1)
-		for _, name := range names {
-			if strings.Contains(strings.ToLower(name), "v2rayn") {
-				val, _, err := k.GetStringValue(name)
-				if err == nil {
-					clean := extractExeFromCommandLine(val)
-					if fileExists(clean) {
-						k.Close()
-						return clean
-					}
-				}
-			}
-		}
-		k.Close()
-	}
-
-	relCandidates := []string{
-		`v2rayN\v2rayN.exe`,
-		`v2rayN-With-Core\v2rayN.exe`,
-		`v2rayN-windows-64\v2rayN.exe`,
-		`tizi\v2rayN\v2rayN.exe`,
-		`tizi\v2rayN-With-Core\v2rayN.exe`,
-		`tools\v2rayN\v2rayN.exe`,
-		`Program Files\v2rayN\v2rayN.exe`,
-	}
-	return findExecutable(
-		[]string{"v2rayN"},
-		[]string{
-			filepath.Join(os.Getenv("LOCALAPPDATA"), "v2rayN", "v2rayN.exe"),
-			filepath.Join(os.Getenv("LOCALAPPDATA"), "Programs", "v2rayN", "v2rayN.exe"),
-		},
-		relCandidates,
-	)
-}
-
-func extractExeFromCommandLine(cmdLine string) string {
-	s := strings.TrimSpace(cmdLine)
-	if strings.HasPrefix(s, `"`) {
-		end := strings.IndexByte(s[1:], '"')
-		if end >= 0 {
-			return s[1 : end+1]
-		}
-	}
-	if idx := strings.Index(strings.ToLower(s), ".exe"); idx >= 0 {
-		return strings.TrimSpace(s[:idx+4])
-	}
-	return s
 }
 
 func detectCursor(cfg configstore.AppConfig, st configstore.StateManifest, procs map[string]*procDetail, activeProxyURL string) AppTargetInfo {
@@ -1140,6 +376,7 @@ func detectCursor(cfg configstore.AppConfig, st configstore.StateManifest, procs
 	default:
 		t.StatusText = "未配置免 TUN 代理"
 	}
+	noteUserSwitch(cfg, &t)
 	return t
 }
 
@@ -1202,10 +439,11 @@ func detectAntigravity(cfg configstore.AppConfig, st configstore.StateManifest, 
 	default:
 		t.StatusText = "未配置免 TUN 代理"
 	}
+	noteUserSwitch(cfg, &t)
 	return t
 }
 
-func detectClaudeCode(st configstore.StateManifest, procs map[string]*procDetail, activeProxyURL string) AppTargetInfo {
+func detectClaudeCode(cfg configstore.AppConfig, st configstore.StateManifest, procs map[string]*procDetail, activeProxyURL string) AppTargetInfo {
 	t := AppTargetInfo{
 		ID:           "claude_code",
 		Name:         "Claude Code CLI",
@@ -1252,6 +490,7 @@ func detectClaudeCode(st configstore.StateManifest, procs map[string]*procDetail
 	default:
 		t.StatusText = "未配置 ~/.claude/settings.json"
 	}
+	noteUserSwitch(cfg, &t)
 	return t
 }
 
@@ -1315,7 +554,15 @@ func detectCodex(cfg configstore.AppConfig, st configstore.StateManifest, procs 
 	default:
 		t.StatusText = "未配置 ~/.codex/.env"
 	}
+	noteUserSwitch(cfg, &t)
 	return t
+}
+
+func noteUserSwitch(cfg configstore.AppConfig, t *AppTargetInfo) {
+	t.EnabledByUser = cfg.IsAppEnabled(t.ID)
+	if !t.EnabledByUser {
+		t.StatusText = "未托管，保持默认设置"
+	}
 }
 
 func findExecutable(regKeywords []string, directCandidates []string, driveRelativePaths []string) string {

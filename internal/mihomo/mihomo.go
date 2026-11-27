@@ -1,7 +1,6 @@
 package mihomo
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -9,24 +8,23 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"regexp"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
-	"golang.org/x/sys/windows"
+	"proxy-box/internal/clashscript"
 )
 
 const (
-	AIGroupName = "🤖 AI-IDE"
-	AIAutoName  = "⚡ AI-Auto"
-	TestURL     = "https://www.gstatic.com/generate_204"
-	// groupDelayTimeoutMs is sent as the /group/<name>/delay timeout.
-	// A blackhole group waits this long, and the list call also does two
-	// controller reads, so the value stays under the 3.5s budget.
-	groupDelayTimeoutMs = 3000
+	AIGroupName          = "🤖 AI-IDE"
+	AIAutoName           = "⚡ AI-Auto"
+	speedTestGroupName   = clashscript.SpeedTestGroupName
+	TestURL              = "http://www.gstatic.com/generate_204"
+	groupDelayTimeoutMs  = 5000
+	singleNodeDelayMs    = 5000
+	controllerCallBudget = 10 * time.Second
 )
 
 var (
@@ -44,10 +42,9 @@ func IsPreferredNodeName(name string) bool {
 }
 
 type Client struct {
-	pipePath string
 	httpBase string
 	secret   string
-	usePipe  bool
+	testURL  string
 	client   *http.Client
 
 	mu           sync.Mutex
@@ -82,6 +79,10 @@ type NodeOption struct {
 	ResolvedTo string `json:"resolvedTo,omitempty"`
 	Provider   string `json:"provider,omitempty"`
 	Untested   bool   `json:"untested"`
+	// Speed fields are copied from the speedtest cache by the HTTP API.
+	SpeedMBps   float64 `json:"speedMBps,omitempty"`
+	SpeedTested bool    `json:"speedTested,omitempty"`
+	SpeedError  string  `json:"speedError,omitempty"`
 }
 
 // NodeListResult is returned to the UI's independent node picker modal.
@@ -92,6 +93,8 @@ type NodeListResult struct {
 	ExternalGroup string       `json:"externalGroup,omitempty"`
 	ExternalNode  string       `json:"externalNode,omitempty"`
 	Nodes         []NodeOption `json:"nodes"`
+	TotalCount    int          `json:"totalCount"`
+	AliveCount    int          `json:"aliveCount"`
 }
 
 // OptimizeResult describes the outcome of an automatic optimal node selection pass.
@@ -127,129 +130,49 @@ type providersResponse struct {
 	} `json:"providers"`
 }
 
-func openNamedPipe(ctx context.Context, pipePath string) (windows.Handle, error) {
-	pPtr, err := windows.UTF16PtrFromString(pipePath)
-	if err != nil {
-		return windows.InvalidHandle, err
-	}
-	deadline, hasDeadline := ctx.Deadline()
-	if !hasDeadline {
-		deadline = time.Now().Add(1500 * time.Millisecond)
-	}
-	for {
-		h, err := windows.CreateFile(
-			pPtr,
-			windows.GENERIC_READ|windows.GENERIC_WRITE,
-			0,
-			nil,
-			windows.OPEN_EXISTING,
-			0,
-			0,
-		)
-		if err == nil {
-			return h, nil
-		}
-		if err != windows.ERROR_PIPE_BUSY || time.Now().After(deadline) {
-			return windows.InvalidHandle, err
-		}
-		time.Sleep(40 * time.Millisecond)
-	}
-}
-
-// doPipeHTTP executes a strict sequential HTTP/1.1 request/response over a synchronous Windows Named Pipe,
-// avoiding Go net/http.Transport's concurrent readLoop/writeLoop deadlock on synchronous pipe handles.
-func doPipeHTTP(ctx context.Context, pipePath, method, reqPath string, body []byte) ([]byte, int, error) {
-	h, err := openNamedPipe(ctx, pipePath)
-	if err != nil {
-		return nil, 0, err
-	}
-	f := os.NewFile(uintptr(h), pipePath)
-	defer f.Close()
-
-	// Cancel pending synchronous I/O cleanly if context expires
-	done := make(chan struct{})
-	defer close(done)
-	go func() {
-		select {
-		case <-ctx.Done():
-			_ = windows.CancelIoEx(h, nil)
-		case <-done:
-		}
-	}()
-
-	var rdr io.Reader
-	if body != nil {
-		rdr = bytes.NewReader(body)
-	}
-	req, err := http.NewRequest(method, "http://localhost"+reqPath, rdr)
-	if err != nil {
-		return nil, 0, err
-	}
-	req.Close = true
-	if body != nil {
-		req.ContentLength = int64(len(body))
-		req.Header.Set("Content-Type", "application/json")
-	}
-
-	if err := req.Write(f); err != nil {
-		return nil, 0, err
-	}
-
-	resp, err := http.ReadResponse(bufio.NewReader(f), req)
-	if err != nil {
-		return nil, 0, err
-	}
-	defer resp.Body.Close()
-
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 4*1024*1024))
-	return data, resp.StatusCode, err
-}
-
-// NewClient creates a Mihomo controller client, preferring Windows Named Pipe when available.
-func NewClient(pipePath, httpAddr, secret string) *Client {
-	c := &Client{
-		pipePath: strings.TrimSpace(pipePath),
-		secret:   strings.TrimSpace(secret),
-	}
-
-	if c.pipePath != "" {
-		ctx, cancel := context.WithTimeout(context.Background(), 900*time.Millisecond)
-		_, status, err := doPipeHTTP(ctx, c.pipePath, http.MethodGet, "/version", nil)
-		cancel()
-		if err == nil && status == http.StatusOK {
-			c.usePipe = true
-			c.httpBase = "http://localhost"
-			return c
-		}
-	}
-
+// NewClient talks to the mihomo external controller over HTTP.
+func NewClient(httpAddr, secret string) *Client {
+	c := &Client{secret: strings.TrimSpace(secret)}
 	addr := strings.TrimSpace(httpAddr)
-	if addr != "" {
-		if !strings.HasPrefix(addr, "http://") && !strings.HasPrefix(addr, "https://") {
-			addr = "http://" + addr
-		}
-		c.httpBase = strings.TrimRight(addr, "/")
-		c.client = &http.Client{
-			Timeout: 6 * time.Second,
-			Transport: &http.Transport{
-				Proxy:             nil,
-				DisableKeepAlives: true,
-			},
-		}
+	if addr == "" {
+		return c
+	}
+	if !strings.HasPrefix(addr, "http://") && !strings.HasPrefix(addr, "https://") {
+		addr = "http://" + addr
+	}
+	c.httpBase = strings.TrimRight(addr, "/")
+	c.client = &http.Client{
+		Timeout: controllerCallBudget + 2*time.Second,
+		Transport: &http.Transport{
+			Proxy:             nil,
+			DisableKeepAlives: true,
+		},
 	}
 	return c
 }
 
+// SetDelayTestURL overrides the probe URL. An empty value keeps TestURL.
+func (c *Client) SetDelayTestURL(raw string) {
+	if c == nil {
+		return
+	}
+	c.testURL = strings.TrimSpace(raw)
+}
+
+func (c *Client) delayURL() string {
+	if c != nil && c.testURL != "" {
+		return c.testURL
+	}
+	return TestURL
+}
+
 func (c *Client) Available() bool {
-	return c != nil && (c.usePipe || (c.client != nil && c.httpBase != ""))
+	return c != nil && c.client != nil && c.httpBase != ""
 }
 
 func (c *Client) doRequest(ctx context.Context, method, path string, body []byte) ([]byte, int, error) {
 	if !c.Available() {
 		return nil, 0, fmt.Errorf("Mihomo 控制器不可用")
-	}
-	if c.usePipe {
-		return doPipeHTTP(ctx, c.pipePath, method, path, body)
 	}
 	var rdr io.Reader
 	if body != nil {
@@ -353,7 +276,7 @@ func (c *Client) selectProxy(ctx context.Context, groupName, targetName string) 
 }
 
 func (c *Client) testGroupDelay(ctx context.Context, groupName string, timeoutMs int) (map[string]int, error) {
-	q := fmt.Sprintf("/group/%s/delay?url=%s&timeout=%d", url.PathEscape(groupName), url.QueryEscape(TestURL), timeoutMs)
+	q := fmt.Sprintf("/group/%s/delay?url=%s&timeout=%d", url.PathEscape(groupName), url.QueryEscape(c.delayURL()), timeoutMs)
 	data, status, err := c.doRequest(ctx, http.MethodGet, q, nil)
 	if err != nil {
 		return nil, err
@@ -387,11 +310,11 @@ func (c *Client) TestNodeDelay(nodeName string) int {
 	defer cancel()
 	// Provider names are learned from the controller. The 404 fallback needs them.
 	_, _ = c.getProxies(ctx)
-	return c.testSingleNodeDelay(ctx, strings.TrimSpace(nodeName), 5000)
+	return c.testSingleNodeDelay(ctx, strings.TrimSpace(nodeName), singleNodeDelayMs)
 }
 
 func (c *Client) testSingleNodeDelay(ctx context.Context, nodeName string, timeoutMs int) int {
-	q := fmt.Sprintf("/proxies/%s/delay?url=%s&timeout=%d", url.PathEscape(nodeName), url.QueryEscape(TestURL), timeoutMs)
+	q := fmt.Sprintf("/proxies/%s/delay?url=%s&timeout=%d", url.PathEscape(nodeName), url.QueryEscape(c.delayURL()), timeoutMs)
 	data, status, err := c.doRequest(ctx, http.MethodGet, q, nil)
 	if err != nil {
 		return 0
@@ -410,7 +333,7 @@ func (c *Client) testSingleNodeDelay(ctx context.Context, nodeName string, timeo
 
 func (c *Client) testProviderNodeDelay(ctx context.Context, provider, nodeName string, timeoutMs int) int {
 	q := fmt.Sprintf("/providers/proxies/%s/%s/healthcheck?url=%s&timeout=%d",
-		url.PathEscape(provider), url.PathEscape(nodeName), url.QueryEscape(TestURL), timeoutMs)
+		url.PathEscape(provider), url.PathEscape(nodeName), url.QueryEscape(c.delayURL()), timeoutMs)
 	data, status, err := c.doRequest(ctx, http.MethodGet, q, nil)
 	if err != nil || status != http.StatusOK {
 		return 0
@@ -428,7 +351,7 @@ func decodeDelay(data []byte) int {
 	return res.Delay
 }
 
-// ReloadConfig triggers Mihomo core hot-reload via Named Pipe or HTTP controller.
+// ReloadConfig triggers a mihomo hot-reload through the HTTP controller.
 func (c *Client) ReloadConfig() bool {
 	if !c.Available() {
 		return false
@@ -559,9 +482,9 @@ func (c *Client) ListAINodes(runDelayTest bool) (*NodeListResult, error) {
 // ListGroupNodes lists one selector group. 🤖 AI-IDE is probed through ⚡ AI-Auto when that group exists.
 func (c *Client) ListGroupNodes(groupName string, runDelayTest bool) (*NodeListResult, error) {
 	if !c.Available() {
-		return nil, fmt.Errorf("未连接到 Mihomo 控制接口，请确认代理软件已运行")
+		return nil, fmt.Errorf("未连接到内置内核控制接口，请确认内核已运行")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), controllerCallBudget)
 	defer cancel()
 
 	proxies, err := c.getProxies(ctx)
@@ -571,7 +494,7 @@ func (c *Client) ListGroupNodes(groupName string, runDelayTest bool) (*NodeListR
 	grp, ok := proxies[groupName]
 	if !ok {
 		if groupName == AIGroupName {
-			return nil, fmt.Errorf("当前配置尚未启用独立分组 %s，请先点击「一键配置全部应用」并在代理软件刷新订阅", AIGroupName)
+			return nil, fmt.Errorf("当前配置尚未启用独立分组 %s", AIGroupName)
 		}
 		return nil, fmt.Errorf("代理组 %s 不存在", groupName)
 	}
@@ -643,6 +566,7 @@ func (c *Client) ListGroupNodes(groupName string, runDelayTest bool) (*NodeListR
 		return nodes[i].Name < nodes[j].Name
 	})
 
+	total, alive := countRealNodes(nodes)
 	return &NodeListResult{
 		IsolatedGroup: isolated,
 		CurrentSelect: grp.Now,
@@ -650,7 +574,33 @@ func (c *Client) ListGroupNodes(groupName string, runDelayTest bool) (*NodeListR
 		ExternalGroup: extGroup,
 		ExternalNode:  extNode,
 		Nodes:         nodes,
+		TotalCount:    total,
+		AliveCount:    alive,
 	}, nil
+}
+
+// countRealNodes counts selectable proxies. Auto groups, DIRECT, and REJECT are excluded.
+// A node is alive when its delay is greater than zero.
+func countRealNodes(nodes []NodeOption) (total, alive int) {
+	for _, n := range nodes {
+		if n.IsAuto || isDirectOrReject(n.Name) {
+			continue
+		}
+		total++
+		if n.DelayMs > 0 {
+			alive++
+		}
+	}
+	return total, alive
+}
+
+func isDirectOrReject(name string) bool {
+	switch strings.ToUpper(strings.TrimSpace(name)) {
+	case "DIRECT", "REJECT":
+		return true
+	default:
+		return false
+	}
 }
 
 // SelectAINode switches ONLY CursorBox's isolated 🤖 AI-IDE group to targetNode,
@@ -678,7 +628,7 @@ func (c *Client) SelectGroupNode(groupName, targetNode string) error {
 	grp, ok := proxies[groupName]
 	if !ok {
 		if groupName == AIGroupName {
-			return fmt.Errorf("尚未启用独立分组 %s，为避免影响外部代理软件节点，请先注入分流脚本并刷新订阅", AIGroupName)
+			return fmt.Errorf("尚未启用独立分组 %s", AIGroupName)
 		}
 		return fmt.Errorf("代理组 %s 不存在", groupName)
 	}
@@ -769,9 +719,9 @@ func groupHasMember(all []string, name string) bool {
 // and immediately switches the active AI/Primary group to the lowest-latency reachable node.
 func (c *Client) OptimizeBestNode() (*OptimizeResult, error) {
 	if !c.Available() {
-		return nil, fmt.Errorf("未连接到 Mihomo 控制接口（请确认代理软件已运行）")
+		return nil, fmt.Errorf("未连接到内置内核控制接口，请确认内核已运行")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 7*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), controllerCallBudget)
 	defer cancel()
 
 	proxies, err := c.getProxies(ctx)
@@ -782,14 +732,14 @@ func (c *Client) OptimizeBestNode() (*OptimizeResult, error) {
 	// Strict isolation: NEVER touch external proxy software's own main group when 🤖 AI-IDE is missing!
 	// Only operate on CursorBox's dedicated 🤖 AI-IDE group so switching nodes never affects external browsing.
 	if _, hasAIIDE := proxies[AIGroupName]; !hasAIIDE {
-		return nil, fmt.Errorf("未检测到独立隔离分组 %s（为保证不影响外部代理软件的节点，请先注入分流脚本并在代理软件刷新订阅）", AIGroupName)
+		return nil, fmt.Errorf("未检测到独立隔离分组 %s", AIGroupName)
 	}
 	groupName := AIGroupName
 	var candidates []string
 	var delays map[string]int
 
 	if autoGrp, hasAuto := proxies[AIAutoName]; hasAuto {
-		if d, err := c.testGroupDelay(ctx, AIAutoName, 3200); err == nil && len(d) > 0 {
+		if d, err := c.testGroupDelay(ctx, AIAutoName, groupDelayTimeoutMs); err == nil && len(d) > 0 {
 			delays = d
 		}
 		for _, n := range autoGrp.All {
@@ -812,7 +762,7 @@ func (c *Client) OptimizeBestNode() (*OptimizeResult, error) {
 
 	// If /group/.../delay returned empty (some Mihomo versions), test candidate nodes concurrently
 	if len(delays) == 0 {
-		delays = c.testNodesConcurrently(ctx, candidates, 3000)
+		delays = c.testNodesConcurrently(ctx, candidates, singleNodeDelayMs)
 	}
 
 	type scoredNode struct {
@@ -943,7 +893,7 @@ func pickExternalGroup(proxies map[string]proxyItem) string {
 	var bestName string
 	bestCount := -1
 	for name, p := range proxies {
-		if name == "GLOBAL" || name == AIGroupName || name == AIAutoName || p.Type != "Selector" {
+		if name == "GLOBAL" || name == AIGroupName || name == AIAutoName || name == speedTestGroupName || p.Type != "Selector" {
 			continue
 		}
 		if len(p.All) > bestCount {

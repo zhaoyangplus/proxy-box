@@ -57,23 +57,6 @@ func TestIsHTTPProxyPortDistinguishesHTTPFromSocks(t *testing.T) {
 	}
 }
 
-func TestSelectActiveClientAutoPriority(t *testing.T) {
-	clients := []ProxyClientInfo{
-		{ID: "clash_verge", Installed: true, Running: false, PortReachable: false},
-		{ID: "clash_mi", Installed: false, Running: false},
-		{ID: "v2rayn", Installed: true, Running: true, PortReachable: true, HTTPVerified: true, MixedPort: 10808},
-	}
-	picked := selectActiveClient("auto", clients, 0)
-	if picked.ID != "v2rayn" {
-		t.Fatalf("expected running v2rayn to be auto-selected, got %s", picked.ID)
-	}
-
-	forced := selectActiveClient("clash_verge", clients, 0)
-	if forced.ID != "clash_verge" {
-		t.Fatalf("expected forced clash_verge, got %s", forced.ID)
-	}
-}
-
 func TestSnapshotKeepsEachMihomoPID(t *testing.T) {
 	procs := map[string]*procDetail{}
 	noteProcess(procs, "mihomo.exe", 11, `D:\ProxyBox\core\mihomo.exe`, []int{27890, 27891})
@@ -193,38 +176,6 @@ func TestBuiltinRunningFollowsOurPathOnly(t *testing.T) {
 	}
 }
 
-func TestBuiltinOrder(t *testing.T) {
-	vergeInstalled := ProxyClientInfo{ID: "clash_verge", Name: "Clash Verge", Installed: true}
-	vergeRunning := ProxyClientInfo{
-		ID: "clash_verge", Name: "Clash Verge", Installed: true, Running: true,
-		PortReachable: true, HTTPVerified: true, MixedPort: 7897,
-	}
-	builtinOff := ProxyClientInfo{ID: "builtin", Name: "内置内核", Installed: true}
-	builtinOn := ProxyClientInfo{ID: "builtin", Name: "内置内核", Installed: true, Running: true}
-
-	if got := selectActiveClient("auto", []ProxyClientInfo{vergeRunning, builtinOn}, 0); got.ID != "builtin" {
-		t.Fatalf("running builtin lost to verge, got %s", got.ID)
-	}
-	if got := selectActiveClient("auto", []ProxyClientInfo{vergeInstalled, builtinOff}, 0); got.ID != "clash_verge" {
-		t.Fatalf("stopped builtin outranked installed verge, got %s", got.ID)
-	}
-	if got := selectActiveClient("auto", []ProxyClientInfo{vergeRunning, builtinOff}, 0); got.ID != "clash_verge" {
-		t.Fatalf("stopped builtin outranked running verge, got %s", got.ID)
-	}
-	if got := selectActiveClient("builtin", []ProxyClientInfo{vergeRunning, builtinOff}, 0); got.ID != "builtin" {
-		t.Fatalf("preferred builtin = %s", got.ID)
-	}
-	onlyBuiltin := []ProxyClientInfo{
-		{ID: "clash_verge"},
-		{ID: "clash_mi"},
-		{ID: "v2rayn"},
-		{ID: "builtin", Installed: true},
-	}
-	if got := selectActiveClient("auto", onlyBuiltin, 0); got.ID != "builtin" {
-		t.Fatalf("installed builtin should remain when nothing else is installed, got %s", got.ID)
-	}
-}
-
 func TestFastConfigStampSeesCoreFiles(t *testing.T) {
 	base := t.TempDir()
 	configstore.SetBaseDir(base)
@@ -246,22 +197,39 @@ func TestFastConfigStampSeesCoreFiles(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(base, "subscriptions.json"), []byte("[]\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	before := FastConfigStamp(configstore.AppConfig{})
+	if err := os.WriteFile(filepath.Join(base, "config.json"), []byte("{}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	before := FastConfigStamp()
+	for _, part := range []string{"core.json", "subscriptions.json", "config.json", "config.yaml"} {
+		if !strings.Contains(before, part) {
+			t.Fatalf("stamp missing %s: %s", part, before)
+		}
+	}
 	time.Sleep(20 * time.Millisecond)
 	if err := os.WriteFile(filepath.Join(prov, "abc.txt"), []byte("vmess://x\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	after := FastConfigStamp(configstore.AppConfig{})
+	after := FastConfigStamp()
 	if before == after {
 		t.Fatalf("stamp ignored providers: %s", before)
 	}
-	for _, part := range []string{"core.json", "subscriptions.json", "config.yaml"} {
-		if !strings.Contains(before, "|") {
-			t.Fatalf("stamp empty before write, missing %s: %s", part, before)
-		}
+	other := filepath.Join(local, "clash", "profiles.yaml")
+	if err := os.MkdirAll(filepath.Dir(other), 0755); err != nil {
+		t.Fatal(err)
 	}
-	if before == "" {
-		t.Fatal("empty stamp")
+	if err := os.WriteFile(other, []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if FastConfigStamp() != after {
+		t.Fatal("stamp watched a file outside Proxy Box")
+	}
+	time.Sleep(20 * time.Millisecond)
+	if err := os.WriteFile(filepath.Join(base, "config.json"), []byte("{\"syncUserEnv\":true}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if FastConfigStamp() == after {
+		t.Fatal("stamp ignored config.json")
 	}
 }
 
@@ -281,9 +249,48 @@ func TestIDESyncSkipsBuiltinWithoutNodes(t *testing.T) {
 	if !IDESyncAllowed(picked, nil) {
 		t.Fatal("selected node was blocked")
 	}
-	verge := ProxyClientInfo{ID: "clash_verge"}
-	if !IDESyncAllowed(verge, nil) {
-		t.Fatal("external client was blocked")
+}
+
+func TestDisabledAppStaysUnmanaged(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("APPDATA", filepath.Join(root, "roaming"))
+	t.Setenv("USERPROFILE", filepath.Join(root, "home"))
+	t.Setenv("HOME", filepath.Join(root, "home"))
+	exe := filepath.Join(root, "Cursor.exe")
+	if err := os.WriteFile(exe, []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	settings := filepath.Join(os.Getenv("APPDATA"), "Cursor", "User", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(settings), 0755); err != nil {
+		t.Fatal(err)
+	}
+	body := []byte(`{"http.proxy":"http://127.0.0.1:27892","cursor.general.disableHttp2":true,"terminal.integrated.env.windows":{"HTTP_PROXY":"http://127.0.0.1:27892"}}`)
+	if err := os.WriteFile(settings, body, 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := configstore.AppConfig{
+		CustomCursorExe: exe,
+		ManagedApps:     map[string]bool{"cursor": false, "claude_code": false},
+	}
+	st := configstore.StateManifest{Targets: map[string]configstore.TargetBackupState{
+		"cursor": {Managed: true},
+	}}
+	info := detectCursor(cfg, st, map[string]*procDetail{}, "http://127.0.0.1:27892")
+	if info.EnabledByUser || info.StatusText != "未托管，保持默认设置" {
+		t.Fatalf("disabled %+v", info)
+	}
+	if !info.ProxyConfigured || !info.ManagedByBox {
+		t.Fatalf("proxy %v managed %v", info.ProxyConfigured, info.ManagedByBox)
+	}
+	cfg.ManagedApps["cursor"] = true
+	on := detectCursor(cfg, st, map[string]*procDetail{}, "http://127.0.0.1:27892")
+	if !on.EnabledByUser || on.StatusText != "已就绪（HTTP/1.1 + 端口匹配）" {
+		t.Fatalf("enabled status %q flag %v", on.StatusText, on.EnabledByUser)
+	}
+
+	claude := detectClaudeCode(cfg, configstore.StateManifest{}, map[string]*procDetail{}, "http://127.0.0.1:27892")
+	if claude.EnabledByUser || claude.ProxyConfigured || claude.ManagedByBox || claude.StatusText != "未托管，保持默认设置" {
+		t.Fatalf("claude %+v", claude)
 	}
 }
 

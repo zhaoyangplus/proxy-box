@@ -11,28 +11,26 @@ import (
 	"sync/atomic"
 	"time"
 
+	"proxy-box/internal/clashscript"
+
 	"golang.org/x/sys/windows"
 )
 
-// AppConfig stores user preferences and custom path overrides for CursorBox.
+// AppConfig stores user preferences for the builtin core and the four AI apps.
 type AppConfig struct {
-	PreferredClient      string `json:"preferredClient,omitempty"` // "auto", "clash_verge", "clash_mi", "v2rayn", "builtin"
-	CustomClashDir       string `json:"customClashDir,omitempty"`
-	CustomClashExe       string `json:"customClashExe,omitempty"`
-	CustomClashMiDir     string `json:"customClashMiDir,omitempty"`
-	CustomClashMiExe     string `json:"customClashMiExe,omitempty"`
-	CustomV2rayNExe      string `json:"customV2rayNExe,omitempty"`
-	CustomCursorExe      string `json:"customCursorExe,omitempty"`
-	CustomAntigravityExe string `json:"customAntigravityExe,omitempty"`
-	CustomCodexExe       string `json:"customCodexExe,omitempty"`
-	CustomPortOverride   int    `json:"customPortOverride,omitempty"`
-	ExcludeRegionsRegex  string `json:"excludeRegionsRegex,omitempty"`
-	SyncUserEnv          bool   `json:"syncUserEnv"`
-	MinimizeToTray       bool   `json:"minimizeToTray"`
-	AutoOptimizeNode     *bool  `json:"autoOptimizeNode,omitempty"`
-	AutoSyncOnChange     *bool  `json:"autoSyncOnChange,omitempty"`
-	NodeSelectionMode    string `json:"nodeSelectionMode,omitempty"` // "auto" or "manual"
-	ManualNodeName       string `json:"manualNodeName,omitempty"`
+	ManagedApps          map[string]bool `json:"managedApps,omitempty"`
+	CustomCursorExe      string          `json:"customCursorExe,omitempty"`
+	CustomAntigravityExe string          `json:"customAntigravityExe,omitempty"`
+	CustomCodexExe       string          `json:"customCodexExe,omitempty"`
+	SyncUserEnv          bool            `json:"syncUserEnv"`
+	MinimizeToTray       bool            `json:"minimizeToTray"`
+	AutoOptimizeNode     *bool           `json:"autoOptimizeNode,omitempty"`
+	AutoSyncOnChange     *bool           `json:"autoSyncOnChange,omitempty"`
+	NodeSelectionMode    string          `json:"nodeSelectionMode,omitempty"` // "auto" or "manual"
+	ManualNodeName       string          `json:"manualNodeName,omitempty"`
+	DelayTestURL         string          `json:"delayTestURL,omitempty"`
+	SpeedTestURL         string          `json:"speedTestURL,omitempty"`
+	SpeedTestMaxMB       int             `json:"speedTestMaxMB,omitempty"`
 }
 
 func (c AppConfig) IsAutoOptimizeEnabled() bool {
@@ -50,6 +48,43 @@ func (c AppConfig) IsAutoSyncEnabled() bool {
 }
 
 func BoolPtr(v bool) *bool { return &v }
+
+// IsAppEnabled reports whether the user turned the app's proxy switch on.
+func (c AppConfig) IsAppEnabled(id string) bool {
+	for _, known := range clashscript.AppIDs {
+		if known == id {
+			return c.ManagedApps[id]
+		}
+	}
+	return false
+}
+
+// EnabledAppIDs returns enabled app ids in clashscript.AppIDs order.
+func (c AppConfig) EnabledAppIDs() []string {
+	var out []string
+	for _, id := range clashscript.AppIDs {
+		if c.ManagedApps[id] {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+func allManagedApps(on bool) map[string]bool {
+	out := make(map[string]bool, len(clashscript.AppIDs))
+	for _, id := range clashscript.AppIDs {
+		out[id] = on
+	}
+	return out
+}
+
+func normalizeManagedApps(in map[string]bool) map[string]bool {
+	out := allManagedApps(false)
+	for _, id := range clashscript.AppIDs {
+		out[id] = in[id]
+	}
+	return out
+}
 
 // KeySnapshot records previous values of managed keys before CursorBox modified them.
 type KeySnapshot struct {
@@ -72,7 +107,6 @@ type StateManifest struct {
 	Targets        map[string]TargetBackupState `json:"targets"`
 	UserEnvManaged bool                         `json:"userEnvManaged"`
 	PrevUserEnv    map[string]KeySnapshot       `json:"prevUserEnv,omitempty"`
-	ScriptBackedUp bool                         `json:"scriptBackedUp"`
 }
 
 var (
@@ -122,29 +156,29 @@ func LoadConfig() AppConfig {
 	mu.Lock()
 	defer mu.Unlock()
 
-	cfg := AppConfig{
-		PreferredClient:  "auto",
-		MinimizeToTray:   true,
-		AutoOptimizeNode: BoolPtr(true),
-		AutoSyncOnChange: BoolPtr(true),
-	}
+	cfg := defaultAppConfig()
 	base, err := BaseDir()
 	if err != nil {
+		cfg.ManagedApps = allManagedApps(false)
 		return cfg
 	}
-	data, err := os.ReadFile(filepath.Join(base, "config.json"))
-	if err != nil {
+	path := filepath.Join(base, "config.json")
+	data, err := os.ReadFile(path)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		cfg.ManagedApps = allManagedApps(false)
 		return cfg
 	}
-	_ = json.Unmarshal(data, &cfg)
-	if cfg.PreferredClient == "" {
-		cfg.PreferredClient = "auto"
+	if err == nil {
+		if json.Unmarshal(data, &cfg) != nil {
+			cfg = defaultAppConfig()
+			cfg.ManagedApps = allManagedApps(false)
+			return cfg
+		}
 	}
-	if cfg.AutoOptimizeNode == nil {
-		cfg.AutoOptimizeNode = BoolPtr(true)
-	}
-	if cfg.AutoSyncOnChange == nil {
-		cfg.AutoSyncOnChange = BoolPtr(true)
+	fillAppDefaults(&cfg)
+	if cfg.ManagedApps == nil {
+		cfg.ManagedApps = managedAppsFromState(base)
+		_ = writeConfigFile(base, cfg)
 	}
 	return cfg
 }
@@ -153,19 +187,55 @@ func SaveConfig(cfg AppConfig) error {
 	mu.Lock()
 	defer mu.Unlock()
 
-	if cfg.PreferredClient == "" {
-		cfg.PreferredClient = "auto"
+	fillAppDefaults(&cfg)
+	if cfg.ManagedApps == nil {
+		cfg.ManagedApps = allManagedApps(false)
+	} else {
+		cfg.ManagedApps = normalizeManagedApps(cfg.ManagedApps)
 	}
+	base, err := BaseDir()
+	if err != nil {
+		return err
+	}
+	return writeConfigFile(base, cfg)
+}
+
+func defaultAppConfig() AppConfig {
+	return AppConfig{
+		MinimizeToTray:   true,
+		AutoOptimizeNode: BoolPtr(true),
+		AutoSyncOnChange: BoolPtr(true),
+	}
+}
+
+func fillAppDefaults(cfg *AppConfig) {
 	if cfg.AutoOptimizeNode == nil {
 		cfg.AutoOptimizeNode = BoolPtr(true)
 	}
 	if cfg.AutoSyncOnChange == nil {
 		cfg.AutoSyncOnChange = BoolPtr(true)
 	}
-	base, err := BaseDir()
+}
+
+func managedAppsFromState(base string) map[string]bool {
+	out := allManagedApps(false)
+	data, err := os.ReadFile(filepath.Join(base, "state.json"))
 	if err != nil {
-		return err
+		return out
 	}
+	var st StateManifest
+	if json.Unmarshal(data, &st) != nil {
+		return out
+	}
+	for _, id := range clashscript.AppIDs {
+		if st.Targets[id].Managed {
+			out[id] = true
+		}
+	}
+	return out
+}
+
+func writeConfigFile(base string, cfg AppConfig) error {
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return err
@@ -218,6 +288,7 @@ const (
 	defaultMixedPort      = 27890
 	defaultControllerPort = 27891
 	defaultAIPort         = 27892
+	defaultSpeedTestPort  = 27893
 	defaultMode           = "rule"
 	subscriptionIDBytes   = 16
 	idAlphabet            = "abcdefghijklmnopqrstuvwxyz0123456789_-"
@@ -252,6 +323,7 @@ type CoreSettings struct {
 	MixedPort       int    `json:"mixedPort"`
 	ControllerPort  int    `json:"controllerPort"`
 	AIDedicatedPort int    `json:"aiDedicatedPort"`
+	SpeedTestPort   int    `json:"speedTestPort"`
 	Secret          string `json:"secret"`
 	Mode            string `json:"mode"` // rule, global, or direct
 	BypassCN        bool   `json:"bypassCN"`
@@ -414,6 +486,10 @@ func fillCoreDefaults(cfg *CoreSettings) (bool, error) {
 	}
 	if cfg.AIDedicatedPort == 0 {
 		cfg.AIDedicatedPort = defaultAIPort
+		filled = true
+	}
+	if cfg.SpeedTestPort == 0 {
+		cfg.SpeedTestPort = defaultSpeedTestPort
 		filled = true
 	}
 	if cfg.Mode == "" {

@@ -14,6 +14,8 @@ import (
 	"proxy-box/internal/configstore"
 	"proxy-box/internal/core"
 	"proxy-box/internal/detector"
+	"proxy-box/internal/diagnostics"
+	"proxy-box/internal/speedtest"
 	"proxy-box/internal/sysproxy"
 )
 
@@ -35,6 +37,7 @@ type coreEvent struct {
 type appRuntime struct {
 	hub          *sseHub
 	core         coreController
+	speed        *speedtest.Runner
 	coreDir      string
 	restore      func() error
 	setProxy     func(host string, port int, bypass string) error
@@ -42,6 +45,7 @@ type appRuntime struct {
 	importBinary func(srcPath, coreDir string) (string, error)
 	proxyURLs    func() []string
 	detect       func() detector.SystemSnapshot
+	runDiag      func(clientName, proxyHost string, proxyPort int) diagnostics.DiagnosticReport
 
 	mu          sync.Mutex
 	cancelStart context.CancelFunc
@@ -70,7 +74,7 @@ func newAppRuntime(hub *sseHub) *appRuntime {
 	}
 }
 
-// Shutdown cancels geo work, restores the system proxy, and then stops the core.
+// Shutdown stops a download test, cancels geo work, restores the system proxy, and then stops the core.
 // A second call repeats that order. Overlapping calls wait and do the same.
 func (a *appRuntime) Shutdown() {
 	if a == nil {
@@ -78,9 +82,13 @@ func (a *appRuntime) Shutdown() {
 	}
 	a.mu.Lock()
 	cancel := a.cancelStart
+	speed := a.speed
 	a.mu.Unlock()
 	if cancel != nil {
 		cancel()
+	}
+	if speed != nil {
+		speed.Stop()
 	}
 	a.cancelGeo()
 	a.shutdownMu.Lock()
@@ -144,10 +152,14 @@ func (a *appRuntime) startCore(ctx context.Context, settings configstore.CoreSet
 	settings.MixedPort = st.Ports.Mixed
 	settings.ControllerPort = st.Ports.Controller
 	settings.AIDedicatedPort = st.Ports.AIDedicated
+	settings.SpeedTestPort = st.Ports.SpeedTest
 	if st.Mode != "" {
 		settings.Mode = st.Mode
 	}
 	if err := configstore.SaveCoreSettings(settings); err != nil {
+		return st, err
+	}
+	if err := a.applyEnabledTargetsLocked(st.Ports.AIDedicated); err != nil {
 		return st, err
 	}
 	a.kickGeoDownload()
@@ -218,27 +230,15 @@ func (a *appRuntime) coreMode() string {
 }
 
 func reachableProxyURLs() []string {
-	snap := detector.DetectAll()
-	seen := map[string]bool{}
-	var urls []string
-	add := func(client detector.ProxyClientInfo) {
-		if !client.PortReachable || !client.HTTPVerified || client.ProxyURL == "" || seen[client.ProxyURL] {
-			return
-		}
-		seen[client.ProxyURL] = true
-		urls = append(urls, client.ProxyURL)
+	client := detector.DetectAll().ActiveClient
+	if client.ID != "builtin" || !client.Running || client.MixedPort <= 0 {
+		return nil
 	}
-	for _, client := range snap.Clients {
-		if client.ID == "builtin" && client.Running {
-			add(client)
-		}
+	host := client.ProxyHost
+	if host == "" {
+		host = "127.0.0.1"
 	}
-	for _, client := range snap.Clients {
-		if client.ID != "builtin" {
-			add(client)
-		}
-	}
-	return urls
+	return []string{fmt.Sprintf("http://%s:%d", host, client.MixedPort)}
 }
 
 func providerSpecs(subs []configstore.Subscription) []core.ProviderSpec {
@@ -266,10 +266,12 @@ func (a *appRuntime) coreParams(settings configstore.CoreSettings) core.ConfigPa
 		MixedPort:       settings.MixedPort,
 		ControllerPort:  settings.ControllerPort,
 		AIDedicatedPort: settings.AIDedicatedPort,
+		SpeedTestPort:   settings.SpeedTestPort,
 		Secret:          settings.Secret,
 		Mode:            settings.Mode,
 		BypassCN:        settings.BypassCN,
 		GeoReady:        core.GeoFilesReady(dir),
+		EnabledAIApps:   configstore.LoadConfig().EnabledAppIDs(),
 	}
 }
 

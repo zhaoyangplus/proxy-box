@@ -29,6 +29,7 @@ type coreSettingsView struct {
 	MixedPort       int    `json:"mixedPort"`
 	ControllerPort  int    `json:"controllerPort"`
 	AIDedicatedPort int    `json:"aiDedicatedPort"`
+	SpeedTestPort   int    `json:"speedTestPort"`
 	Mode            string `json:"mode"`
 	BypassCN        bool   `json:"bypassCN"`
 	SystemProxy     bool   `json:"systemProxy"`
@@ -43,6 +44,7 @@ type coreStatusResponse struct {
 	MixedPort         int              `json:"mixedPort"`
 	ControllerPort    int              `json:"controllerPort"`
 	AIDedicatedPort   int              `json:"aiDedicatedPort"`
+	SpeedTestPort     int              `json:"speedTestPort"`
 	Settings          coreSettingsView `json:"settings"`
 	SystemProxyActive bool             `json:"systemProxyActive"`
 	GeoReady          bool             `json:"geoReady"`
@@ -116,6 +118,7 @@ func viewSettings(s configstore.CoreSettings) coreSettingsView {
 		MixedPort:       s.MixedPort,
 		ControllerPort:  s.ControllerPort,
 		AIDedicatedPort: s.AIDedicatedPort,
+		SpeedTestPort:   s.SpeedTestPort,
 		Mode:            s.Mode,
 		BypassCN:        s.BypassCN,
 		SystemProxy:     s.SystemProxy,
@@ -136,6 +139,7 @@ func (a *appRuntime) register(mux *http.ServeMux) {
 	mux.HandleFunc("/api/nodes/list", a.handleNodesList)
 	mux.HandleFunc("/api/nodes/select", a.handleNodesSelect)
 	mux.HandleFunc("/api/nodes/test", a.handleNodesTest)
+	a.registerSpeedTest(mux)
 }
 
 func (a *appRuntime) coreStatusResponse() (coreStatusResponse, error) {
@@ -148,7 +152,7 @@ func (a *appRuntime) coreStatusResponse() (coreStatusResponse, error) {
 		st = a.core.Status()
 	}
 	mode := settings.Mode
-	mixed, ctrl, ai := settings.MixedPort, settings.ControllerPort, settings.AIDedicatedPort
+	mixed, ctrl, ai, speed := settings.MixedPort, settings.ControllerPort, settings.AIDedicatedPort, settings.SpeedTestPort
 	if st.Mode != "" {
 		mode = st.Mode
 	}
@@ -161,6 +165,9 @@ func (a *appRuntime) coreStatusResponse() (coreStatusResponse, error) {
 		}
 		if st.Ports.AIDedicated > 0 {
 			ai = st.Ports.AIDedicated
+		}
+		if st.Ports.SpeedTest > 0 {
+			speed = st.Ports.SpeedTest
 		}
 	}
 	settings.Mode = mode
@@ -177,6 +184,7 @@ func (a *appRuntime) coreStatusResponse() (coreStatusResponse, error) {
 		MixedPort:         mixed,
 		ControllerPort:    ctrl,
 		AIDedicatedPort:   ai,
+		SpeedTestPort:     speed,
 		Settings:          viewSettings(settings),
 		SystemProxyActive: st.Running && settings.SystemProxy,
 		GeoReady:          ready,
@@ -297,7 +305,8 @@ func (a *appRuntime) followGlobal() (string, error) {
 		return "", err
 	}
 	st := a.core.Status()
-	mc := mihomo.NewClient("", fmt.Sprintf("127.0.0.1:%d", st.Ports.Controller), settings.Secret)
+	mc := mihomo.NewClient(fmt.Sprintf("127.0.0.1:%d", st.Ports.Controller), settings.Secret)
+	mc.SetDelayTestURL(configstore.LoadConfig().DelayTestURL)
 	if !mc.Available() {
 		return "", errors.New("未能连接到内置内核")
 	}
@@ -777,6 +786,7 @@ func (a *appRuntime) handleNodesList(rw http.ResponseWriter, r *http.Request) {
 		writeUserErr(rw, err)
 		return
 	}
+	mergeSpeedCache(res, a.speedCache())
 	writeJSON(rw, http.StatusOK, res)
 }
 
@@ -874,20 +884,12 @@ func (a *appRuntime) selectRequestedNode(clientID, group, node string) (string, 
 	return msg, live, fresh, nil
 }
 
-func nodeClient(snap detector.SystemSnapshot, clientID string) (detector.ProxyClientInfo, error) {
-	if strings.TrimSpace(clientID) != "builtin" {
-		return snap.ActiveClient, nil
+func nodeClient(snap detector.SystemSnapshot, _ string) (detector.ProxyClientInfo, error) {
+	client := snap.ActiveClient
+	if client.ID != "builtin" || !client.Running {
+		return detector.ProxyClientInfo{}, errors.New("内置内核未运行")
 	}
-	for _, client := range snap.Clients {
-		if client.ID != "builtin" {
-			continue
-		}
-		if !client.Running {
-			return detector.ProxyClientInfo{}, errors.New("内置内核未运行")
-		}
-		return client, nil
-	}
-	return detector.ProxyClientInfo{}, errors.New("内置内核未运行")
+	return client, nil
 }
 
 func listClientGroup(client detector.ProxyClientInfo, group string, testDelay bool) (*mihomo.NodeListResult, error) {
@@ -930,10 +932,8 @@ func (a *appRuntime) selectClientGroup(client detector.ProxyClientInfo, group, n
 }
 
 func groupClient(client detector.ProxyClientInfo) (*mihomo.Client, error) {
-	if client.ID == "v2rayn" {
-		return nil, errors.New("v2rayN 暂不支持按组选择节点")
-	}
-	mc := mihomo.NewClient(client.ControllerPipe, client.ExternalController, client.Secret)
+	mc := mihomo.NewClient(client.ExternalController, client.Secret)
+	mc.SetDelayTestURL(configstore.LoadConfig().DelayTestURL)
 	if !mc.Available() {
 		return nil, fmt.Errorf("未能连接到 %s 内核控制接口", client.Name)
 	}
@@ -949,7 +949,7 @@ func nodeSelectMessage(group, node string, live *mihomo.LiveNodeStatus) string {
 		if node == clashscript.AIAutoName {
 			return fmt.Sprintf("Proxy Box 专属通道已切回自动优选：%s", resolved)
 		}
-		return fmt.Sprintf("Proxy Box 专属通道已锁定节点：%s（外部代理软件节点不受影响）", resolved)
+		return fmt.Sprintf("Proxy Box 专属通道已锁定节点：%s", resolved)
 	}
 	shown := node
 	if node == core.BrowsingAutoName && live != nil && live.ExternalNode != "" {
