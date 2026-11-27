@@ -131,8 +131,11 @@
     ["rule", "global", "direct"].forEach(function (id) {
       var btn = modes[id];
       btn.disabled = !on;
-      btn.setAttribute("aria-pressed", mode === id ? "true" : "false");
+      var selected = mode === id;
+      btn.classList.toggle("is-on", selected);
+      btn.setAttribute("aria-pressed", selected ? "true" : "false");
     });
+    if (refs.modeSeg && PB.seg) PB.seg.sync(refs.modeSeg);
     var proxyOn = !!(core && core.systemProxyActive);
     refs.sys.disabled = !on;
     setSwitch(refs.sys, proxyOn);
@@ -289,8 +292,8 @@
 
   function mount(root) {
     refs = {};
-    refs.title = PB.el("div", { class: "pb-hero-title", attrs: { id: "pb-hero-phase" }, text: "已停止" });
-    refs.msg = PB.el("div", { class: "pb-hero-msg", attrs: { id: "pb-hero-msg" } });
+    refs.title = PB.el("div", { class: "pb-hero-title pb-num", attrs: { id: "pb-hero-phase" }, text: "已停止" });
+    refs.msg = PB.el("div", { class: "pb-hero-msg pb-num", attrs: { id: "pb-hero-msg" } });
     refs.err = PB.el("div", { class: "pb-error", hidden: true });
     refs.bar = PB.el("span");
     refs.barWrap = PB.el("div", { class: "pb-progress pb-progress-light", hidden: true }, refs.bar);
@@ -301,17 +304,17 @@
       on: { click: onToggle }
     });
     refs.importBtn = PB.el("button", {
-      class: "pb-btn pb-btn-ghost pb-on-dark pb-btn-sm",
+      class: "pb-btn pb-btn-ghost pb-btn-sm",
       attrs: { id: "pb-core-import" },
       text: "选择 mihomo.exe / .zip",
       on: { click: function () { PB.importCore(); } }
     });
-    refs.dailyPort = PB.el("div", { class: "pb-kicker" });
+    refs.dailyPort = PB.el("div", { class: "pb-kicker pb-num" });
     refs.dailyName = PB.el("div", { class: "pb-egress-name pb-ellipsis" });
-    refs.dailyMeta = PB.el("div", { class: "pb-egress-meta pb-mono pb-ellipsis" });
-    refs.aiPort = PB.el("div", { class: "pb-kicker" });
+    refs.dailyMeta = PB.el("div", { class: "pb-egress-meta pb-mono pb-num pb-ellipsis" });
+    refs.aiPort = PB.el("div", { class: "pb-kicker pb-num" });
     refs.aiName = PB.el("div", { class: "pb-egress-name pb-ellipsis" });
-    refs.aiMeta = PB.el("div", { class: "pb-egress-meta pb-mono pb-ellipsis" });
+    refs.aiMeta = PB.el("div", { class: "pb-egress-meta pb-mono pb-num pb-ellipsis" });
     refs.opt = PB.el("button", {
       class: "pb-btn pb-btn-primary pb-btn-sm",
       attrs: { id: "pb-optimize" },
@@ -322,6 +325,7 @@
     ["rule", "global", "direct"].forEach(function (id) {
       var label = { rule: "规则", global: "全局", direct: "直连" }[id];
       modes[id] = PB.el("button", {
+        class: "pb-seg-btn",
         attrs: { id: "pb-mode-" + id, "aria-pressed": "false" },
         text: label,
         on: { click: function () { setMode(id); } }
@@ -347,8 +351,8 @@
       hidden: true,
       on: { click: function () { setBypass(true, true); } }
     });
-    refs.subStat = PB.el("div", { class: "pb-stat-num", text: "读取中" });
-    refs.aiStat = PB.el("div", { class: "pb-stat-num", text: "0 / 4 已启用" });
+    refs.subStat = PB.el("div", { class: "pb-stat-num pb-num", text: "读取中" });
+    refs.aiStat = PB.el("div", { class: "pb-stat-num pb-num", text: "0 / 4 已启用" });
 
     var hero = PB.el("section", { class: "pb-hero" },
       PB.el("div", { class: "pb-hero-top" },
@@ -371,9 +375,10 @@
       )
     );
 
+    refs.modeSeg = PB.el("div", { class: "pb-seg", attrs: { role: "group", "aria-label": "路由模式" } }, modes.rule, modes.global, modes.direct);
     var modeCard = PB.el("section", { class: "pb-card" },
       PB.el("h3", { text: "路由模式" }),
-      PB.el("div", { class: "pb-seg", attrs: { role: "group", "aria-label": "路由模式" } }, modes.rule, modes.global, modes.direct)
+      refs.modeSeg
     );
     var proxyCard = PB.el("section", { class: "pb-card" },
       PB.el("div", { class: "pb-row" },
@@ -411,6 +416,7 @@
       hero,
       PB.el("div", { class: "pb-grid-2" }, modeCard, proxyCard, bypassCard, statCard)
     ));
+    PB.seg(refs.modeSeg);
     paint();
   }
 

@@ -278,12 +278,74 @@
     else state.aliveCount = countsFrom(nodes).alive;
   }
 
-  function iconBtn(act, label, glyph) {
-    return PB.el("button", {
-      class: "pbn-icon",
-      text: glyph,
+  function svgEl(name, attrs) {
+    const node = document.createElementNS("http://www.w3.org/2000/svg", name);
+    const keys = Object.keys(attrs);
+    for (let i = 0; i < keys.length; i++) node.setAttribute(keys[i], attrs[keys[i]]);
+    return node;
+  }
+
+  function svgIcon(kind) {
+    const svg = svgEl("svg", {
+      viewBox: "0 0 24 24",
+      width: kind === "delay" || kind === "speed" ? "16" : "14",
+      height: kind === "delay" || kind === "speed" ? "16" : "14",
+      fill: "none",
+      "aria-hidden": "true",
+    });
+    if (kind === "cards") {
+      const spots = [["3", "3"], ["13.5", "3"], ["3", "13.5"], ["13.5", "13.5"]];
+      for (let i = 0; i < spots.length; i++) {
+        svg.appendChild(svgEl("rect", {
+          x: spots[i][0],
+          y: spots[i][1],
+          width: "7.2",
+          height: "7.2",
+          rx: "1.6",
+          fill: "currentColor",
+          stroke: "none",
+        }));
+      }
+      return svg;
+    }
+    svg.setAttribute("stroke", "currentColor");
+    svg.setAttribute("stroke-width", "2");
+    svg.setAttribute("stroke-linecap", "round");
+    svg.setAttribute("stroke-linejoin", "round");
+    if (kind === "delay") {
+      svg.appendChild(svgEl("path", { d: "M3 12h2.2l2.1-6.2L11 18.2l2.5-6.2H21" }));
+    } else if (kind === "speed") {
+      svg.appendChild(svgEl("path", { d: "M5 16.5a7.5 7.5 0 1 1 14 0" }));
+      svg.appendChild(svgEl("path", { d: "M12 15.2 16.4 8.4" }));
+      svg.appendChild(svgEl("circle", { cx: "12", cy: "15.2", r: "1.35", fill: "currentColor", stroke: "none" }));
+    } else if (kind === "list") {
+      svg.appendChild(svgEl("path", { d: "M5 7h14M5 12h14M5 17h14" }));
+    } else {
+      svg.appendChild(svgEl("circle", { cx: "11", cy: "11", r: "6.5" }));
+      svg.appendChild(svgEl("path", { d: "M16.2 16.2 20.5 20.5" }));
+    }
+    return svg;
+  }
+
+  function iconBtn(act, label, kind) {
+    const button = PB.el("button", {
+      class: "pbn-icon" + (kind === "speed" ? " is-speed" : ""),
       attrs: { type: "button", "data-act": act, "aria-label": label, title: label },
     });
+    button.appendChild(svgIcon(kind));
+    return button;
+  }
+
+  function mountSegs() {
+    if (!window.PB || typeof PB.seg !== "function") return;
+    if (dom.groups) PB.seg(dom.groups);
+    if (dom.views) PB.seg(dom.views);
+  }
+
+  function syncSegs() {
+    if (!window.PB || !PB.seg || typeof PB.seg.sync !== "function") return;
+    if (dom.groups) PB.seg.sync(dom.groups);
+    if (dom.views) PB.seg.sync(dom.views);
   }
 
   function cardTemplate() {
@@ -297,7 +359,7 @@
     const row2 = PB.el("div", { class: "pbn-line" }, region, proto, sub);
     const delay = PB.el("span", { class: "pbn-delay" });
     const speed = PB.el("span", { class: "pbn-speed" });
-    const actions = PB.el("span", { class: "pbn-actions" }, iconBtn("delay", "测延迟", "延"), iconBtn("speed", "测网速", "速"));
+    const actions = PB.el("span", { class: "pbn-actions" }, iconBtn("delay", "测延迟", "delay"), iconBtn("speed", "测网速", "speed"));
     const row3 = PB.el("div", { class: "pbn-line" }, delay, speed, actions);
     return PB.el("article", { class: "pbn-card" }, row1, row2, row3);
   }
@@ -307,13 +369,13 @@
     const name = PBNodeFilter.buildNodeName(PB.el, "");
     const check = PB.el("span", { class: "pbn-check", text: "✓", hidden: true, attrs: { "aria-hidden": "true" } });
     const region = PB.el("span", { class: "pbn-region", hidden: true });
-    const nameCell = PB.el("td", {}, PB.el("div", { class: "pbn-namecell" }, auto, name, check, region));
-    const proto = PB.el("td", {}, PB.el("span", { class: "pbn-proto" }));
-    const sub = PB.el("td", {}, PB.el("span", { class: "pbn-sub" }));
-    const delay = PB.el("td", {}, PB.el("span", { class: "pbn-delay" }));
-    const speed = PB.el("td", {}, PB.el("span", { class: "pbn-speed" }));
-    const actions = PB.el("span", { class: "pbn-actions" }, iconBtn("delay", "测延迟", "延"), iconBtn("speed", "测网速", "速"));
-    return PB.el("tr", { class: "pbn-row" }, nameCell, proto, sub, delay, speed, PB.el("td", {}, actions));
+    const nameCell = PB.el("div", { class: "pbn-cell" }, PB.el("div", { class: "pbn-namecell" }, auto, name, check, region));
+    const proto = PB.el("div", { class: "pbn-cell" }, PB.el("span", { class: "pbn-proto" }));
+    const sub = PB.el("div", { class: "pbn-cell" }, PB.el("span", { class: "pbn-sub" }));
+    const delay = PB.el("div", { class: "pbn-cell" }, PB.el("span", { class: "pbn-delay" }));
+    const speed = PB.el("div", { class: "pbn-cell" }, PB.el("span", { class: "pbn-speed" }));
+    const actions = PB.el("span", { class: "pbn-actions" }, iconBtn("delay", "测延迟", "delay"), iconBtn("speed", "测网速", "speed"));
+    return PB.el("div", { class: "pbn-row" }, nameCell, proto, sub, delay, speed, PB.el("div", { class: "pbn-cell" }, actions));
   }
 
   function sortButton(key, id) {
@@ -322,12 +384,12 @@
       attrs: { type: "button", id: id },
       on: { click: function () { onSortKey(key); } },
     });
-    return { th: PB.el("th", {}, button), button: button };
+    return { cell: PB.el("div", { class: "pbn-hcell" }, button), button: button };
   }
 
   function groupButton(id, name, groupId) {
     return PB.el("button", {
-      class: "pbn-group",
+      class: "pb-seg-btn pbn-group",
       attrs: { type: "button", id: id, title: name + " " + groupId },
       on: { click: function () { setGroup(groupId); } },
     }, PB.el("span", { class: "pbn-group-name", text: name }), PB.el("span", { class: "pbn-group-id", text: groupId }));
@@ -396,16 +458,17 @@
       on: { change: onSortPick },
     }, dom.optDelay, dom.optSpeed, dom.optName);
     dom.viewCards = PB.el("button", {
-      class: "is-on",
-      text: "卡片",
-      attrs: { type: "button", id: "pbnViewCards", "aria-label": "卡片视图", title: "卡片视图" },
+      class: "pb-seg-btn is-on",
+      attrs: { type: "button", id: "pbnViewCards", "aria-label": "卡片视图", title: "卡片视图", "aria-pressed": "true" },
       on: { click: function () { setView("cards"); } },
     });
+    dom.viewCards.appendChild(svgIcon("cards"));
     dom.viewList = PB.el("button", {
-      text: "列表",
-      attrs: { type: "button", id: "pbnViewList", "aria-label": "列表视图", title: "列表视图" },
+      class: "pb-seg-btn",
+      attrs: { type: "button", id: "pbnViewList", "aria-label": "列表视图", title: "列表视图", "aria-pressed": "false" },
       on: { click: function () { setView("list"); } },
     });
+    dom.viewList.appendChild(svgIcon("list"));
     dom.delayAllBtn = PB.el("button", {
       class: "pbn-btn",
       text: "测延迟",
@@ -418,9 +481,13 @@
       attrs: { type: "button", id: "pbnSpeedAll" },
       on: { click: onSpeedButton },
     });
-    const views = PB.el("div", { class: "pbn-views" }, dom.viewCards, dom.viewList);
-    const groups = PB.el("div", { class: "pbn-groups" }, dom.groupProxy, dom.groupAI);
-    const searchWrap = PB.el("div", { class: "pbn-searchwrap" }, dom.search, dom.searchClear);
+    const views = PB.el("div", { class: "pb-seg pbn-views" }, dom.viewCards, dom.viewList);
+    const groups = PB.el("div", { class: "pb-seg pbn-groups" }, dom.groupProxy, dom.groupAI);
+    dom.groups = groups;
+    dom.views = views;
+    const searchIcon = svgIcon("search");
+    searchIcon.setAttribute("class", "pbn-search-icon");
+    const searchWrap = PB.el("div", { class: "pbn-searchwrap" }, searchIcon, dom.search, dom.searchClear);
     const row1 = PB.el("div", { class: "pbn-row1" },
       groups, dom.count, searchWrap, dom.sort, views, dom.delayAllBtn, dom.speedBtn);
     const delayPills = presetButtons("delay", DELAY_PRESETS);
@@ -468,12 +535,21 @@
       text: "已自动过滤受限地区",
       hidden: true,
     });
-    const row2 = PB.el("div", { class: "pbn-row2" },
-      dom.sub,
+    dom.subWrap = PB.el("label", { class: "pbn-filter" },
+      PB.el("span", { class: "pbn-filter-k", text: "订阅" }),
+      dom.sub);
+    dom.delayWrap = PB.el("div", { class: "pbn-filter" },
+      PB.el("span", { class: "pbn-filter-k", text: "延迟" }),
       delayPills.bar,
-      PB.el("label", { class: "pbn-custom" }, "≤", dom.delayInput, "ms"),
+      PB.el("label", { class: "pbn-custom" }, "≤", dom.delayInput, "ms"));
+    dom.speedWrap = PB.el("div", { class: "pbn-filter" },
+      PB.el("span", { class: "pbn-filter-k", text: "网速" }),
       speedPills.bar,
-      PB.el("label", { class: "pbn-custom" }, "≥", dom.speedInput, "MB/s"),
+      PB.el("label", { class: "pbn-custom" }, "≥", dom.speedInput, "MB/s"));
+    const row2 = PB.el("div", { class: "pbn-row2" },
+      dom.subWrap,
+      dom.delayWrap,
+      dom.speedWrap,
       dom.reset,
       dom.aiHint);
     dom.regions = PB.el("div", {
@@ -526,17 +602,16 @@
     dom.sortName = nameSort.button;
     dom.sortDelay = delaySort.button;
     dom.sortSpeed = speedSort.button;
-    const head = PB.el("tr", {},
-      nameSort.th,
-      PB.el("th", { class: "pbn-static", text: "协议" }),
-      PB.el("th", { class: "pbn-static", text: "订阅" }),
-      delaySort.th,
-      speedSort.th,
-      PB.el("th", { class: "pbn-static", text: "操作" }));
-    dom.listBody = PB.el("tbody", { attrs: { id: "pbnListBody" } });
+    const head = PB.el("div", { class: "pbn-listhead" },
+      nameSort.cell,
+      PB.el("div", { class: "pbn-hcell", text: "协议" }),
+      PB.el("div", { class: "pbn-hcell", text: "订阅" }),
+      delaySort.cell,
+      speedSort.cell,
+      PB.el("div", { class: "pbn-hcell", text: "操作" }));
+    dom.listBody = PB.el("div", { class: "pbn-listbody", attrs: { id: "pbnListBody" } });
     dom.listBody.addEventListener("click", onItemClick);
-    const table = PB.el("table", { class: "pbn-table" }, PB.el("thead", {}, head), dom.listBody);
-    dom.list = PB.el("div", { class: "pbn-table-wrap", attrs: { id: "pbnList" }, hidden: true }, table);
+    dom.list = PB.el("div", { attrs: { id: "pbnList" }, hidden: true }, head, dom.listBody);
     dom.body.appendChild(dom.loading);
     dom.body.appendChild(dom.error);
     dom.body.appendChild(dom.empty);
@@ -548,6 +623,8 @@
     dom.cardTpl = cardTemplate();
     dom.rowTpl = rowTemplate();
     state.mounted = true;
+    window.addEventListener("resize", syncSegs);
+    mountSegs();
     PB.on("core", onCoreEvent);
     PB.on("subs", function () { loadProviderNames(); });
     PB.on("speedtest", onSpeedEvent);
@@ -916,6 +993,10 @@
     dom.count.textContent = active
       ? "命中 " + list.length + " / 共 " + state.totalCount
       : "可用 " + state.aliveCount + " / 共 " + state.totalCount;
+    dom.count.classList.toggle("is-filter", active);
+    dom.subWrap.classList.toggle("is-on", filter.sub !== "all");
+    dom.delayWrap.classList.toggle("is-on", filter.delayPreset !== "all");
+    dom.speedWrap.classList.toggle("is-on", filter.speedPreset !== "all");
     const busyNote = state.delayAll || (state.refreshing && !state.loading);
     dom.note.hidden = !busyNote;
     dom.note.textContent = state.delayAll ? "正在测延迟…" : (busyNote ? "正在刷新…" : "");
@@ -953,6 +1034,7 @@
     dom.reset.hidden = !active;
     dom.aiHint.hidden = state.group !== GROUP_AI;
     paintSpeedButton(running, list);
+    syncSegs();
     const speedOn = state.speed && state.speed.phase !== "idle";
     dom.speedHint.hidden = !speedOn;
     dom.hints.hidden = dom.note.hidden && dom.speedHint.hidden;
@@ -1017,12 +1099,15 @@
     speedEl.title = speed.title || "";
     const allow = canTest(node);
     const delayBtn = actions.children[0];
+    const phase = state.speed && state.speed.phase;
     delayBtn.hidden = !allow;
     delayBtn.disabled = !allow || state.testingDelay === node.name || !coreRunning();
+    delayBtn.classList.toggle("is-spin", !!(allow && state.testingDelay === node.name));
     if (actions.children[1]) {
       const speedBtn = actions.children[1];
       speedBtn.hidden = !allow;
       speedBtn.disabled = !allow || !coreRunning() || (state.speed && state.speed.phase !== "idle");
+      speedBtn.classList.toggle("is-spin", !!(allow && state.speed && state.speed.current === node.name && (phase === "running" || phase === "starting")));
     }
     selectedHost.classList.toggle("is-selected", !!node.selected);
   }
@@ -1184,6 +1269,7 @@
     const filtering = PBNodeFilter.isFilterActive(currentFilter());
     const matched = rows ? rows.length : 0;
     dom.speedBtn.classList.toggle("is-stop", active);
+    dom.speedBtn.classList.toggle("is-filter", !active && filtering);
     if (active) {
       dom.speedBtn.textContent = "停止 (" + speed.done + "/" + speed.total + ")";
     } else if (filtering) {
