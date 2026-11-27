@@ -60,7 +60,7 @@
     if (!on) {
       body.appendChild(PB.el("p", { text: "未开启托管（保持应用默认设置）" }));
     } else {
-      body.appendChild(PB.el("div", { class: "pb-mono", text: "代理端口 :" + PB.ports().ai }));
+      body.appendChild(PB.el("div", { class: "pb-mono pb-num", text: "代理端口 :" + PB.ports().ai }));
       var lines = [];
       if (t.id === "cursor") lines.push(t.http2Disabled ? "HTTP/2 已禁用" : "HTTP/2 未禁用");
       lines.push(t.terminalEnvConfigured ? "终端环境已写入" : "终端环境未写入");

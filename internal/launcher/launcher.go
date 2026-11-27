@@ -10,11 +10,19 @@ import (
 	"time"
 	"unsafe"
 
-	"proxy-box/internal/configurator"
 	"golang.org/x/sys/windows"
+	"proxy-box/internal/configurator"
 )
 
 const createNoWindow = 0x08000000
+
+const swShowNormal = 1 // SW_SHOWNORMAL. SW_HIDE is 0.
+
+var (
+	shell32DLL        = windows.NewLazySystemDLL("shell32.dll")
+	procShellExecuteW = shell32DLL.NewProc("ShellExecuteW")
+	shellOpenFn       = callShellExecuteW
+)
 
 // LaunchTargetWithProxy launches Cursor or Antigravity with full proxy environment variables
 // AND Chromium/Electron --proxy-server flags so both the main process and child sidecars
@@ -173,36 +181,99 @@ func CreateProxyDesktopShortcut(targetID, shortcutTitle, targetExePath string) (
 }
 
 func OpenAppOrPath(path string) error {
+	path = strings.TrimSpace(path)
 	if path == "" {
 		return fmt.Errorf("路径为空")
 	}
-	st, err := os.Stat(path)
+	clean := filepath.Clean(path)
+	st, err := os.Stat(clean)
 	if err != nil {
-		return err
+		if os.IsNotExist(err) {
+			return fmt.Errorf("路径不存在: %s", clean)
+		}
+		if os.IsPermission(err) {
+			return fmt.Errorf("拒绝访问: %s", clean)
+		}
+		return fmt.Errorf("无法访问路径: %s", clean)
 	}
 	if st.IsDir() {
-		cmd := exec.Command("explorer.exe", path)
-		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: createNoWindow}
-		return cmd.Start()
+		return shellExecuteOpen(clean)
 	}
+	return startFile(clean)
+}
+
+func startFile(path string) error {
 	cmd := exec.Command(path)
 	cmd.Dir = filepath.Dir(path)
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		CreationFlags: windows.CREATE_NEW_PROCESS_GROUP | windows.DETACHED_PROCESS,
-	}
+	cmd.SysProcAttr = fileProcAttr()
 	return cmd.Start()
 }
 
-// OpenURL opens an HTTP/HTTPS URL in the user's default Windows browser safely.
+func fileProcAttr() *syscall.SysProcAttr {
+	return &syscall.SysProcAttr{
+		CreationFlags: windows.CREATE_NEW_PROCESS_GROUP | windows.DETACHED_PROCESS,
+	}
+}
+
+// OpenURL opens an HTTP/HTTPS URL in the user's default browser.
 func OpenURL(rawURL string) error {
 	rawURL = strings.TrimSpace(rawURL)
 	if !strings.HasPrefix(rawURL, "https://") && !strings.HasPrefix(rawURL, "http://") {
 		return fmt.Errorf("仅支持打开 http/https 链接")
 	}
-	cmd := exec.Command("rundll32.exe", "url.dll,FileProtocolHandler", rawURL)
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		HideWindow:    true,
-		CreationFlags: createNoWindow,
+	return shellExecuteOpen(rawURL)
+}
+
+func shellExecuteOpen(target string) error {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return fmt.Errorf("路径为空")
 	}
-	return cmd.Start()
+	if !strings.HasPrefix(target, "https://") && !strings.HasPrefix(target, "http://") {
+		target = filepath.Clean(target)
+	}
+	code, err := shellOpenFn(target, swShowNormal)
+	if err != nil {
+		return err
+	}
+	if code <= 32 {
+		return shellExecuteErr(code)
+	}
+	return nil
+}
+
+func callShellExecuteW(target string, showCmd int) (uintptr, error) {
+	verb, err := windows.UTF16PtrFromString("open")
+	if err != nil {
+		return 0, fmt.Errorf("打开失败: %v", err)
+	}
+	file, err := windows.UTF16PtrFromString(target)
+	if err != nil {
+		return 0, fmt.Errorf("打开失败: %v", err)
+	}
+	// The return value is the result. Values <= 32 are error codes, not GetLastError.
+	r, _, _ := procShellExecuteW.Call(
+		0,
+		uintptr(unsafe.Pointer(verb)),
+		uintptr(unsafe.Pointer(file)),
+		0,
+		0,
+		uintptr(showCmd),
+	)
+	return r, nil
+}
+
+func shellExecuteErr(code uintptr) error {
+	reason := "无法打开"
+	switch code {
+	case 2:
+		reason = "找不到文件"
+	case 3:
+		reason = "找不到路径"
+	case 5:
+		reason = "拒绝访问"
+	case 31:
+		reason = "没有关联的程序"
+	}
+	return fmt.Errorf("打开失败(错误码 %d): %s", code, reason)
 }

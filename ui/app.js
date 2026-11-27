@@ -28,6 +28,8 @@
   var updateApplying = false;
   var updatePoll = 0;
   var restartToasted = false;
+  var navPlaced = false;
+  var navRO = null;
 
   var META = {
     overview: ["总览", "内核、双通道出口和常用开关"],
@@ -336,6 +338,14 @@
     }
     var content = document.getElementById("pb-content");
     if (content) content.scrollTop = 0;
+    if (sec) sec.scrollTop = 0;
+    if (sec) {
+      sec.classList.remove("is-enter");
+      void sec.offsetWidth;
+      sec.classList.add("is-enter");
+    }
+    placeNav(navPlaced);
+    navPlaced = true;
   }
 
   function icon(d) {
@@ -355,9 +365,43 @@
     return svg;
   }
 
+  function navThumbEl() {
+    var nav = document.getElementById("pb-nav");
+    if (!nav) return null;
+    var thumb = nav.querySelector(":scope > .pb-nav-thumb");
+    if (!thumb) {
+      thumb = document.createElement("span");
+      thumb.className = "pb-nav-thumb";
+      thumb.setAttribute("aria-hidden", "true");
+      nav.insertBefore(thumb, nav.firstChild);
+    }
+    return thumb;
+  }
+
+  function placeNav(animate) {
+    var nav = document.getElementById("pb-nav");
+    if (!nav) return;
+    var btn = nav.querySelector('.pb-nav-btn[aria-current="page"]');
+    var thumb = navThumbEl();
+    if (!btn || !thumb || btn.offsetWidth <= 0) return;
+    var nextW = btn.offsetWidth + "px";
+    var nextH = btn.offsetHeight + "px";
+    var nextT = "translate(" + btn.offsetLeft + "px, " + btn.offsetTop + "px)";
+    if (thumb.style.width === nextW && thumb.style.height === nextH && thumb.style.transform === nextT) return;
+    if (!animate) thumb.style.transition = "none";
+    thumb.style.width = nextW;
+    thumb.style.height = nextH;
+    thumb.style.transform = nextT;
+    if (!animate) {
+      void thumb.offsetWidth;
+      thumb.style.transition = "";
+    }
+  }
+
   function buildNav() {
     var nav = document.getElementById("pb-nav");
     nav.replaceChildren();
+    navThumbEl();
     NAV.forEach(function (item) {
       var dot = el("span", { class: "pb-dot", attrs: { "data-dot": item[0] }, hidden: true });
       var btn = el("button", {
@@ -367,6 +411,10 @@
       }, icon(item[2]), el("span", { text: item[1] }), dot);
       nav.appendChild(btn);
     });
+    if (!navRO && window.ResizeObserver) {
+      navRO = new ResizeObserver(function () { placeNav(navPlaced); });
+      navRO.observe(nav);
+    }
   }
 
   function applyCoreEvent(core) {
@@ -732,6 +780,109 @@
     });
   }
 
+  function segShown(root) {
+    return !!(root && root.isConnected && root.offsetWidth > 0 && root.offsetHeight > 0);
+  }
+
+  function segThumb(root) {
+    var thumb = root.querySelector(":scope > .pb-seg-thumb");
+    if (!thumb) {
+      thumb = document.createElement("span");
+      thumb.className = "pb-seg-thumb";
+      thumb.setAttribute("aria-hidden", "true");
+      root.insertBefore(thumb, root.firstChild);
+    }
+    return thumb;
+  }
+
+  function segTarget(root) {
+    return root.querySelector(":scope > .pb-seg-btn.is-on") || root.querySelector(":scope > .is-on");
+  }
+
+  function segPlace(root, animate) {
+    var on = segTarget(root);
+    var thumb = segThumb(root);
+    if (!on || !segShown(root) || on.offsetWidth <= 0) return false;
+    var nextW = on.offsetWidth + "px";
+    var nextT = "translateX(" + on.offsetLeft + "px)";
+    if (thumb.style.width === nextW && thumb.style.transform === nextT) {
+      root.__pbSegPlaced = true;
+      return true;
+    }
+    if (!animate) thumb.style.transition = "none";
+    thumb.style.width = nextW;
+    thumb.style.transform = nextT;
+    if (!animate) {
+      void thumb.offsetWidth;
+      thumb.style.transition = "";
+    }
+    root.__pbSegPlaced = true;
+    return true;
+  }
+
+  function segClearWait(root) {
+    if (root.__pbSegWait) {
+      root.__pbSegWait.disconnect();
+      root.__pbSegWait = null;
+    }
+  }
+
+  function segWait(root) {
+    if (root.__pbSegWait) return;
+    var mo = new MutationObserver(function () {
+      if (!segShown(root)) return;
+      segClearWait(root);
+      segSync(root);
+    });
+    var node = root;
+    while (node) {
+      mo.observe(node, { attributes: true, attributeFilter: ["hidden", "class", "style"] });
+      node = node.parentElement;
+    }
+    root.__pbSegWait = mo;
+  }
+
+  function segWatch(root) {
+    if (root.__pbSegRO || !window.ResizeObserver) return;
+    root.__pbSegRO = new ResizeObserver(function () {
+      if (!segShown(root)) return;
+      if (!root.__pbSegSeen) {
+        segPlace(root, false);
+        root.__pbSegSeen = true;
+        segClearWait(root);
+        return;
+      }
+      segPlace(root, true);
+    });
+    root.__pbSegRO.observe(root);
+  }
+
+  function segSync(root) {
+    if (!root) return;
+    segWatch(root);
+    segThumb(root);
+    if (!segShown(root)) {
+      segWait(root);
+      return;
+    }
+    segPlace(root, !!root.__pbSegPlaced);
+    root.__pbSegSeen = true;
+    segClearWait(root);
+  }
+
+  function seg(root) {
+    if (!root) return { sync: function () {} };
+    segWatch(root);
+    segThumb(root);
+    if (!root.__pbSegPlaced) {
+      if (segPlace(root, false)) root.__pbSegSeen = true;
+      else segWait(root);
+    }
+    return { sync: function () { segSync(root); } };
+  }
+
+  seg.sync = segSync;
+
   var PB = {
     api: api,
     toast: toast,
@@ -744,6 +895,7 @@
       PB.tabs[id] = tab;
     },
     go: go,
+    seg: seg,
     fmt: fmt,
     tabs: {},
     setActions: setActions,
@@ -777,6 +929,7 @@
     bindChrome();
     connectEvents();
     go("overview");
+    requestAnimationFrame(function () { placeNav(false); });
     loadVersion();
     setTimeout(function () { checkUpdate(true); }, 2500);
   });

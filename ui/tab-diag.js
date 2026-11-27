@@ -20,6 +20,12 @@
   var exitEl = null;
   var tableEl = null;
   var errorEl = null;
+  var channelSeg = null;
+  var channelAI = null;
+  var channelDaily = null;
+  var issueSwitch = null;
+  var issueLabel = null;
+  var againBtn = null;
 
   function latency(item) {
     if (item.id === "local_port" && item.latencyMs <= 1) return item.status === "ok" ? "—" : "";
@@ -32,20 +38,28 @@
     return { kind: "ok", text: "正常", mark: "is-ok" };
   }
 
-  function actions() {
-    var ai = PB.el("button", {
-      attrs: { "data-channel": "ai", "aria-pressed": channel === "ai" ? "true" : "false" },
+  function ensureChrome() {
+    if (channelSeg) return;
+    channelAI = PB.el("button", {
+      class: "pb-seg-btn is-on",
+      attrs: { "data-channel": "ai", "aria-pressed": "true" },
       text: "AI 专属",
       on: { click: function () { pick("ai"); } }
     });
-    var daily = PB.el("button", {
-      attrs: { "data-channel": "daily", "aria-pressed": channel === "daily" ? "true" : "false" },
+    channelDaily = PB.el("button", {
+      class: "pb-seg-btn",
+      attrs: { "data-channel": "daily", "aria-pressed": "false" },
       text: "日常代理",
       on: { click: function () { pick("daily"); } }
     });
-    var sw = PB.el("button", {
+    channelSeg = PB.el("div", {
+      class: "pb-seg",
+      attrs: { role: "group", "aria-label": "测试通道" }
+    }, channelAI, channelDaily);
+    issueLabel = PB.el("span", { class: "pb-muted", text: "仅看异常" });
+    issueSwitch = PB.el("button", {
       class: "pb-switch",
-      attrs: { role: "switch", "aria-checked": onlyIssues ? "true" : "false", "aria-label": "仅看异常" },
+      attrs: { role: "switch", "aria-checked": "false", "aria-label": "仅看异常" },
       on: {
         click: function () {
           onlyIssues = !onlyIssues;
@@ -54,22 +68,30 @@
         }
       }
     });
-    var again = PB.el("button", {
+    againBtn = PB.el("button", {
       class: "pb-btn pb-btn-primary",
-      text: busy ? "诊断中" : "重新诊断",
-      disabled: busy,
+      text: "重新诊断",
       on: { click: run }
     });
-    return [
-      PB.el("div", { class: "pb-seg", attrs: { role: "group", "aria-label": "测试通道" } }, ai, daily),
-      PB.el("span", { class: "pb-muted", text: "仅看异常" }),
-      sw,
-      again
-    ];
   }
 
   function renderActions() {
-    if (visible) PB.setActions(actions());
+    ensureChrome();
+    var aiOn = channel === "ai";
+    channelAI.classList.toggle("is-on", aiOn);
+    channelDaily.classList.toggle("is-on", !aiOn);
+    channelAI.setAttribute("aria-pressed", aiOn ? "true" : "false");
+    channelDaily.setAttribute("aria-pressed", aiOn ? "false" : "true");
+    issueSwitch.setAttribute("aria-checked", onlyIssues ? "true" : "false");
+    againBtn.disabled = busy;
+    againBtn.textContent = busy ? "诊断中" : "重新诊断";
+    if (!visible) return;
+    var slot = document.getElementById("pb-actions");
+    if (!slot || channelSeg.parentNode !== slot) {
+      PB.setActions([channelSeg, issueLabel, issueSwitch, againBtn]);
+      PB.seg(channelSeg);
+    }
+    PB.seg.sync(channelSeg);
   }
 
   function pick(next) {
@@ -89,8 +111,8 @@
     var badgeKind = rep.exitIp ? (allowed ? "ok" : "err") : "muted";
     var badgeText = rep.exitIp ? (allowed ? "合规" : "受限") : "无结果";
     exitEl.appendChild(PB.el("div", {},
-      PB.el("div", { class: "pb-kicker", text: channelName + " :" + port }),
-      PB.el("div", {}, "出口 IP ", PB.el("b", { text: rep.exitIp || "—" }))
+      PB.el("div", { class: "pb-kicker pb-num", text: channelName + " :" + port }),
+      PB.el("div", {}, "出口 IP ", PB.el("b", { class: "pb-num", text: rep.exitIp || "—" }))
     ));
     exitEl.appendChild(PB.el("div", {},
       PB.el("div", { class: "pb-kicker", text: "地区" }),
@@ -106,9 +128,9 @@
     var warnCount = items.filter(function (i) { return i.status === "warn"; }).length;
     var errCount = items.filter(function (i) { return i.status === "error"; }).length;
     countsEl.replaceChildren(
-      PB.el("span", { text: okCount + " 项正常" }),
-      PB.el("span", { text: warnCount + " 项警告" }),
-      PB.el("span", { text: errCount + " 项失败" })
+      PB.el("span", { class: "pb-num", text: okCount + " 项正常" }),
+      PB.el("span", { class: "pb-num", text: warnCount + " 项警告" }),
+      PB.el("span", { class: "pb-num", text: errCount + " 项失败" })
     );
     if (errCount) PB.setDot("diag", "err");
     else if (warnCount) PB.setDot("diag", "warn");
@@ -150,7 +172,7 @@
       },
         PB.el("span", { text: NAMES[item.id] || item.name || "检查项" }),
         PB.el("span", { class: "pb-mono pb-ellipsis", text: item.target || "", title: item.target || "" }),
-        PB.el("span", { class: "pb-mono", text: latency(item) }),
+        PB.el("span", { class: "pb-mono pb-num", text: latency(item) }),
         PB.el("span", { class: "pb-badge pb-badge-" + meta.kind, text: meta.text })
       );
       tableEl.appendChild(PB.el("div", { class: "pb-diag-item " + meta.mark }, row, detail));

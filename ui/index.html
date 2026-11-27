@@ -4,7 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Proxy Box</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect fill='%23103222' width='16' height='16' rx='3'/%3E%3C/svg%3E" />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect fill='%2310b981' width='16' height='16' rx='4'/%3E%3C/svg%3E" />
 <link rel="stylesheet" href="styles.css" />
 <link rel="stylesheet" href="nodes.css" />
 <link rel="stylesheet" href="subs.css" />
@@ -14,14 +14,14 @@
   <aside class="pb-side">
     <div class="pb-brand">
       <svg class="pb-logo" viewBox="0 0 32 32" width="32" height="32" aria-hidden="true">
-        <rect width="32" height="32" rx="9" fill="#1e5239"/>
-        <rect x="7" y="7" width="18" height="18" rx="5" fill="none" stroke="#c4f269" stroke-width="2"/>
-        <circle cx="16" cy="16" r="3" fill="#c4f269"/>
+        <rect width="32" height="32" rx="10" fill="#10b981"/>
+        <rect x="7" y="7" width="18" height="18" rx="5" fill="none" stroke="#ffffff" stroke-width="2"/>
+        <circle cx="16" cy="16" r="3" fill="#ffffff"/>
       </svg>
       <div>
         <div class="pb-brand-name">Proxy Box</div>
         <button type="button" class="pb-version" id="pb-version" aria-label="检查更新">
-          <span id="pb-version-text">…</span>
+          <span class="pb-num" id="pb-version-text">…</span>
           <span class="pb-dot" id="pb-version-dot" hidden></span>
         </button>
       </div>
@@ -74,7 +74,7 @@
     <pre class="pb-notes" id="pb-update-notes"></pre>
     <div class="pb-progress" id="pb-update-progress" hidden><span id="pb-update-bar"></span></div>
     <p class="pb-muted" id="pb-update-msg"></p>
-    <p class="pb-mono" id="pb-update-bytes"></p>
+    <p class="pb-mono pb-num" id="pb-update-bytes"></p>
     <div class="pb-modal-actions">
       <button type="button" class="pb-btn pb-btn-ghost" id="pb-update-releases">打开发布页</button>
       <button type="button" class="pb-btn" id="pb-update-recheck">重新检查</button>
@@ -88,6 +88,7 @@
 <script src="tab-tools.js"></script>
 <script src="tab-diag.js"></script>
 <script src="tab-settings.js"></script>
+<script src="nodes-filter.js"></script>
 <script src="nodes.js"></script>
 <script src="subs.js"></script>
 </body>

@@ -147,16 +147,16 @@
 
   function mount(root) {
     refs = {};
-    refs.mixed = PB.el("b", { text: "27890" });
-    refs.controller = PB.el("b", { text: "27891" });
-    refs.ai = PB.el("b", { text: "27892" });
-    refs.speedPort = PB.el("b", { text: "27893" });
+    refs.mixed = PB.el("b", { class: "pb-num", text: "27890" });
+    refs.controller = PB.el("b", { class: "pb-num", text: "27891" });
+    refs.ai = PB.el("b", { class: "pb-num", text: "27892" });
+    refs.speedPort = PB.el("b", { class: "pb-num", text: "27893" });
     refs.file = PB.el("div", { class: "pb-mono pb-muted" });
     refs.fileState = PB.el("span", { class: "pb-badge pb-badge-muted", text: "未导入" });
     refs.delay = input(DELAY_DEFAULT, "延迟测试 URL");
     refs.speed = input(SPEED_DEFAULT, "下载测速 URL");
     refs.max = PB.el("select", {
-      class: "pb-input",
+      class: "pb-input pb-num",
       attrs: { "aria-label": "单节点测速上限" },
       on: { change: markDirty }
     },

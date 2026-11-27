@@ -189,15 +189,15 @@
   function mount(root) {
     if (state.mounted) return;
     root.classList.add("pbs");
-    dom.count = PB.el("span", { class: "pbs-count", attrs: { id: "pbsCount" }, text: "共 0 个订阅" });
+    dom.count = PB.el("span", { class: "pb-badge pb-badge-ok pbs-count", attrs: { id: "pbsCount" }, text: "共 0 个订阅" });
     dom.updateAllBtn = PB.el("button", {
-      class: "pbs-btn",
+      class: "pb-btn pb-btn-sm",
       text: "全部更新",
       attrs: { type: "button", id: "pbsUpdateAll" },
       on: { click: function () { updateAll(); } },
     });
     dom.addBtn = PB.el("button", {
-      class: "pbs-btn pbs-btn-primary",
+      class: "pb-btn pb-btn-primary pb-btn-sm",
       text: "添加订阅",
       attrs: { type: "button", id: "pbsAdd" },
       on: { click: openCreate },
@@ -227,7 +227,7 @@
   function buildModal() {
     dom.formTitle = PB.el("span", { class: "pbs-dialog-title", text: "添加订阅" });
     const close = PB.el("button", {
-      class: "pbs-btn",
+      class: "pb-btn pb-btn-ghost pb-btn-sm",
       text: "关闭",
       attrs: { type: "button" },
       on: { click: closeForm },
@@ -250,13 +250,13 @@
     dom.formError = PB.el("div", { class: "pbs-error", hidden: true });
     form.appendChild(dom.formError);
     const cancel = PB.el("button", {
-      class: "pbs-btn",
+      class: "pb-btn pb-btn-ghost pb-btn-sm",
       text: "取消",
       attrs: { type: "button" },
       on: { click: closeForm },
     });
     dom.saveBtn = PB.el("button", {
-      class: "pbs-btn pbs-btn-primary",
+      class: "pb-btn pb-btn-primary pb-btn-sm",
       text: "保存",
       attrs: { type: "submit", id: "pbsSave" },
     });
@@ -335,7 +335,7 @@
 
   function subCard(sub) {
     const sw = PB.el("button", {
-      class: "pbs-switch" + (sub.enabled ? " is-on" : ""),
+      class: "pb-switch",
       attrs: {
         type: "button",
         role: "switch",
@@ -350,9 +350,10 @@
       sw);
     const card = PB.el("article", { class: "pbs-card" }, top);
     card.appendChild(PB.el("div", { class: "pbs-url", text: maskURL(sub.url), title: maskURL(sub.url) }));
-    card.appendChild(PB.el("div", { class: "pbs-meta", text: "节点 " + sub.nodeCount }));
-    card.appendChild(PB.el("div", { class: "pbs-meta", text: fmtWhen(sub.updatedAt) }));
-    card.appendChild(PB.el("div", { class: "pbs-meta", text: intervalText(sub.updateIntervalMin) }));
+    card.appendChild(PB.el("div", { class: "pbs-meta-row" },
+      PB.el("span", { class: "pb-badge pb-badge-ok", text: "节点 " + sub.nodeCount }),
+      PB.el("span", { class: "pb-badge pb-badge-muted", text: fmtWhen(sub.updatedAt) }),
+      PB.el("span", { class: "pb-badge pb-badge-muted", text: intervalText(sub.updateIntervalMin) })));
     appendUsage(card, sub.usage);
     if (sub.lastError) card.appendChild(PB.el("div", { class: "pbs-card-error", text: sub.lastError }));
     card.appendChild(actionsFor(sub));
@@ -382,13 +383,13 @@
     if (state.confirmId === sub.id) {
       row.appendChild(PB.el("span", { class: "pbs-confirm", text: "确认删除「" + (sub.name || "订阅") + "」？" }));
       row.appendChild(PB.el("button", {
-        class: "pbs-btn pbs-btn-danger",
+        class: "pb-btn pb-btn-danger pb-btn-sm",
         text: "删除",
         attrs: { type: "button" },
         on: { click: function () { deleteSub(sub.id); } },
       }));
       row.appendChild(PB.el("button", {
-        class: "pbs-btn",
+        class: "pb-btn pb-btn-ghost pb-btn-sm",
         text: "取消",
         attrs: { type: "button" },
         on: { click: function () { state.confirmId = ""; paint(); } },
@@ -396,20 +397,20 @@
       return row;
     }
     row.appendChild(PB.el("button", {
-      class: "pbs-btn",
+      class: "pb-btn pb-btn-sm",
       text: state.busyId === sub.id ? "更新中" : "更新",
       attrs: { type: "button" },
       disabled: state.busyAll || state.busyId === sub.id,
       on: { click: function () { updateSub(sub.id); } },
     }));
     row.appendChild(PB.el("button", {
-      class: "pbs-btn",
+      class: "pb-btn pb-btn-sm",
       text: "编辑",
       attrs: { type: "button" },
       on: { click: function () { openEdit(sub); } },
     }));
     row.appendChild(PB.el("button", {
-      class: "pbs-btn",
+      class: "pb-btn pb-btn-ghost pb-btn-sm pbs-btn-quiet",
       text: "删除",
       attrs: { type: "button" },
       on: { click: function () { state.confirmId = sub.id; paint(); } },
