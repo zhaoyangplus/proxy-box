@@ -71,6 +71,7 @@ type AppTargetInfo struct {
 	Http2Disabled         bool   `json:"http2Disabled"`
 	TerminalEnvConfigured bool   `json:"terminalEnvConfigured"`
 	ManagedByBox          bool   `json:"managedByBox"`
+	EnabledByUser         bool   `json:"enabledByUser"`
 	ShortcutExists        bool   `json:"shortcutExists"`
 	StatusText            string `json:"statusText"`
 }
@@ -303,7 +304,7 @@ func DetectAll() SystemSnapshot {
 	targets := []AppTargetInfo{
 		detectCursor(cfg, st, procs, active.ProxyURL),
 		detectAntigravity(cfg, st, procs, active.ProxyURL),
-		detectClaudeCode(st, procs, active.ProxyURL),
+		detectClaudeCode(cfg, st, procs, active.ProxyURL),
 		detectCodex(cfg, st, procs, active.ProxyURL),
 	}
 	return SystemSnapshot{
@@ -375,6 +376,7 @@ func detectCursor(cfg configstore.AppConfig, st configstore.StateManifest, procs
 	default:
 		t.StatusText = "未配置免 TUN 代理"
 	}
+	noteUserSwitch(cfg, &t)
 	return t
 }
 
@@ -437,10 +439,11 @@ func detectAntigravity(cfg configstore.AppConfig, st configstore.StateManifest, 
 	default:
 		t.StatusText = "未配置免 TUN 代理"
 	}
+	noteUserSwitch(cfg, &t)
 	return t
 }
 
-func detectClaudeCode(st configstore.StateManifest, procs map[string]*procDetail, activeProxyURL string) AppTargetInfo {
+func detectClaudeCode(cfg configstore.AppConfig, st configstore.StateManifest, procs map[string]*procDetail, activeProxyURL string) AppTargetInfo {
 	t := AppTargetInfo{
 		ID:           "claude_code",
 		Name:         "Claude Code CLI",
@@ -487,6 +490,7 @@ func detectClaudeCode(st configstore.StateManifest, procs map[string]*procDetail
 	default:
 		t.StatusText = "未配置 ~/.claude/settings.json"
 	}
+	noteUserSwitch(cfg, &t)
 	return t
 }
 
@@ -550,7 +554,15 @@ func detectCodex(cfg configstore.AppConfig, st configstore.StateManifest, procs 
 	default:
 		t.StatusText = "未配置 ~/.codex/.env"
 	}
+	noteUserSwitch(cfg, &t)
 	return t
+}
+
+func noteUserSwitch(cfg configstore.AppConfig, t *AppTargetInfo) {
+	t.EnabledByUser = cfg.IsAppEnabled(t.ID)
+	if !t.EnabledByUser {
+		t.StatusText = "未托管，保持默认设置"
+	}
 }
 
 func findExecutable(regKeywords []string, directCandidates []string, driveRelativePaths []string) string {

@@ -14,6 +14,7 @@ import (
 	"proxy-box/internal/configstore"
 	"proxy-box/internal/core"
 	"proxy-box/internal/detector"
+	"proxy-box/internal/diagnostics"
 	"proxy-box/internal/sysproxy"
 )
 
@@ -42,6 +43,7 @@ type appRuntime struct {
 	importBinary func(srcPath, coreDir string) (string, error)
 	proxyURLs    func() []string
 	detect       func() detector.SystemSnapshot
+	runDiag      func(clientName, proxyHost string, proxyPort int) diagnostics.DiagnosticReport
 
 	mu          sync.Mutex
 	cancelStart context.CancelFunc
@@ -149,6 +151,9 @@ func (a *appRuntime) startCore(ctx context.Context, settings configstore.CoreSet
 		settings.Mode = st.Mode
 	}
 	if err := configstore.SaveCoreSettings(settings); err != nil {
+		return st, err
+	}
+	if err := a.applyEnabledTargetsLocked(st.Ports.AIDedicated); err != nil {
 		return st, err
 	}
 	a.kickGeoDownload()

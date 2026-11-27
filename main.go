@@ -225,26 +225,14 @@ func main() {
 				trayMgr.NotifyBalloon("已代理启动 Cursor", fmt.Sprintf("已禁用 HTTP/2 并对接 %s (%s)", snap.ActiveClient.Name, snap.ActiveClient.ProxyURL))
 			}
 		case tray.MenuApplyAll:
-			snap := detector.DetectAll()
-			_, err := configurator.ApplyAll(configurator.ApplyOptions{
-				ProxyURL:    snap.ActiveClient.ProxyURL,
-				Cursor:      true,
-				ClaudeCode:  true,
-				Antigravity: true,
-				Codex:       true,
-				SyncUserEnv: snap.AppConfig.SyncUserEnv,
-			})
-			if snap.ActiveClient.ControllerReachable {
-				_, _ = detector.OptimizeClientNode(snap.ActiveClient)
-			}
-			if err != nil {
-				trayMgr.NotifyBalloon("配置失败", err.Error())
-			} else {
-				trayMgr.NotifyBalloon("免 TUN 代理已生效", fmt.Sprintf("已同步内置内核端口 %s 并优选节点", snap.ActiveClient.ProxyURL))
-			}
+			rt.applyEnabledFromTray(trayMgr.NotifyBalloon)
 		case tray.MenuRestoreAll:
-			_, _ = configurator.RestoreAll()
-			trayMgr.NotifyBalloon("已还原默认配置", "已还原 Cursor、Claude Code、Antigravity 与 Codex 的配置")
+			msg, err := rt.restoreAllManaged(context.Background())
+			if err != nil {
+				trayMgr.NotifyBalloon("还原失败", err.Error())
+			} else {
+				trayMgr.NotifyBalloon("已还原默认配置", msg)
+			}
 		case tray.MenuCheckUpdate:
 			if w != nil {
 				w.Dispatch(func() {
@@ -271,7 +259,7 @@ func main() {
 	defer trayMgr.Cleanup()
 
 	// Start real-time proxy config / subscription / node watcher
-	go startLiveWatcher(hub, trayMgr)
+	go startLiveWatcher(hub, trayMgr, rt)
 
 	w = webview2.NewWithOptions(webview2.WebViewOptions{
 		Debug:     false,
@@ -298,7 +286,7 @@ func main() {
 	w.Run()
 }
 
-func startLiveWatcher(hub *sseHub, trayMgr *tray.Manager) {
+func startLiveWatcher(hub *sseHub, trayMgr *tray.Manager, rt *appRuntime) {
 	cfg := configstore.LoadConfig()
 	prevStamp := detector.FastConfigStamp()
 	prevSnap := detector.DetectAll()
@@ -366,33 +354,12 @@ func startLiveWatcher(hub *sseHub, trayMgr *tray.Manager) {
 
 		// 1. Auto-sync IDE proxy ports when active client, mixed port, or dedicated isolated port changes
 		if clientOrPortChanged && currClient.PortReachable && cfg.IsAutoSyncEnabled() {
-			st := configstore.LoadState()
-			hasManaged := false
-			for _, tb := range st.Targets {
-				if tb.Managed {
-					hasManaged = true
-					break
-				}
-			}
 			subs, subErr := configstore.LoadSubscriptions()
-			if currClient.ID == "builtin" && (subErr != nil || !detector.IDESyncAllowed(currClient, subs)) {
-				reasons = append(reasons, "内置内核还没有可用订阅或节点，未改写 IDE 配置")
-			} else if hasManaged {
-				_, _ = configurator.ApplyAll(configurator.ApplyOptions{
-					ProxyURL:    currClient.ProxyURL,
-					Cursor:      true,
-					ClaudeCode:  true,
-					Antigravity: true,
-					Codex:       true,
-					SyncUserEnv: cfg.SyncUserEnv,
-				})
-				if currClient.DedicatedPortActive {
-					reasons = append(reasons, fmt.Sprintf("独立隔离通道 %s 已上线，已自动同步全部 AI 工具", currClient.ProxyURL))
-				} else {
-					reasons = append(reasons, fmt.Sprintf("检测到代理切换至 %s (%s)，已自动同步 IDE 端口", currClient.Name, currClient.ProxyURL))
-				}
-			} else {
-				reasons = append(reasons, fmt.Sprintf("检测到代理源变更为 %s (%s)", currClient.Name, currClient.ProxyURL))
+			_, reason, err := rt.syncLiveApps(cfg, currClient, subs, subErr)
+			if err != nil {
+				reasons = append(reasons, err.Error())
+			} else if reason != "" {
+				reasons = append(reasons, reason)
 			}
 			shouldDiag = true
 		}
@@ -469,6 +436,10 @@ func startLocalAPIServer(hub *sseHub, rt *appRuntime, appUpdater *updater.Update
 	mux.Handle("/", http.FileServer(http.FS(uiSub)))
 	if rt != nil {
 		rt.register(mux)
+		mux.HandleFunc("/api/tools/toggle", rt.handleToolsToggle)
+		mux.HandleFunc("/api/one-click", rt.handleOneClick)
+		mux.HandleFunc("/api/restore-all", rt.handleRestoreAll)
+		mux.HandleFunc("/api/diagnostics", rt.handleDiagnostics)
 	}
 
 	mux.HandleFunc("/api/events", func(rw http.ResponseWriter, r *http.Request) {
@@ -535,41 +506,6 @@ func startLocalAPIServer(hub *sseHub, rt *appRuntime, appUpdater *updater.Update
 		})
 	})
 
-	mux.HandleFunc("/api/one-click", func(rw http.ResponseWriter, r *http.Request) {
-		var req struct {
-			ProxyURL    string `json:"proxyUrl"`
-			SyncUserEnv bool   `json:"syncUserEnv"`
-		}
-		_ = json.NewDecoder(r.Body).Decode(&req)
-		snap := detector.DetectAll()
-		active := snap.ActiveClient
-		proxyURL := req.ProxyURL
-		if proxyURL == "" {
-			proxyURL = active.ProxyURL
-		}
-
-		_, err := configurator.ApplyAll(configurator.ApplyOptions{
-			ProxyURL:    proxyURL,
-			Cursor:      true,
-			ClaudeCode:  true,
-			Antigravity: true,
-			Codex:       true,
-			SyncUserEnv: req.SyncUserEnv,
-		})
-		if err != nil {
-			writeErr(rw, err)
-			return
-		}
-
-		msg := fmt.Sprintf("已按内置内核 (%s) 配置全部工具", proxyURL)
-		if active.ControllerReachable {
-			if opt, oErr := detector.OptimizeClientNode(active); oErr == nil {
-				msg += fmt.Sprintf("，已优选节点 %s (%d ms)", opt.SelectedNode, opt.DelayMs)
-			}
-		}
-		writeJSON(rw, http.StatusOK, map[string]any{"ok": true, "message": msg})
-	})
-
 	mux.HandleFunc("/api/apply", func(rw http.ResponseWriter, r *http.Request) {
 		var opts configurator.ApplyOptions
 		if err := json.NewDecoder(r.Body).Decode(&opts); err != nil {
@@ -582,18 +518,6 @@ func startLocalAPIServer(hub *sseHub, rt *appRuntime, appUpdater *updater.Update
 			return
 		}
 		writeJSON(rw, http.StatusOK, map[string]any{"ok": true, "summary": summary})
-	})
-
-	mux.HandleFunc("/api/restore-all", func(rw http.ResponseWriter, r *http.Request) {
-		_, err := configurator.RestoreAll()
-		if err != nil {
-			writeErr(rw, err)
-			return
-		}
-		writeJSON(rw, http.StatusOK, map[string]any{
-			"ok":      true,
-			"message": "已无损还原 Cursor、Claude Code、Antigravity 与 Codex 的配置",
-		})
 	})
 
 	mux.HandleFunc("/api/launch", func(rw http.ResponseWriter, r *http.Request) {
@@ -648,12 +572,6 @@ func startLocalAPIServer(hub *sseHub, rt *appRuntime, appUpdater *updater.Update
 			"ok":      true,
 			"message": "已在桌面生成快捷方式: " + filepath.Base(lnk),
 		})
-	})
-
-	mux.HandleFunc("/api/diagnostics", func(rw http.ResponseWriter, r *http.Request) {
-		snap := detector.DetectAll()
-		rep := diagnostics.RunDiagnostics(snap.ActiveClient.Name, snap.ActiveClient.ProxyHost, snap.ActiveClient.MixedPort)
-		writeJSON(rw, http.StatusOK, rep)
 	})
 
 	mux.HandleFunc("/api/open-backups", func(rw http.ResponseWriter, r *http.Request) {
@@ -817,8 +735,12 @@ func startLocalAPIServer(hub *sseHub, rt *appRuntime, appUpdater *updater.Update
 	return "http://" + ln.Addr().String(), nil
 }
 
+var detectSnapshot = detector.DetectAll
+
+var launchWithProxy = launcher.LaunchTargetWithProxy
+
 func quickSyncAndLaunch(targetID string, restartIfRunning bool) error {
-	snap := detector.DetectAll()
+	snap := detectSnapshot()
 	var exePath string
 	for _, t := range snap.Targets {
 		if t.ID == targetID {
@@ -826,14 +748,15 @@ func quickSyncAndLaunch(targetID string, restartIfRunning bool) error {
 			break
 		}
 	}
-	_, _ = configurator.ApplyAll(configurator.ApplyOptions{
-		ProxyURL:    snap.ActiveClient.ProxyURL,
-		Cursor:      targetID == "cursor",
-		Antigravity: targetID == "antigravity",
-		ClaudeCode:  targetID == "cursor",
-		Codex:       targetID == "codex" || targetID == "cursor",
-	})
-	return launcher.LaunchTargetWithProxy(targetID, exePath, snap.ActiveClient.ProxyURL, restartIfRunning)
+	port := snap.ActiveClient.DedicatedPort
+	if port <= 0 {
+		port = 27892
+	}
+	proxyURL := fmt.Sprintf("http://127.0.0.1:%d", port)
+	if snap.AppConfig.IsAppEnabled(targetID) {
+		_, _ = configurator.ApplyTarget(targetID, proxyURL)
+	}
+	return launchWithProxy(targetID, exePath, proxyURL, restartIfRunning)
 }
 
 func runQuickLaunch(targetID string) {

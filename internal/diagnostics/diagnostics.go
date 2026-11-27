@@ -30,6 +30,8 @@ type DiagnosticReport struct {
 	RegionAllowed  bool        `json:"regionAllowed"`
 	Items          []CheckItem `json:"items"`
 	CheckedAt      string      `json:"checkedAt"`
+	Channel        string      `json:"channel,omitempty"`
+	Port           int         `json:"port,omitempty"`
 }
 
 var restrictedRegions = map[string]string{
