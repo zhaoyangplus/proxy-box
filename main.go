@@ -177,9 +177,6 @@ func main() {
 	defer releaseMutex()
 	_ = sysproxy.RecoverIfStale(false)
 
-	var w webview2.WebView
-	var trayMgr *tray.Manager
-
 	appUpdater := updater.New(appVersion)
 	hub := newSSEHub()
 	rt := newAppRuntime(hub)
@@ -189,32 +186,28 @@ func main() {
 		rt.Shutdown()
 	}
 	defer stopRuntime()
-	srvURL, err := startLocalAPIServer(hub, rt, appUpdater, func() {
-		stopRuntime()
-		releaseMutex()
-		if trayMgr != nil {
-			trayMgr.Cleanup()
-		}
-	}, func() {
-		if w != nil {
-			w.Dispatch(func() {
-				w.Terminate()
-			})
-		}
-		go func() {
-			time.Sleep(1500 * time.Millisecond)
-			os.Exit(0)
-		}()
-	})
-	if err != nil {
-		showMessageBox("Proxy Box 启动失败", "无法启动本地控制服务: "+err.Error(), 0x10)
-		return
-	}
-	go rt.bootCore()
 
 	dataPath := filepath.Join(os.Getenv("LOCALAPPDATA"), "ProxyBox", "WebView2Data")
 	_ = os.MkdirAll(dataPath, 0755)
+	w := webview2.NewWithOptions(webview2.WebViewOptions{
+		Debug:     false,
+		AutoFocus: true,
+		DataPath:  dataPath,
+		WindowOptions: webview2.WindowOptions{
+			Title:  appWindowTitle,
+			Width:  1180,
+			Height: 780,
+			Center: true,
+		},
+	})
+	if w == nil {
+		showMessageBox("缺少 WebView2 运行时", "未检测到 Microsoft Edge WebView2 Runtime，请安装后再运行。", 0x10)
+		return
+	}
+	defer w.Destroy()
 
+	var quitApp *quitSeq
+	var trayMgr *tray.Manager
 	trayMgr = tray.NewManager(func(menuID int, arg string) {
 		if trayMenuCommand(menuID) {
 			rt.handleTrayCommand(menuID, arg, trayMgr.NotifyBalloon)
@@ -258,11 +251,7 @@ func main() {
 			}
 			hub.broadcast(sseEvent{Type: "open_update"})
 		case tray.MenuQuit:
-			stopRuntime()
-			trayMgr.Cleanup()
-			if w != nil {
-				w.Terminate()
-			}
+			quitApp.run()
 		}
 	}, func() bool {
 		cfg, _ := configstore.LoadConfig()
@@ -273,28 +262,34 @@ func main() {
 		return buildTrayMenu(rt.cachedTrayState())
 	})
 	trayMgr.SetShutdown(stopRuntime)
+	quitApp = &quitSeq{
+		shutdown: stopRuntime,
+		cleanup:  trayMgr.Cleanup,
+		release:  releaseMutex,
+		win: func() uiQuitter {
+			return w
+		},
+		exit:    os.Exit,
+		timeout: 3 * time.Second,
+	}
+
+	srvURL, err := startLocalAPIServer(hub, rt, appUpdater, func() {
+		stopRuntime()
+		releaseMutex()
+		trayMgr.Cleanup()
+	}, func() {
+		requestUITerminate(w, releaseMutex, os.Exit, 3*time.Second)
+	})
+	if err != nil {
+		showMessageBox("Proxy Box 启动失败", "无法启动本地控制服务: "+err.Error(), 0x10)
+		return
+	}
+	go rt.bootCore()
 	trayMgr.Start("Proxy Box - 本地代理工作台")
 	defer trayMgr.Cleanup()
 
 	// Start real-time proxy config / subscription / node watcher
 	go startLiveWatcher(hub, trayMgr, rt)
-
-	w = webview2.NewWithOptions(webview2.WebViewOptions{
-		Debug:     false,
-		AutoFocus: true,
-		DataPath:  dataPath,
-		WindowOptions: webview2.WindowOptions{
-			Title:  appWindowTitle,
-			Width:  1180,
-			Height: 780,
-			Center: true,
-		},
-	})
-	if w == nil {
-		showMessageBox("缺少 WebView2 运行时", "未检测到 Microsoft Edge WebView2 Runtime，请安装后再运行。", 0x10)
-		return
-	}
-	defer w.Destroy()
 
 	w.Dispatch(func() {
 		trayMgr.AttachMainWindow(uintptr(w.Window()))
