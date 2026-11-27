@@ -2,6 +2,7 @@ package tray
 
 import (
 	"runtime"
+	"sync"
 	"syscall"
 	"unsafe"
 
@@ -29,6 +30,8 @@ const (
 	nimDelete = 0x00000002
 
 	mfString     = 0x00000000
+	mfChecked    = 0x00000008
+	mfPopup      = 0x00000010
 	mfSeparator  = 0x00000800
 	tpmRightBtn  = 0x0002
 	tpmBottomAlg = 0x0020
@@ -47,7 +50,25 @@ const (
 	MenuRestoreAll     = 1005
 	MenuCheckUpdate    = 1006
 	MenuQuit           = 1009
+
+	MenuSysProxy   = 1101
+	MenuModeRule   = 1111
+	MenuModeGlobal = 1112
+	MenuModeDirect = 1113
+	MenuNodeBase   = 1300
+	MenuNodeLimit  = 30
 )
+
+// MenuItem is one row in the tray menu. Children make a submenu.
+// Arg is the value passed back with ID when the row is clicked.
+type MenuItem struct {
+	ID        int
+	Label     string
+	Arg       string
+	Checked   bool
+	Separator bool
+	Children  []MenuItem
+}
 
 var (
 	user32   = windows.NewLazySystemDLL("user32.dll")
@@ -156,21 +177,36 @@ type Manager struct {
 	mainHwnd    uintptr
 	origWndProc uintptr
 	hIcon       uintptr
-	onAction    func(menuID int)
+	onAction    func(menuID int, arg string)
 	shouldHide  func() bool
 	onShutdown  func()
 	quitting    bool
+
+	menuMu   sync.Mutex
+	menuFn   func() []MenuItem
+	menuArgs map[int]string
 }
 
 var globalMgr *Manager
 
-func NewManager(onAction func(menuID int), shouldHideOnClose func() bool) *Manager {
+func NewManager(onAction func(menuID int, arg string), shouldHideOnClose func() bool) *Manager {
 	m := &Manager{
 		onAction:   onAction,
 		shouldHide: shouldHideOnClose,
 	}
 	globalMgr = m
 	return m
+}
+
+// SetMenu rebuilds the right-click menu from fn each time it opens.
+// A nil fn keeps the original static menu.
+func (m *Manager) SetMenu(fn func() []MenuItem) {
+	if m == nil {
+		return
+	}
+	m.menuMu.Lock()
+	m.menuFn = fn
+	m.menuMu.Unlock()
 }
 
 // SetShutdown runs when the window really closes or Windows ends the session.
@@ -343,7 +379,11 @@ func trayWndProc(hwnd uintptr, uMsg uint32, wParam, lParam uintptr) uintptr {
 	case wmCommand:
 		id := int(wParam & 0xffff)
 		if globalMgr != nil && globalMgr.onAction != nil {
-			go globalMgr.onAction(id)
+			globalMgr.menuMu.Lock()
+			arg := globalMgr.menuArgs[id]
+			fn := globalMgr.onAction
+			globalMgr.menuMu.Unlock()
+			go fn(id, arg)
 		}
 		return 0
 	case wmDestroy:
@@ -354,36 +394,91 @@ func trayWndProc(hwnd uintptr, uMsg uint32, wParam, lParam uintptr) uintptr {
 	return ret
 }
 
+// StandardItems is the menu that existed before the proxy controls.
+func StandardItems() []MenuItem {
+	return []MenuItem{
+		{ID: MenuShowWindow, Label: "打开 Proxy Box 控制台"},
+		{Separator: true},
+		{ID: MenuLaunchAntigrav, Label: "免 TUN 代理启动 Antigravity"},
+		{ID: MenuLaunchCursor, Label: "免 TUN 代理启动 Cursor"},
+		{Separator: true},
+		{ID: MenuApplyAll, Label: "一键应用免 TUN 配置"},
+		{ID: MenuRestoreAll, Label: "一键还原默认配置"},
+		{Separator: true},
+		{ID: MenuCheckUpdate, Label: "检查软件更新"},
+		{ID: MenuQuit, Label: "彻底退出"},
+	}
+}
+
 func showContextMenu(hwnd uintptr) {
+	items := StandardItems()
+	if globalMgr != nil {
+		globalMgr.menuMu.Lock()
+		fn := globalMgr.menuFn
+		globalMgr.menuMu.Unlock()
+		if fn != nil {
+			if built := fn(); len(built) > 0 {
+				items = built
+			}
+		}
+		globalMgr.rememberArgs(items)
+	}
+
 	hMenu, _, _ := procCreatePopupMenu.Call()
 	if hMenu == 0 {
 		return
 	}
 	defer procDestroyMenu.Call(hMenu)
-
-	appendItem := func(id uintptr, text string) {
-		ptr, _ := windows.UTF16PtrFromString(text)
-		procAppendMenuW.Call(hMenu, mfString, id, uintptr(unsafe.Pointer(ptr)))
-	}
-	appendSep := func() {
-		procAppendMenuW.Call(hMenu, mfSeparator, 0, 0)
-	}
-
-	appendItem(MenuShowWindow, "打开 Proxy Box 控制台")
-	appendSep()
-	appendItem(MenuLaunchAntigrav, "免 TUN 代理启动 Antigravity")
-	appendItem(MenuLaunchCursor, "免 TUN 代理启动 Cursor")
-	appendSep()
-	appendItem(MenuApplyAll, "一键应用免 TUN 配置")
-	appendItem(MenuRestoreAll, "一键还原默认配置")
-	appendSep()
-	appendItem(MenuCheckUpdate, "检查软件更新")
-	appendItem(MenuQuit, "彻底退出")
+	appendMenuItems(hMenu, items)
 
 	var pt point
 	procGetCursorPos.Call(uintptr(unsafe.Pointer(&pt)))
 	procSetForegroundWindow.Call(hwnd)
 	procTrackPopupMenu.Call(hMenu, tpmRightBtn|tpmBottomAlg, uintptr(pt.X), uintptr(pt.Y), 0, hwnd, 0)
+}
+
+func (m *Manager) rememberArgs(items []MenuItem) {
+	args := map[int]string{}
+	collectMenuArgs(items, args)
+	m.menuMu.Lock()
+	m.menuArgs = args
+	m.menuMu.Unlock()
+}
+
+func collectMenuArgs(items []MenuItem, dst map[int]string) {
+	for _, item := range items {
+		if item.ID != 0 {
+			dst[item.ID] = item.Arg
+		}
+		if len(item.Children) > 0 {
+			collectMenuArgs(item.Children, dst)
+		}
+	}
+}
+
+func appendMenuItems(hMenu uintptr, items []MenuItem) {
+	for _, item := range items {
+		if item.Separator {
+			procAppendMenuW.Call(hMenu, mfSeparator, 0, 0)
+			continue
+		}
+		if len(item.Children) > 0 {
+			sub, _, _ := procCreatePopupMenu.Call()
+			if sub == 0 {
+				continue
+			}
+			appendMenuItems(sub, item.Children)
+			ptr, _ := windows.UTF16PtrFromString(item.Label)
+			procAppendMenuW.Call(hMenu, mfPopup|mfString, sub, uintptr(unsafe.Pointer(ptr)))
+			continue
+		}
+		flags := uintptr(mfString)
+		if item.Checked {
+			flags |= mfChecked
+		}
+		ptr, _ := windows.UTF16PtrFromString(item.Label)
+		procAppendMenuW.Call(hMenu, flags, uintptr(item.ID), uintptr(unsafe.Pointer(ptr)))
+	}
 }
 
 func copyTip(dst *[128]uint16, s string) {

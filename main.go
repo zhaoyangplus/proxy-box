@@ -167,9 +167,14 @@ func main() {
 	appUpdater := updater.New(appVersion)
 	hub := newSSEHub()
 	rt := newAppRuntime(hub)
-	defer rt.Shutdown()
-	srvURL, err := startLocalAPIServer(hub, rt, appUpdater, func() {
+	sched := startSubScheduler(rt)
+	stopRuntime := func() {
+		sched.Stop()
 		rt.Shutdown()
+	}
+	defer stopRuntime()
+	srvURL, err := startLocalAPIServer(hub, rt, appUpdater, func() {
+		stopRuntime()
 		releaseMutex()
 		if trayMgr != nil {
 			trayMgr.Cleanup()
@@ -194,7 +199,11 @@ func main() {
 	dataPath := filepath.Join(os.Getenv("LOCALAPPDATA"), "ProxyBox", "WebView2Data")
 	_ = os.MkdirAll(dataPath, 0755)
 
-	trayMgr = tray.NewManager(func(menuID int) {
+	trayMgr = tray.NewManager(func(menuID int, arg string) {
+		if trayMenuCommand(menuID) {
+			rt.handleTrayCommand(menuID, arg, trayMgr.NotifyBalloon)
+			return
+		}
 		switch menuID {
 		case tray.MenuShowWindow:
 			if w != nil {
@@ -254,7 +263,7 @@ func main() {
 			}
 			hub.broadcast(sseEvent{Type: "open_update"})
 		case tray.MenuQuit:
-			rt.Shutdown()
+			stopRuntime()
 			trayMgr.Cleanup()
 			if w != nil {
 				w.Terminate()
@@ -264,7 +273,10 @@ func main() {
 		return configstore.LoadConfig().MinimizeToTray
 	})
 
-	trayMgr.SetShutdown(rt.Shutdown)
+	trayMgr.SetMenu(func() []tray.MenuItem {
+		return buildTrayMenu(rt.cachedTrayState())
+	})
+	trayMgr.SetShutdown(stopRuntime)
 	trayMgr.Start("Proxy Box - 本地代理工作台")
 	defer trayMgr.Cleanup()
 

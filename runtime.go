@@ -52,6 +52,8 @@ type appRuntime struct {
 	geo          *geoCtl
 	downloadGeo  func(context.Context, string, string, core.ProgressFunc) error
 	preflightGeo func(context.Context, string, string, string) error
+	flight       *subFlight
+	trayState    trayStateCache
 }
 
 func newAppRuntime(hub *sseHub) *appRuntime {
@@ -64,6 +66,7 @@ func newAppRuntime(hub *sseHub) *appRuntime {
 		setProxy:     sysproxy.Set,
 		ensureBinary: core.EnsureBinary,
 		importBinary: core.ImportBinary,
+		flight:       newSubFlight(),
 	}
 }
 
