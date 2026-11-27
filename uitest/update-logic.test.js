@@ -70,3 +70,50 @@ test("update markup escapes versions, notes, and errors", function () {
   assert.match(U.bodyHTML(U.fromCheck({ currentVersion: "v1.4.0", latestVersion: "v1.4.0", hasUpdate: false })), /当前已是最新版本/);
   assert.match(U.bodyHTML(U.loading()), /正在检查 GitHub Releases/);
 });
+
+test("update status moves the download forward once and stops when it ends", function () {
+  const optimistic = U.fromProgress(U.fromCheck({
+    currentVersion: "v1",
+    latestVersion: "v2",
+    hasUpdate: true
+  }), { status: "downloading", percent: 0, message: "正在下载…" });
+  const waiting = U.reconcileUpdate(optimistic, { status: "idle" });
+  assert.equal(waiting.changed, false);
+  assert.equal(waiting.polling, true);
+  assert.equal(waiting.view, optimistic);
+  const moved = U.reconcileUpdate(optimistic, {
+    status: "downloading",
+    percent: 40,
+    downloadedBytes: 40,
+    totalBytes: 100,
+    message: "正在下载 v2",
+    targetVersion: "v2"
+  });
+  assert.equal(moved.changed, true);
+  assert.equal(moved.polling, true);
+  assert.equal(moved.view.percent, 40);
+  assert.equal(moved.view.confirmed, true);
+  const same = U.reconcileUpdate(moved.view, {
+    status: "downloading",
+    percent: 40,
+    downloadedBytes: 40,
+    totalBytes: 100,
+    message: "正在下载 v2",
+    targetVersion: "v2"
+  });
+  assert.equal(same.changed, false);
+  assert.equal(same.view, moved.view);
+  assert.equal(same.polling, true);
+  const failed = U.reconcileUpdate(moved.view, { status: "error", error: "下载失败" });
+  assert.equal(failed.changed, true);
+  assert.equal(failed.polling, false);
+  assert.equal(failed.view.kind, "error");
+  assert.equal(failed.view.message, "下载失败");
+  const again = U.reconcileUpdate(failed.view, { status: "error", error: "下载失败" });
+  assert.equal(again.changed, false);
+  assert.equal(again.polling, false);
+  const dropped = U.reconcileUpdate(moved.view, { status: "idle" });
+  assert.equal(dropped.changed, true);
+  assert.equal(dropped.polling, false);
+  assert.equal(dropped.view.kind, "error");
+});

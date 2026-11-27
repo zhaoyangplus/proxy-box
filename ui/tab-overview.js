@@ -11,11 +11,14 @@
   var localError = "";
   var actionLock = "";
   var stopRequested = false;
+  var startPending = false;
   var optBusy = false;
   var sysBusy = false;
   var bypassBusy = false;
   var listGen = 0;
   var subsGen = 0;
+  var listSig = { daily: "", ai: "" };
+  var subsSig = "";
   var lastSig = "";
   var wasRunning = false;
 
@@ -198,11 +201,18 @@
       PB.api("POST", "/api/nodes/list", { client: "builtin", group: O.GROUP.ai, testDelay: false })
     ]).then(function (pair) {
       if (gen !== listGen) return;
+      var dailySig = O.listSignature(pair[0]);
+      var aiSig = O.listSignature(pair[1]);
+      if (dailySig === listSig.daily && aiSig === listSig.ai && lists.daily && lists.ai) return;
+      listSig.daily = dailySig;
+      listSig.ai = aiSig;
       lists.daily = pair[0];
       lists.ai = pair[1];
       paint();
     }, function () {
       if (gen !== listGen) return;
+      listSig.daily = "";
+      listSig.ai = "";
       lists.daily = null;
       lists.ai = null;
       paint();
@@ -213,7 +223,11 @@
     var gen = ++subsGen;
     return PB.api("GET", "/api/subs").then(function (data) {
       if (gen !== subsGen) return;
-      subs = O.subsSummary((data && data.subscriptions) || [], Date.now());
+      var raw = (data && data.subscriptions) || [];
+      var sig = O.subsSignature(raw);
+      if (sig === subsSig && subs && subs.state === "ok") return;
+      subsSig = sig;
+      subs = O.subsSummary(raw, Date.now());
       paint();
     }, function () {
       if (gen !== subsGen) return;
@@ -222,22 +236,49 @@
     });
   }
 
+  function applySettled(settled) {
+    PB.state.holdDownload = false;
+    PB.state.phase = settled.phase;
+    localError = settled.error || "";
+    if (settled.phase === "stopped") {
+      lastEvent = { phase: "stopped", message: "内核已停止", downloaded: 0, total: 0 };
+    } else if (settled.phase === "error") {
+      lastEvent = { phase: "error", message: settled.error || "" };
+    }
+    if (settled.warning) PB.toast(settled.warning, "warn");
+    else if (settled.error) PB.toast(settled.error, "err");
+  }
+
   function startCore() {
     if (actionLock === "start") return;
     actionLock = "start";
+    startPending = true;
     stopRequested = false;
     localError = "";
     lastSig = "";
+    PB.state.holdDownload = true;
+    PB.state.cancelStart = false;
     paint();
-    PB.api("POST", "/api/core/start", {}).then(function () {
-      localError = "";
+    PB.api("POST", "/api/core/start", {}).then(function (body) {
+      if (stopRequested || PB.state.cancelStart) {
+        PB.state.holdDownload = false;
+        return;
+      }
+      var settled = O.settleStart({
+        ok: true,
+        warning: body && body.warning,
+        running: body ? body.running : undefined
+      });
+      applySettled(settled);
       if (typeof PB.refreshCore === "function") return PB.refreshCore();
     }).catch(function (err) {
       var msg = (err && err.message) || "启动失败";
-      if (stopRequested || msg.indexOf("取消") >= 0) return;
-      localError = msg;
-      PB.toast(msg, "err");
+      applySettled(O.settleStart({
+        cancelled: stopRequested || PB.state.cancelStart || msg.indexOf("取消") >= 0,
+        error: msg
+      }));
     }).then(function () {
+      startPending = false;
       actionLock = "";
       lastSig = "";
       paint();
@@ -248,15 +289,19 @@
   function stopCore() {
     if (actionLock === "stop") return;
     stopRequested = true;
+    PB.state.cancelStart = true;
+    PB.state.holdDownload = false;
     actionLock = "stop";
     lastSig = "";
     paint();
     PB.api("POST", "/api/core/stop", {}).then(function () {
-      localError = "";
-      lastEvent = { phase: "stopped", message: "内核已停止", downloaded: 0, total: 0 };
+      applySettled(O.settleStart({ cancelled: true }));
+      PB.state.cancelStart = false;
       PB.toast("内核已停止", "info");
       if (typeof PB.refreshCore === "function") return PB.refreshCore();
     }).catch(function (err) {
+      PB.state.cancelStart = false;
+      if (startPending) PB.state.holdDownload = true;
       PB.toast((err && err.message) || "停止失败", "err");
     }).then(function () {
       actionLock = "";
@@ -362,6 +407,10 @@
     });
   }
 
+  var queueOverview = globalThis.PBUtil && PBUtil.coalesce
+    ? PBUtil.coalesce(function () { loadNodes(); loadSubs(); })
+    : function () { loadNodes(); loadSubs(); };
+
   PB.registerTab("overview", {
     enter: function (node) {
       root = node;
@@ -394,17 +443,15 @@
     onSSE: function (msg) {
       if (!msg) return;
       if (msg.type === "core" && msg.core) {
-        lastEvent = msg.core;
-        if (msg.core.phase === "running" || msg.core.phase === "stopped") localError = "";
-        if (msg.core.phase === "error" && msg.core.message) localError = msg.core.message;
+        var droppedDownload = msg.core.phase === "download" && PB.state.phase !== "download";
+        if (!droppedDownload) lastEvent = msg.core;
+        if (msg.core.phase === "running" || msg.core.phase === "stopped" || PB.state.cancelStart) localError = "";
+        if (!PB.state.cancelStart && msg.core.phase === "error" && msg.core.message) localError = msg.core.message;
         if (msg.core.phase === "geo" && typeof PB.refreshCore === "function") PB.refreshCore();
         if (msg.core.phase === "running") loadNodes();
         paint();
       }
-      if (msg.type === "sync") {
-        loadNodes();
-        loadSubs();
-      }
+      if (msg.type === "sync") queueOverview();
     }
   });
 })();

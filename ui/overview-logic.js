@@ -143,6 +143,39 @@
     return value.toFixed(1) + "%";
   }
 
+  function settleStart(input) {
+    input = input || {};
+    if (input.cancelled) return { phase: "stopped", error: "", warning: "" };
+    if (input.error) return { phase: "error", error: String(input.error), warning: "" };
+    var warning = input.warning ? String(input.warning) : "";
+    if (warning) return { phase: "running", error: "", warning: warning };
+    if (input.running === false) return { phase: "stopped", error: "", warning: "" };
+    return { phase: "running", error: "", warning: "" };
+  }
+
+  function nextCorePhase(input) {
+    input = input || {};
+    if (input.running) return "running";
+    var phase = input.phase || "stopped";
+    if (input.holdDownload && !input.cancelRequested && phase === "download") return "download";
+    if (phase === "error" || phase === "geo") return phase;
+    return "stopped";
+  }
+
+  function applyCorePhase(state, event) {
+    state = state || {};
+    event = event || {};
+    var next = event.phase || state.phase || "stopped";
+    if (state.cancelRequested && next !== "running" && next !== "stopped") {
+      return state.phase === "running" ? "running" : "stopped";
+    }
+    if (next === "download" && !(state.holdDownload && !state.cancelRequested)) {
+      if (state.phase === "error" || state.phase === "running" || state.phase === "geo") return state.phase;
+      return "stopped";
+    }
+    return next;
+  }
+
   function heroState(input) {
     input = input || {};
     var running = !!input.running;
@@ -204,6 +237,29 @@
     if (active && n > 0) return "已指向 127.0.0.1:" + n;
     if (active) return "已开启";
     return "未接管系统流量";
+  }
+
+  function listSignature(list) {
+    if (list === undefined) return "?";
+    if (list === null) return "-";
+    var nodes = list.nodes || [];
+    var parts = [list.currentSelect || "", list.resolvedNode || ""];
+    for (var i = 0; i < nodes.length; i++) {
+      var node = nodes[i] || {};
+      parts.push(node.name || "", node.delayMs, node.untested ? 1 : 0, node.speedMBps, node.speedTested ? 1 : 0, node.resolvedTo || "");
+    }
+    return parts.join("\u0001");
+  }
+
+  function subsSignature(list) {
+    if (list == null) return "-";
+    var parts = [];
+    for (var i = 0; i < list.length; i++) {
+      var sub = list[i] || {};
+      var usage = sub.usage || {};
+      parts.push([sub.id, sub.name, sub.enabled ? 1 : 0, sub.nodeCount, sub.updatedAt, sub.lastError, usage.expire].join("\u0001"));
+    }
+    return parts.join("\u0002");
   }
 
   function subsSummary(list, now) {
@@ -351,10 +407,15 @@
     modeText: modeText,
     modeLabel: modeLabel,
     channelTile: channelTile,
+    settleStart: settleStart,
+    nextCorePhase: nextCorePhase,
+    applyCorePhase: applyCorePhase,
     heroState: heroState,
     geoStatus: geoStatus,
     sysSub: sysSub,
     subsSummary: subsSummary,
+    listSignature: listSignature,
+    subsSignature: subsSignature,
     subsText: subsText,
     appsSummary: appsSummary,
     cssPercent: cssPercent,

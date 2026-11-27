@@ -186,6 +186,71 @@
       '<button type="button" class="btn sm prominent" data-act="overview">前往总览</button></div>';
   }
 
+  function emptySlot() {
+    return { run: 0, running: false, report: null, error: "" };
+  }
+
+  function channelName(channel) {
+    return channel === "daily" ? "daily" : "ai";
+  }
+
+  function copySlot(slot) {
+    slot = slot || emptySlot();
+    return {
+      run: slot.run || 0,
+      running: !!slot.running,
+      report: slot.report || null,
+      error: slot.error ? String(slot.error) : ""
+    };
+  }
+
+  function emptyRuns() {
+    return { ai: emptySlot(), daily: emptySlot() };
+  }
+
+  function cloneRuns(book) {
+    book = book || emptyRuns();
+    return { ai: copySlot(book.ai), daily: copySlot(book.daily) };
+  }
+
+  function beginRun(book, channel) {
+    var next = cloneRuns(book);
+    var name = channelName(channel);
+    next[name].run += 1;
+    next[name].running = true;
+    next[name].error = "";
+    return { book: next, channel: name, run: next[name].run };
+  }
+
+  function finishRun(book, channel, run, payload) {
+    var name = channelName(channel);
+    var current = cloneRuns(book);
+    if (!current[name] || current[name].run !== run) return { book: current, applied: false };
+    payload = payload || {};
+    current[name].running = false;
+    if (payload.ok) {
+      current[name].report = payload.report || null;
+      current[name].error = "";
+    } else if (!current[name].report) {
+      current[name].error = payload.error ? String(payload.error) : "";
+    }
+    return { book: current, applied: true };
+  }
+
+  function viewRun(book, channel) {
+    var slot = copySlot(book && book[channelName(channel)]);
+    var status = slot.running ? "running" : slot.report ? "result" : slot.error ? "error" : "idle";
+    return { status: status, running: slot.running, report: slot.report, error: slot.error };
+  }
+
+  function clearRuns(book) {
+    var next = cloneRuns(book);
+    ["ai", "daily"].forEach(function (name) {
+      next[name] = { run: next[name].run + 1, running: false, report: null, error: "" };
+    });
+    return next;
+  }
+
   function actionsHTML(channel) {
     var u = util();
     return u.segHTML("dgCh", [
@@ -204,6 +269,11 @@
     visibleRows: visibleRows,
     pageHTML: pageHTML,
     blockedHTML: blockedHTML,
-    actionsHTML: actionsHTML
+    actionsHTML: actionsHTML,
+    emptyRuns: emptyRuns,
+    beginRun: beginRun,
+    finishRun: finishRun,
+    viewRun: viewRun,
+    clearRuns: clearRuns
   };
 });

@@ -301,6 +301,39 @@
       "</div></article>";
   }
 
+  function subSignature(sub, busy) {
+    sub = sub || {};
+    var id = sub.id == null ? "" : String(sub.id);
+    var usage = sub.usage || {};
+    return [
+      id, sub.name, sub.url, sub.enabled ? 1 : 0, countOf(sub), sub.updateIntervalMin,
+      sub.updatedAt, sub.lastError, usage.upload, usage.download, usage.total, usage.expire,
+      busy && busy[id] ? 1 : 0
+    ].join("\u0001");
+  }
+
+  function subsSignature(list, busy) {
+    var parts = [];
+    (list || []).forEach(function (sub) { parts.push(subSignature(sub, busy)); });
+    return parts.join("\u0002");
+  }
+
+  function diffSubs(prev, next, busy) {
+    prev = prev || [];
+    next = next || [];
+    if (prev.length !== next.length) return { same: false, reorder: true, changed: [] };
+    var changed = [];
+    for (var i = 0; i < next.length; i++) {
+      var before = prev[i] || {};
+      var after = next[i] || {};
+      if (String(before.id == null ? "" : before.id) !== String(after.id == null ? "" : after.id)) {
+        return { same: false, reorder: true, changed: [] };
+      }
+      if (subSignature(before, busy) !== subSignature(after, busy)) changed.push(String(after.id == null ? "" : after.id));
+    }
+    return { same: changed.length === 0, reorder: false, changed: changed };
+  }
+
   function pageHTML(subs, state) {
     var u = util();
     state = state || {};
@@ -367,6 +400,9 @@
     enabledPatch: enabledPatch,
     updateSummary: updateSummary,
     pageHTML: pageHTML,
+    cardHTML: cardHTML,
+    subsSignature: subsSignature,
+    diffSubs: diffSubs,
     formHTML: formHTML,
     topbarHTML: topbarHTML
   };
