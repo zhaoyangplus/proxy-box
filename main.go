@@ -455,146 +455,16 @@ func startLocalAPIServer(hub *sseHub, rt *appRuntime, appUpdater *updater.Update
 		mux.HandleFunc("/api/diagnostics", rt.handleDiagnostics)
 	}
 
-	mux.HandleFunc("/api/events", func(rw http.ResponseWriter, r *http.Request) {
-		flusher, ok := rw.(http.Flusher)
-		if !ok {
-			http.Error(rw, "SSE unsupported", http.StatusInternalServerError)
-			return
-		}
-		rw.Header().Set("Content-Type", "text/event-stream")
-		rw.Header().Set("Cache-Control", "no-cache")
-		rw.Header().Set("Connection", "keep-alive")
-
-		ch := hub.subscribe()
-		defer hub.unsubscribe(ch)
-
-		ping := time.NewTicker(20 * time.Second)
-		defer ping.Stop()
-
-		_, _ = fmt.Fprintf(rw, ": connected\n\n")
-		flusher.Flush()
-
-		for {
-			select {
-			case <-r.Context().Done():
-				return
-			case payload := <-ch:
-				_, _ = fmt.Fprintf(rw, "data: %s\n\n", payload)
-				flusher.Flush()
-			case <-ping.C:
-				_, _ = fmt.Fprintf(rw, ": ping\n\n")
-				flusher.Flush()
-			}
-		}
-	})
-
-	mux.HandleFunc("/api/snapshot", func(rw http.ResponseWriter, r *http.Request) {
-		writeJSON(rw, http.StatusOK, detector.DetectAll())
-	})
-
-	mux.HandleFunc("/api/optimize-node", func(rw http.ResponseWriter, r *http.Request) {
-		snap := detector.DetectAll()
-		res, err := detector.OptimizeClientNode(snap.ActiveClient)
-		if err != nil {
-			writeErr(rw, err)
-			return
-		}
-		if err := configstore.UpdateConfig(func(cfg *configstore.AppConfig) error {
-			cfg.NodeSelectionMode = "auto"
-			cfg.ManualNodeName = ""
-			return nil
-		}); err != nil {
-			writeErr(rw, err)
-			return
-		}
-
-		fresh := detector.DetectAll()
-		hub.broadcast(sseEvent{
-			Type:       "sync",
-			Reason:     res.Message,
-			ShouldDiag: true,
-			Snapshot:   &fresh,
-		})
-		writeJSON(rw, http.StatusOK, map[string]any{
-			"ok":       true,
-			"result":   res,
-			"message":  res.Message,
-			"snapshot": fresh,
-		})
-	})
-
-	mux.HandleFunc("/api/launch", func(rw http.ResponseWriter, r *http.Request) {
-		var req struct {
-			TargetID         string `json:"targetId"`
-			RestartIfRunning bool   `json:"restartIfRunning"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeErr(rw, err)
-			return
-		}
-		snap := detector.DetectAll()
-		if err := quickSyncAndLaunch(req.TargetID, req.RestartIfRunning); err != nil {
-			writeErr(rw, err)
-			return
-		}
-		writeJSON(rw, http.StatusOK, map[string]any{
-			"ok":      true,
-			"message": fmt.Sprintf("已携带 %s (%s) 代理参数免 TUN 启动 %s", snap.ActiveClient.Name, snap.ActiveClient.ProxyURL, strings.ToUpper(req.TargetID[:1])+req.TargetID[1:]),
-		})
-	})
-
-	mux.HandleFunc("/api/shortcut", func(rw http.ResponseWriter, r *http.Request) {
-		var req struct {
-			TargetID string `json:"targetId"`
-		}
-		_ = json.NewDecoder(r.Body).Decode(&req)
-		snap := detector.DetectAll()
-		var exePath, title string
-		for _, t := range snap.Targets {
-			if t.ID == req.TargetID {
-				exePath = t.ExePath
-				break
-			}
-		}
-		if req.TargetID == "cursor" {
-			title = "Cursor (免TUN代理)"
-		} else if req.TargetID == "antigravity" {
-			title = "Antigravity (免TUN代理)"
-		} else if req.TargetID == "codex" {
-			title = "Codex (免TUN代理)"
-		} else {
-			writeErr(rw, fmt.Errorf("不支持的目标类型"))
-			return
-		}
-		lnk, err := launcher.CreateProxyDesktopShortcut(req.TargetID, title, exePath)
-		if err != nil {
-			writeErr(rw, err)
-			return
-		}
-		writeJSON(rw, http.StatusOK, map[string]any{
-			"ok":      true,
-			"message": "已在桌面生成快捷方式: " + filepath.Base(lnk),
-		})
-	})
-
+	mux.HandleFunc("/api/events", handleEvents(hub))
+	mux.HandleFunc("/api/snapshot", handleSnapshot)
+	mux.HandleFunc("/api/optimize-node", handleOptimizeNode(hub))
+	mux.HandleFunc("/api/launch", handleLaunch)
+	mux.HandleFunc("/api/shortcut", handleShortcut)
 	mux.HandleFunc("/api/open-backups", handleOpenBackups)
 	mux.HandleFunc("/api/open-path", handleOpenPath)
-
-	mux.HandleFunc("/api/browse-exe", func(rw http.ResponseWriter, r *http.Request) {
-		p := openFileDialogExe()
-		writeJSON(rw, http.StatusOK, map[string]any{"path": p})
-	})
-
+	mux.HandleFunc("/api/browse-exe", handleBrowseExe)
 	mux.HandleFunc("/api/save-config", handleSaveConfig)
-
-	mux.HandleFunc("/api/version", func(rw http.ResponseWriter, r *http.Request) {
-		writeJSON(rw, http.StatusOK, map[string]any{
-			"version":     appVersion,
-			"repoUrl":     appUpdater.RepoURL(),
-			"releasesUrl": appUpdater.ReleasesURL(),
-		})
-	})
-
+	mux.HandleFunc("/api/version", handleVersion(appUpdater))
 	mux.HandleFunc("/api/open-url", handleOpenURL)
 
 	mux.HandleFunc("/api/update/check", func(rw http.ResponseWriter, r *http.Request) {
