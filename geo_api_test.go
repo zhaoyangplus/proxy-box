@@ -226,6 +226,59 @@ func TestBypassCNRollsBackWhenPreflightFails(t *testing.T) {
 	}
 }
 
+func TestStalePreflightDoesNotDropReplacementFiles(t *testing.T) {
+	rt, fc := newGeoRuntime(t)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	finished := make(chan struct{})
+	var once sync.Once
+	t.Cleanup(func() { once.Do(func() { close(release) }) })
+	var calls atomic.Int32
+	var downloads atomic.Int32
+	var reloads atomic.Int32
+	fc.onReload = func() { reloads.Add(1) }
+	rt.downloadGeo = func(ctx context.Context, dir, proxy string, on core.ProgressFunc) error {
+		err := writeReadyGeo(dir)
+		downloads.Add(1)
+		return err
+	}
+	rt.preflightGeo = func(context.Context, string, string, string) error {
+		if calls.Add(1) == 1 {
+			close(started)
+			<-release
+			close(finished)
+			return core.ErrGeoPreflight
+		}
+		return nil
+	}
+	if rec := postJSON(rt.handleBypassCN, `{"enable":true}`); rec.Code != 200 {
+		t.Fatalf("body %s", rec.Body.String())
+	}
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("preflight did not start")
+	}
+	if rec := postJSON(rt.handleBypassCN, `{"enable":true,"retry":true}`); rec.Code != 200 {
+		t.Fatalf("retry %s", rec.Body.String())
+	}
+	waitGeo(t, func() bool { return downloads.Load() >= 2 })
+	once.Do(func() { close(release) })
+	select {
+	case <-finished:
+	case <-time.After(2 * time.Second):
+		t.Fatal("stale preflight did not return")
+	}
+	waitGeo(t, func() bool { return reloads.Load() >= 1 })
+	body, err := rt.coreStatusResponse()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !body.GeoReady || body.GeoError != "" || !body.Settings.BypassCN || !core.GeoFilesReady(rt.coreDir) {
+		t.Fatalf("status %+v files %v", body, core.GeoFilesReady(rt.coreDir))
+	}
+}
+
 func TestDownloadFailureLeavesGeoFilesReady(t *testing.T) {
 	rt, _ := newGeoRuntime(t)
 	rt.downloadGeo = func(ctx context.Context, dir, proxy string, on core.ProgressFunc) error {

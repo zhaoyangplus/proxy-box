@@ -153,7 +153,7 @@ func (a *appRuntime) runGeo(ctx context.Context, gen int) {
 		a.failGeo(gen, err)
 		return
 	}
-	a.clearGeoUntrusted()
+	a.clearGeoUntrusted(gen)
 	g := a.geoCtl()
 	g.mu.Lock()
 	apply := g.apply && g.gen == gen
@@ -195,7 +195,7 @@ func (a *appRuntime) applyBypass(ctx context.Context, gen int) error {
 		return err
 	}
 	if err := a.callPreflight(ctx, a.core.Status().BinaryPath, body); err != nil {
-		a.markGeoUntrusted()
+		a.markGeoUntrusted(gen)
 		return a.failApply(ctx, gen, err)
 	}
 	if gen != 0 && !a.geoCurrent(gen) {
@@ -330,22 +330,27 @@ func (a *appRuntime) clearGeoError() {
 	a.storeGeoError(0, "")
 }
 
-func (a *appRuntime) clearGeoUntrusted() {
+func (a *appRuntime) clearGeoUntrusted(gen int) {
 	g := a.geoCtl()
 	g.mu.Lock()
+	defer g.mu.Unlock()
+	if gen != 0 && g.gen != gen {
+		return
+	}
 	g.untrusted = false
 	g.badStamp = geoFileStamp{}
-	g.mu.Unlock()
 }
 
-func (a *appRuntime) markGeoUntrusted() {
-	removeGeoFiles(a.coreDir)
-	stamp := currentGeoStamp(a.coreDir)
+func (a *appRuntime) markGeoUntrusted(gen int) {
 	g := a.geoCtl()
 	g.mu.Lock()
+	defer g.mu.Unlock()
+	if gen != 0 && g.gen != gen {
+		return
+	}
+	removeGeoFiles(a.coreDir)
 	g.untrusted = true
-	g.badStamp = stamp
-	g.mu.Unlock()
+	g.badStamp = currentGeoStamp(a.coreDir)
 }
 
 func (a *appRuntime) failGeo(gen int, err error) {
