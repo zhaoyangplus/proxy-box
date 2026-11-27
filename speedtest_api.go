@@ -122,6 +122,34 @@ func (a *appRuntime) broadcastSpeed(p speedtest.Progress) {
 	a.hub.broadcast(sseEvent{Type: "speedtest", Speedtest: &cp})
 }
 
+func (a *appRuntime) speedCache() map[string]speedtest.Result {
+	if a == nil {
+		return nil
+	}
+	a.mu.Lock()
+	runner := a.speed
+	a.mu.Unlock()
+	if runner == nil {
+		return nil
+	}
+	return runner.Cache()
+}
+
+func mergeSpeedCache(res *mihomo.NodeListResult, cache map[string]speedtest.Result) {
+	if res == nil || len(cache) == 0 {
+		return
+	}
+	for i := range res.Nodes {
+		item, ok := cache[res.Nodes[i].Name]
+		if !ok {
+			continue
+		}
+		res.Nodes[i].SpeedMBps = item.SpeedMBps
+		res.Nodes[i].SpeedTested = true
+		res.Nodes[i].SpeedError = item.Error
+	}
+}
+
 func (a *appRuntime) speedProxyURL() (string, error) {
 	if a == nil || a.core == nil || !a.core.Status().Running {
 		return "", errors.New("内核未运行")

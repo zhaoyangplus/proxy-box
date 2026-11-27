@@ -15,6 +15,7 @@ import (
 	"proxy-box/internal/configstore"
 	"proxy-box/internal/core"
 	"proxy-box/internal/detector"
+	"proxy-box/internal/mihomo"
 	"proxy-box/internal/speedtest"
 )
 
@@ -313,6 +314,61 @@ func TestEmptySpeedURLTriesBuiltinHosts(t *testing.T) {
 	if !strings.Contains(fx.rt.speed.Cache()["US-1"].Error, "失败") {
 		t.Fatalf("%+v", fx.rt.speed.Cache()["US-1"])
 	}
+}
+
+func TestNodeListKeepsCachedSpeeds(t *testing.T) {
+	fx := newSpeedFixture(t, "mixed", nil, nil)
+	fx.saveURL(t)
+	rec := postJSON(fx.rt.handleSpeedTestStart, `{"nodes":["US-1"]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("%s", rec.Body.String())
+	}
+	waitSpeed(t, fx.rt)
+	first := listedSpeed(t, fx, "US-1")
+	if !first.SpeedTested || first.SpeedMBps <= 0 || first.SpeedError != "" {
+		t.Fatalf("%+v", first)
+	}
+	dead := listedSpeed(t, fx, "DEAD")
+	if dead.SpeedTested || dead.SpeedMBps != 0 || dead.SpeedError != "" {
+		t.Fatalf("dead %+v", dead)
+	}
+	second := listedSpeed(t, fx, "US-1")
+	if second.SpeedMBps != first.SpeedMBps || !second.SpeedTested {
+		t.Fatalf("refresh %+v want %+v", second, first)
+	}
+
+	failed := newSpeedFixture(t, "mixed", nil, func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "no", http.StatusNotFound)
+	})
+	failed.saveURL(t)
+	rec = postJSON(failed.rt.handleSpeedTestStart, `{"nodes":["US-1"]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("%s", rec.Body.String())
+	}
+	waitSpeed(t, failed.rt)
+	got := listedSpeed(t, failed, "US-1")
+	if !got.SpeedTested || got.SpeedMBps != 0 || !strings.Contains(got.SpeedError, "失败") {
+		t.Fatalf("%+v", got)
+	}
+}
+
+func listedSpeed(t *testing.T, fx *speedFixture, name string) mihomo.NodeOption {
+	t.Helper()
+	rec := postJSON(fx.rt.handleNodesList, `{"group":"PROXY"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("%s", rec.Body.String())
+	}
+	var res mihomo.NodeListResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+		t.Fatal(err)
+	}
+	for _, node := range res.Nodes {
+		if node.Name == name {
+			return node
+		}
+	}
+	t.Fatalf("missing %s in %s", name, rec.Body.String())
+	return mihomo.NodeOption{}
 }
 
 func TestCoreStopHaltsSpeedBeforeRestore(t *testing.T) {

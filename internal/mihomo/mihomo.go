@@ -79,6 +79,10 @@ type NodeOption struct {
 	ResolvedTo string `json:"resolvedTo,omitempty"`
 	Provider   string `json:"provider,omitempty"`
 	Untested   bool   `json:"untested"`
+	// Speed fields are copied from the speedtest cache by the HTTP API.
+	SpeedMBps   float64 `json:"speedMBps,omitempty"`
+	SpeedTested bool    `json:"speedTested,omitempty"`
+	SpeedError  string  `json:"speedError,omitempty"`
 }
 
 // NodeListResult is returned to the UI's independent node picker modal.

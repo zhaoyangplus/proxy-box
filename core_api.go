@@ -786,6 +786,7 @@ func (a *appRuntime) handleNodesList(rw http.ResponseWriter, r *http.Request) {
 		writeUserErr(rw, err)
 		return
 	}
+	mergeSpeedCache(res, a.speedCache())
 	writeJSON(rw, http.StatusOK, res)
 }
 
