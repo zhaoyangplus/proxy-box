@@ -6,6 +6,7 @@
 
   var cardRef = null;
   var view = L.loading();
+  var updateTimer = 0;
 
   function box() {
     if (!cardRef || cardRef.isConnected === false) return null;
@@ -50,6 +51,30 @@
     });
   }
 
+  function watchUpdate(polling) {
+    if (!polling) {
+      if (updateTimer) clearInterval(updateTimer);
+      updateTimer = 0;
+      return;
+    }
+    if (updateTimer) return;
+    updateTimer = setInterval(function () { pullUpdate(); }, 1500);
+  }
+
+  function ingestUpdate(progress) {
+    var outcome = L.reconcileUpdate(view, progress || {});
+    watchUpdate(outcome.polling);
+    if (!outcome.changed) return;
+    view = outcome.view;
+    paint();
+  }
+
+  function pullUpdate() {
+    return PB.api("GET", "/api/update/status").then(function (data) {
+      ingestUpdate(data || {});
+    }).catch(function () {});
+  }
+
   function apply() {
     var payload = {
       downloadUrl: view.downloadUrl || "",
@@ -64,8 +89,10 @@
       totalBytes: payload.assetSize
     });
     paint();
+    watchUpdate(true);
     PB.api("POST", "/api/update/apply", payload).catch(function (err) {
       view = L.fromError((err && err.message) || "下载失败");
+      watchUpdate(false);
       paint();
     });
   }
@@ -92,6 +119,11 @@
       body: '<div id="upd"></div>',
       onMount: function (card) {
         cardRef = card;
+        if (view && view.kind === "progress") {
+          paint();
+          pullUpdate();
+          return;
+        }
         view = L.loading();
         paint();
         check();
@@ -100,8 +132,10 @@
   };
 
   PB.on("update", function (msg) {
-    if (!box()) return;
-    view = L.fromProgress(view, (msg && msg.update) || {});
-    paint();
+    ingestUpdate((msg && msg.update) || {});
+  });
+
+  PB.on("reconnect", function () {
+    if (view && view.kind === "progress") pullUpdate();
   });
 })();

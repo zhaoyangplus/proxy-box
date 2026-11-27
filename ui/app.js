@@ -22,6 +22,7 @@
    PB.setBadge(key, text, cls?) / PB.setChannel("daily"|"ai")
    PB.topbar(cfg) / PB.setActions(value) / PB.setAcc(value)
    PB.theme.get() / PB.theme.set(pref) / PB.theme.resolved()
+   PB.glass.get() / PB.glass.set(level)
    PB.refreshCore() / PB.refreshSnapshot() -> Promise
    PB.state is one object: core, snapshot, version, releasesUrl, update, phase
    PB.openUpdate is assigned later by update.js. The shell calls it when present.
@@ -53,7 +54,9 @@
     version: "",
     releasesUrl: "",
     update: null,
-    phase: "stopped"
+    phase: "stopped",
+    holdDownload: false,
+    cancelStart: false
   };
   var es = null;
   var retryMs = 1000;
@@ -604,7 +607,7 @@
     if (current === id && !opt.force) return;
     var prev = current;
     if (prev && tabs[prev] && typeof tabs[prev].leave === "function") {
-      if (tabs[prev].leave() === false && !opt.force) return;
+      if (tabs[prev].leave(id, opt) === false && !opt.force) return;
     }
     closeMenu(true);
     closeSheet();
@@ -664,10 +667,22 @@
     }
   }
 
+  function phaseFlags() {
+    return {
+      phase: state.phase,
+      holdDownload: !!state.holdDownload,
+      cancelRequested: !!state.cancelStart
+    };
+  }
+
   function publishCore(status) {
     state.core = status || null;
-    if (status && status.running) state.phase = "running";
-    else if (state.phase !== "download" && state.phase !== "error" && state.phase !== "geo") state.phase = "stopped";
+    var logic = globalThis.PBOverview;
+    var input = phaseFlags();
+    input.running = !!(status && status.running);
+    state.phase = logic && typeof logic.nextCorePhase === "function"
+      ? logic.nextCorePhase(input)
+      : (input.running ? "running" : (input.holdDownload && !input.cancelRequested && input.phase === "download" ? "download" : (input.phase === "error" || input.phase === "geo" ? input.phase : "stopped")));
     paintSide();
     eachTab("onCore", status || null);
   }
@@ -679,6 +694,16 @@
     });
   }
 
+  var snapshotTimer = 0;
+
+  function scheduleSnapshot() {
+    if (snapshotTimer) return;
+    snapshotTimer = setTimeout(function () {
+      snapshotTimer = 0;
+      refreshSnapshot().catch(function () {});
+    }, 160);
+  }
+
   function refreshSnapshot() {
     return api("GET", "/api/snapshot").then(function (snap) {
       state.snapshot = snap || null;
@@ -687,7 +712,12 @@
   }
 
   function applyCoreEvent(core) {
-    if (core && core.phase) state.phase = core.phase;
+    if (core && core.phase) {
+      var logic = globalThis.PBOverview;
+      state.phase = logic && typeof logic.applyCorePhase === "function"
+        ? logic.applyCorePhase(phaseFlags(), core)
+        : core.phase;
+    }
     paintSide();
     if (core && (core.phase === "running" || core.phase === "stopped")) refreshCore().catch(function () {});
   }
@@ -697,7 +727,7 @@
     if (msg.type === "core" && msg.core) applyCoreEvent(msg.core);
     if (msg.type === "sync") {
       if (msg.snapshot) state.snapshot = msg.snapshot;
-      else refreshSnapshot().catch(function () {});
+      else scheduleSnapshot();
     }
     if (msg.type === "open_update" && typeof PB.openUpdate === "function") PB.openUpdate();
     emit(msg.type, msg);
@@ -719,6 +749,7 @@
       if (again) {
         refreshCore().catch(function () {});
         refreshSnapshot().catch(function () {});
+        emit("reconnect", {});
       }
     };
     es.onmessage = function (ev) {
@@ -793,6 +824,16 @@
     setTimeout(function () { document.documentElement.classList.remove("theming"); }, 420);
     var seg = $("stTheme");
     if (seg) segSet(seg, next);
+  }
+
+  function glassGet() {
+    return U.glassFromStorage(window.localStorage);
+  }
+
+  function glassSet(n) {
+    var level = U.glassFromStorage({ getItem: function () { return n == null ? null : String(n); } });
+    try { window.localStorage.setItem(U.GLASS_KEY, String(level)); } catch (err) {}
+    document.documentElement.style.setProperty("--glass-alpha", U.glassAlpha(level));
   }
 
   function onKey(event) {
@@ -944,6 +985,10 @@
       set: themeSet,
       resolved: function () { return themeView().resolved; }
     },
+    glass: {
+      get: glassGet,
+      set: glassSet
+    },
     refreshCore: refreshCore,
     refreshSnapshot: refreshSnapshot,
     state: state,
@@ -955,6 +1000,7 @@
   document.addEventListener("DOMContentLoaded", function () {
     bindShell();
     applyTheme();
+    document.documentElement.style.setProperty("--glass-alpha", U.glassAlpha(glassGet()));
     goTab("overview", { initial: true });
     connectEvents();
     refreshCore().catch(function () {});

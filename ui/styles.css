@@ -18,8 +18,11 @@
     radial-gradient(820px 600px at 106% -4%, rgba(88, 110, 255, 0.16), transparent 60%),
     radial-gradient(760px 520px at 62% 112%, rgba(175, 82, 222, 0.10), transparent 60%);
 
-  --glass-bg: rgba(255, 255, 255, 0.58);
-  --glass-bg-strong: rgba(250, 250, 252, 0.84);
+  --glass-rgb: 255, 255, 255;
+  --glass-alpha: 0.42;
+  --glass-alpha-strong: min(0.92, calc(var(--glass-alpha) + 0.28));
+  --glass-bg: rgba(var(--glass-rgb), var(--glass-alpha));
+  --glass-bg-strong: rgba(var(--glass-rgb), var(--glass-alpha-strong));
   --glass-edge: rgba(255, 255, 255, 0.72);
   --glass-hi: rgba(255, 255, 255, 0.95);
   --glass-lo: rgba(255, 255, 255, 0.35);
@@ -64,8 +67,7 @@
     radial-gradient(900px 620px at -6% -12%, rgba(48, 209, 88, 0.13), transparent 62%),
     radial-gradient(820px 600px at 106% -4%, rgba(94, 92, 230, 0.18), transparent 60%),
     radial-gradient(760px 520px at 62% 112%, rgba(191, 90, 242, 0.10), transparent 60%);
-  --glass-bg: rgba(40, 42, 50, 0.52);
-  --glass-bg-strong: rgba(34, 36, 44, 0.86);
+  --glass-rgb: 40, 42, 50;
   --glass-edge: rgba(255, 255, 255, 0.10);
   --glass-hi: rgba(255, 255, 255, 0.14);
   --glass-lo: rgba(255, 255, 255, 0.04);
@@ -129,21 +131,23 @@ b { font-weight: 600; }
 
 /* ---------- Liquid Glass 材质 ---------- */
 .glass {
+  isolation: isolate;
   background: var(--glass-bg);
   border: 1px solid var(--glass-edge);
   box-shadow: var(--glass-shadow), inset 0 1px 0 var(--glass-hi), inset 0 -1px 0 var(--glass-lo);
 }
 .glass::before {
-  content: ""; position: absolute; inset: 0; border-radius: inherit; pointer-events: none; z-index: -1;
+  content: ""; position: absolute; z-index: 0; inset: 0; border-radius: inherit; pointer-events: none;
   background: linear-gradient(180deg, var(--glass-sheen) 0%, transparent 42%);
 }
+.glass > * { position: relative; z-index: 1; }
 .side,
 .topbar,
 .pop,
 .sheet,
 .toast {
-  -webkit-backdrop-filter: blur(24px) saturate(180%);
-  backdrop-filter: blur(24px) saturate(180%);
+  -webkit-backdrop-filter: blur(40px) saturate(190%);
+  backdrop-filter: blur(40px) saturate(190%);
 }
 
 
@@ -347,6 +351,9 @@ input[type=number]::-webkit-inner-spin-button { opacity: .5; }
 .row-err { font-size: 11.5px; color: var(--red-text); margin-top: 2px; }
 .row .chev { color: var(--label-3); }
 .row.stack { flex-direction: column; align-items: stretch; gap: 6px; padding: 12px 16px; }
+.glass-ctl { display: flex; align-items: center; gap: 8px; flex: none; }
+.glass-range { width: 132px; height: 28px; margin: 0; accent-color: var(--blue); cursor: pointer; }
+.glass-val { min-width: 1.75em; font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; text-align: right; }
 
 /* ---------- 总览 ---------- */
 .ov { display: grid; gap: 14px; }
@@ -400,7 +407,7 @@ input[type=number]::-webkit-inner-spin-button { opacity: .5; }
 .nd-card:hover { transform: translateY(-1px); box-shadow: var(--card-shadow-hover); }
 .nd-card:active { transform: scale(.985); transition-duration: .12s; }
 .nd-card.is-sel { border-color: transparent; background: linear-gradient(var(--tint-wash), var(--tint-wash)), var(--surface);
-  box-shadow: 0 0 0 1.5px var(--tint), 0 8px 22px -6px color-mix(in srgb, var(--tint) 30%, transparent); }
+  box-shadow: inset 0 0 0 1.5px var(--tint); }
 .nd-top { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .nd-name { flex: 1; min-width: 0; font-size: 13.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .nd-check { width: 20px; height: 20px; border-radius: 50%; flex: none; display: grid; place-items: center; background: var(--tint); color: #fff; animation: pop .5s var(--spring); }

@@ -34,6 +34,16 @@ type coreEvent struct {
 	Message    string `json:"message,omitempty"`
 }
 
+// Locking:
+//
+// mu guards cancelStart and the speed runner pointer.
+// shutdownMu guards system-proxy enable/restore and Shutdown's restore-then-stop section.
+// opMu guards core configuration: mode switches, reloads, subscription list edits, and app switches that reload the core.
+//
+// Lock order is opMu, then shutdownMu. Never take opMu while holding shutdownMu. mu is independent.
+// Binary download, subscription download, controller network checks, and delay tests run outside opMu.
+// reloadLive is the one load-settings, copy-live-mode, Reload sequence. Callers hold opMu.
+
 type appRuntime struct {
 	hub          *sseHub
 	core         coreController
@@ -62,9 +72,10 @@ type appRuntime struct {
 
 func newAppRuntime(hub *sseHub) *appRuntime {
 	dir := filepath.Join(os.Getenv("LOCALAPPDATA"), "ProxyBox", "core")
-	return &appRuntime{
+	mgr := core.NewManager(dir)
+	a := &appRuntime{
 		hub:          hub,
-		core:         core.NewManager(dir),
+		core:         mgr,
 		coreDir:      dir,
 		restore:      sysproxy.Restore,
 		setProxy:     sysproxy.Set,
@@ -72,6 +83,35 @@ func newAppRuntime(hub *sseHub) *appRuntime {
 		importBinary: core.ImportBinary,
 		flight:       newSubFlight(),
 	}
+	mgr.SetExitHook(a.handleCoreExit)
+	return a
+}
+
+// handleCoreExit runs after mihomo exits by itself. A deliberate Stop does not call it.
+func (a *appRuntime) handleCoreExit() {
+	if a == nil {
+		return
+	}
+	if a.restore != nil {
+		_ = a.restore()
+	}
+	_ = configstore.UpdateCoreSettings(func(settings *configstore.CoreSettings) error {
+		settings.SystemProxy = false
+		return nil
+	})
+	a.broadcastCore("error", "内核意外退出，已还原系统代理", 0, 0)
+	a.invalidateTrayState()
+}
+
+func bindCoreExit(a *appRuntime) {
+	if a == nil || a.core == nil {
+		return
+	}
+	hook, ok := a.core.(interface{ SetExitHook(func()) })
+	if !ok {
+		return
+	}
+	hook.SetExitHook(a.handleCoreExit)
 }
 
 // Shutdown stops a download test, cancels geo work, restores the system proxy, and then stops the core.
@@ -104,23 +144,23 @@ func (a *appRuntime) Shutdown() {
 func (a *appRuntime) bootCore() {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
-	if _, err := a.StartEnabled(ctx); err != nil {
+	if _, _, err := a.StartEnabled(ctx); err != nil {
 		a.broadcastCore("error", startFailure(err), 0, 0)
 	}
 }
 
-func (a *appRuntime) StartEnabled(ctx context.Context) (core.Status, error) {
+func (a *appRuntime) StartEnabled(ctx context.Context) (core.Status, string, error) {
 	settings, err := configstore.LoadCoreSettings()
 	if err != nil {
-		return core.Status{}, err
+		return core.Status{}, "", err
 	}
 	if !settings.Enabled {
-		return core.Status{}, nil
+		return core.Status{}, "", nil
 	}
 	return a.startCore(ctx, settings)
 }
 
-func (a *appRuntime) startCore(ctx context.Context, settings configstore.CoreSettings) (core.Status, error) {
+func (a *appRuntime) startCore(ctx context.Context, settings configstore.CoreSettings) (core.Status, string, error) {
 	runCtx, cancel := a.replaceStart(ctx)
 	defer cancel()
 
@@ -129,25 +169,24 @@ func (a *appRuntime) startCore(ctx context.Context, settings configstore.CoreSet
 		a.broadcastCore("download", "正在下载内核", downloaded, total)
 	})
 	if err != nil {
-		return core.Status{}, err
+		return core.Status{}, "", err
 	}
 	if err := runCtx.Err(); err != nil {
-		return core.Status{}, err
+		return core.Status{}, "", err
 	}
 	subs, err := configstore.LoadSubscriptions()
 	if err != nil {
-		return core.Status{}, err
+		return core.Status{}, "", err
 	}
-
-	a.opMu.Lock()
-	defer a.opMu.Unlock()
 	if err := runCtx.Err(); err != nil {
-		return core.Status{}, err
+		return core.Status{}, "", err
 	}
 	st, err := a.core.Start(runCtx, path, a.coreParams(settings), providerSpecs(subs))
 	if err != nil {
-		return core.Status{}, err
+		return core.Status{}, "", err
 	}
+	a.opMu.Lock()
+	defer a.opMu.Unlock()
 	settings.Enabled = true
 	settings.MixedPort = st.Ports.Mixed
 	settings.ControllerPort = st.Ports.Controller
@@ -156,20 +195,26 @@ func (a *appRuntime) startCore(ctx context.Context, settings configstore.CoreSet
 	if st.Mode != "" {
 		settings.Mode = st.Mode
 	}
+	var warns []string
 	if err := configstore.SaveCoreSettings(settings); err != nil {
-		return st, err
+		warns = append(warns, "内核已启动，但保存设置失败")
 	}
 	if err := a.applyEnabledTargetsLocked(st.Ports.AIDedicated); err != nil {
-		return st, err
+		warns = append(warns, "内核已启动，但应用代理未能生效")
 	}
 	a.kickGeoDownload()
 	if settings.SystemProxy {
 		if err := a.enableSystemProxy(runCtx, st.Ports.Mixed); err != nil {
-			return st, err
+			warns = append(warns, "内核已启动，但系统代理未能开启")
 		}
 	}
-	a.broadcastCore("running", "内核已启动", 0, 0)
-	return st, nil
+	warn := strings.Join(warns, "；")
+	msg := "内核已启动"
+	if warn != "" {
+		msg = warn
+	}
+	a.broadcastCore("running", msg, 0, 0)
+	return st, warn, nil
 }
 
 func (a *appRuntime) replaceStart(parent context.Context) (context.Context, context.CancelFunc) {
@@ -214,6 +259,76 @@ func (a *appRuntime) snapshot() detector.SystemSnapshot {
 		return a.detect()
 	}
 	return detector.DetectAll()
+}
+
+// reloadLive loads settings, copies the running core mode, applies mutate, and reloads when the core is running.
+// A nil mutate does not save settings. A non-nil mutate saves before the reload.
+// The caller holds opMu.
+func (a *appRuntime) reloadLive(ctx context.Context, mutate func(*configstore.CoreSettings) error) error {
+	settings, err := configstore.LoadCoreSettings()
+	if err != nil {
+		return err
+	}
+	if a != nil && a.core != nil {
+		if mode := strings.TrimSpace(a.core.Status().Mode); mode != "" {
+			settings.Mode = mode
+		}
+	}
+	if mutate != nil {
+		if err := mutate(&settings); err != nil {
+			return err
+		}
+		if err := configstore.SaveCoreSettings(settings); err != nil {
+			return err
+		}
+	}
+	if a == nil || a.core == nil || !a.core.Status().Running {
+		return nil
+	}
+	subs, err := configstore.LoadSubscriptions()
+	if err != nil {
+		return err
+	}
+	if err := a.core.Reload(ctx, a.coreParams(settings), providerSpecs(subs)); err != nil {
+		return err
+	}
+	a.kickGeoDownload()
+	return nil
+}
+
+// noteProviderCounts asks the controller for provider sizes outside opMu, then merges those counts onto the current list.
+func (a *appRuntime) noteProviderCounts(ctx context.Context) {
+	if a == nil || a.core == nil || !a.core.Status().Running {
+		return
+	}
+	st := a.core.Status()
+	settings, err := configstore.LoadCoreSettings()
+	if err != nil {
+		return
+	}
+	counts, err := providerNodeCounts(ctx, st.Ports.Controller, settings.Secret)
+	if err != nil {
+		return
+	}
+	a.opMu.Lock()
+	defer a.opMu.Unlock()
+	subs, err := configstore.LoadSubscriptions()
+	if err != nil {
+		return
+	}
+	changed := false
+	for i := range subs {
+		n, ok := counts[subs[i].ID]
+		if !ok || subs[i].NodeCount == n {
+			continue
+		}
+		subs[i].NodeCount = n
+		changed = true
+	}
+	if !changed {
+		return
+	}
+	_ = configstore.SaveSubscriptions(subs)
 }
 
 func (a *appRuntime) coreMode() string {
@@ -262,6 +377,7 @@ func (a *appRuntime) coreParams(settings configstore.CoreSettings) core.ConfigPa
 	if a != nil {
 		dir = a.coreDir
 	}
+	cfg, _ := configstore.LoadConfig()
 	return core.ConfigParams{
 		MixedPort:       settings.MixedPort,
 		ControllerPort:  settings.ControllerPort,
@@ -271,7 +387,7 @@ func (a *appRuntime) coreParams(settings configstore.CoreSettings) core.ConfigPa
 		Mode:            settings.Mode,
 		BypassCN:        settings.BypassCN,
 		GeoReady:        core.GeoFilesReady(dir),
-		EnabledAIApps:   configstore.LoadConfig().EnabledAppIDs(),
+		EnabledAIApps:   cfg.EnabledAppIDs(),
 	}
 }
 

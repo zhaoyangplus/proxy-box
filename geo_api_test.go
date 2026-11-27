@@ -85,7 +85,10 @@ func TestBypassCNDownloadsThenApplies(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("body %s", rec.Body.String())
 	}
-	waitGeo(t, func() bool { return n.Load() >= 1 })
+	waitGeo(t, func() bool {
+		ready, busy, geoErr := rt.geoView()
+		return n.Load() >= 1 && ready && !busy && geoErr == ""
+	})
 	settings, err := configstore.LoadCoreSettings()
 	if err != nil {
 		t.Fatal(err)
@@ -213,7 +216,11 @@ func TestBypassCNRollsBackWhenPreflightFails(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("retry %s", rec.Body.String())
 	}
-	waitGeo(t, func() bool { return n.Load() >= 2 && downloads.Load() >= 1 })
+	waitGeo(t, func() bool {
+		ready, busy, geoErr := rt.geoView()
+		settings, err := configstore.LoadCoreSettings()
+		return err == nil && n.Load() >= 2 && downloads.Load() >= 1 && ready && !busy && geoErr == "" && settings.BypassCN
+	})
 	if downloads.Load() != 1 {
 		t.Fatalf("retry downloads %d", downloads.Load())
 	}
@@ -297,8 +304,8 @@ func TestDownloadFailureLeavesGeoFilesReady(t *testing.T) {
 		t.Fatalf("body %s", rec.Body.String())
 	}
 	waitGeo(t, func() bool {
-		_, _, geoErr := rt.geoView()
-		return strings.Contains(geoErr, "地理数据下载失败")
+		_, busy, geoErr := rt.geoView()
+		return !busy && strings.Contains(geoErr, "地理数据下载失败")
 	})
 	ready, busy, geoErr := rt.geoView()
 	settings, err := configstore.LoadCoreSettings()
@@ -455,7 +462,7 @@ func TestStartWithBypassCNKicksDownloadOnceNodesExist(t *testing.T) {
 	settings.Enabled = true
 	settings.BypassCN = true
 	settings.SystemProxy = false
-	if _, err := rt.startCore(context.Background(), settings); err != nil {
+	if _, _, err := rt.startCore(context.Background(), settings); err != nil {
 		t.Fatal(err)
 	}
 	if fc.started.GeoReady || !fc.started.BypassCN {

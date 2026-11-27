@@ -34,8 +34,12 @@ func publicErr(err error) string {
 	}
 	var syntax *json.SyntaxError
 	var typeErr *json.UnmarshalTypeError
+	var invalidMode *core.InvalidModeError
 	if errors.As(err, &syntax) || errors.As(err, &typeErr) {
 		return "请求格式不正确"
+	}
+	if errors.As(err, &invalidMode) {
+		return "模式只能是 rule、global 或 direct"
 	}
 	msg := err.Error()
 	switch {
@@ -63,7 +67,7 @@ func publicErr(err error) string {
 		return "混合端口、控制端口和 AI 端口不能相同"
 	case strings.Contains(msg, "no free port"), strings.Contains(msg, "out of range"):
 		return "没有可用端口"
-	case strings.Contains(msg, "mode is empty"), strings.Contains(msg, "mode "):
+	case msg == "mode is empty", strings.HasPrefix(msg, "mode \""):
 		return "模式只能是 rule、global 或 direct"
 	case strings.Contains(msg, "want .exe or .zip"):
 		return "请选择 mihomo.exe 或 zip 压缩包"

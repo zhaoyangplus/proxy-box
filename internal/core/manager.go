@@ -66,6 +66,7 @@ type Manager struct {
 	version    string
 	configPath string
 	binaryPath string
+	onExit     func()
 }
 
 // NewManager prepares a manager for coreDir. The directory is created on Start.
@@ -180,6 +181,17 @@ func (m *Manager) Start(ctx context.Context, binaryPath string, params ConfigPar
 	return st, nil
 }
 
+// SetExitHook runs once when the child for the current generation exits by itself.
+// Stop does not run it. A nil hook clears the previous one.
+func (m *Manager) SetExitHook(fn func()) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	m.onExit = fn
+	m.mu.Unlock()
+}
+
 // watchDone releases this generation's run after its child exits on its own.
 func (m *Manager) watchDone(gen int, r *running) {
 	if r == nil || r.done == nil {
@@ -187,14 +199,19 @@ func (m *Manager) watchDone(gen int, r *running) {
 	}
 	<-r.done
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if m.generation != gen || m.run != r || m.phase != phaseRunning {
+		m.mu.Unlock()
 		return
 	}
 	m.run = nil
 	m.phase = phaseStopped
 	m.generation++
+	hook := m.onExit
+	m.mu.Unlock()
 	cleanupRun(r)
+	if hook != nil {
+		hook()
+	}
 }
 
 // Stop kills the child and closes the job. It is safe to call more than once.

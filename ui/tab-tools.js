@@ -6,6 +6,8 @@
   var rootEl = null;
   var pending = null;
   var seenPort = null;
+  var lastSig = "";
+  var lastTargets = null;
 
   function rawTargets() {
     var snap = PB.state.snapshot;
@@ -29,7 +31,43 @@
   function show() {
     paintBadge();
     if (!rootEl || PB.current() !== "tools") return;
-    rootEl.innerHTML = L.pageHTML(viewTargets(), { port: port(), busyId: pending ? pending.id : "" });
+    var targets = viewTargets();
+    var busyId = pending ? pending.id : "";
+    var sig = L.toolsSignature(targets, port(), busyId);
+    if (sig === lastSig && rootEl.querySelector && rootEl.querySelector(".tools")) return;
+    var changed = lastTargets ? L.diffTargets(lastTargets, targets, port(), busyId) : L.ORDER.slice();
+    if (lastSig && changed.length && changed.length < L.ORDER.length && rootEl.querySelector && rootEl.querySelector(".tool")) {
+      var missed = false;
+      for (var i = 0; i < changed.length; i++) if (!replaceTool(changed[i], targets, busyId)) missed = true;
+      if (!missed) {
+        lastSig = sig;
+        lastTargets = targets;
+        return;
+      }
+    }
+    rootEl.innerHTML = L.pageHTML(targets, { port: port(), busyId: busyId });
+    lastSig = sig;
+    lastTargets = targets;
+  }
+
+  function replaceTool(id, targets, busyId) {
+    var cards = rootEl.querySelectorAll(".tool");
+    var card = null;
+    for (var i = 0; i < cards.length; i++) if (cards[i].getAttribute("data-tid") === id) card = cards[i];
+    var view = L.orderedTargets(targets);
+    var target = null;
+    for (var n = 0; n < view.length; n++) if (view[n].id === id) target = view[n];
+    if (!card || !target) return false;
+    var focus = typeof document !== "undefined" && document.activeElement && card.contains && card.contains(document.activeElement);
+    card.outerHTML = L.cardHTML(target, port(), busyId);
+    if (focus) {
+      var next = null;
+      var again = rootEl.querySelectorAll(".tool");
+      for (var j = 0; j < again.length; j++) if (again[j].getAttribute("data-tid") === id) next = again[j];
+      var button = next && next.querySelector("[data-act='toggle']");
+      if (button && button.focus) button.focus();
+    }
+    return true;
   }
 
   function targetById(id) {

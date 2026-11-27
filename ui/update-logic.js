@@ -110,6 +110,31 @@
     };
   }
 
+  function sameUpdate(a, b) {
+    if (!a || !b) return false;
+    return a.kind === b.kind && a.status === b.status && a.message === b.message && a.percent === b.percent && a.downloaded === b.downloaded && a.total === b.total && a.latest === b.latest;
+  }
+
+  function reconcileUpdate(view, progress) {
+    progress = progress || {};
+    var status = progress.status || "idle";
+    var active = status === "downloading" || status === "checking" || status === "applying" || status === "restarting";
+    if (status === "error") {
+      var failed = fromError(progress.error || progress.message || "更新失败");
+      return { view: failed, changed: !sameUpdate(view, failed), polling: false };
+    }
+    if (active) {
+      var next = fromProgress(view, progress);
+      next.confirmed = true;
+      var changed = !sameUpdate(view, next) || !(view && view.confirmed);
+      return { view: changed ? next : view, changed: changed, polling: true };
+    }
+    if (view && view.kind === "progress" && view.confirmed) {
+      return { view: fromError(progress.error || progress.message || "更新已中断"), changed: true, polling: false };
+    }
+    return { view: view, changed: false, polling: !!(view && view.kind === "progress") };
+  }
+
   function notesHTML(notes) {
     var lines = String(notes || "").split(/\r?\n/);
     var items = [];
@@ -165,6 +190,7 @@
     fromError: fromError,
     fromCheck: fromCheck,
     fromProgress: fromProgress,
+    reconcileUpdate: reconcileUpdate,
     notesHTML: notesHTML,
     bodyHTML: bodyHTML,
     cssPercent: cssPercent

@@ -122,6 +122,31 @@
       "</div></article>";
   }
 
+  function targetSignature(target, port, busyId) {
+    var view = orderedTargets([target])[0];
+    return [
+      view.id, view.enabledByUser ? 1 : 0, view.running ? 1 : 0, view.installed ? 1 : 0,
+      view.http2Disabled ? 1 : 0, view.terminalEnvConfigured ? 1 : 0, view.settingsPath,
+      view.statusText, busyId === view.id ? 1 : 0, portNumber(port)
+    ].join("\u0001");
+  }
+
+  function toolsSignature(targets, port, busyId) {
+    return orderedTargets(targets).map(function (target) {
+      return targetSignature(target, port, busyId);
+    }).join("\u0002");
+  }
+
+  function diffTargets(prev, next, port, busyId) {
+    var before = orderedTargets(prev);
+    var after = orderedTargets(next);
+    var changed = [];
+    for (var i = 0; i < after.length; i++) {
+      if (targetSignature(before[i], port, busyId) !== targetSignature(after[i], port, busyId)) changed.push(after[i].id);
+    }
+    return changed;
+  }
+
   function pageHTML(targets, state) {
     state = state || {};
     var view = state.pending ? applyEnabled(targets, state.pending.id, state.pending.enabled) : orderedTargets(targets);
@@ -146,6 +171,9 @@
     enabledCount: enabledCount,
     chips: chips,
     pageHTML: pageHTML,
+    cardHTML: cardHTML,
+    toolsSignature: toolsSignature,
+    diffTargets: diffTargets,
     topbarHTML: topbarHTML
   };
 });

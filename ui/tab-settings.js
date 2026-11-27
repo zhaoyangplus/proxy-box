@@ -13,9 +13,9 @@
   var saveBar = null;
   var saveText = null;
   var saveBtn = null;
-  var pendingTab = "";
-  var allowLeave = false;
   var mbSeg = null;
+  var composing = false;
+  var renderedSig = "";
 
   var PORTS = [
     ["mixed", "日常代理端口", "系统代理与浏览器使用", "globe", "var(--green)"],
@@ -82,7 +82,7 @@
   }
 
   function isDirty() {
-    return Object.keys(L.changedFields(baseline, draft)).length > 0;
+    return !L.sameDraft(baseline, draft);
   }
 
   function coreInfo() {
@@ -180,6 +180,27 @@
       { v: "dark", label: "深色" },
       { v: "auto", label: "跟随系统" }
     ], theme, "sm");
+    var glassNow = PB.glass && typeof PB.glass.get === "function" ? PB.glass.get() : 74;
+    var glassVal = h("b", { class: "glass-val", attrs: { id: "stGlassVal" }, text: String(glassNow) });
+    var glassRange = h("input", {
+      class: "glass-range",
+      attrs: {
+        type: "range",
+        min: "0",
+        max: "100",
+        step: "1",
+        value: String(glassNow),
+        id: "stGlass",
+        "aria-label": "玻璃透明度"
+      },
+      on: {
+        input: function () {
+          if (PB.glass && typeof PB.glass.set === "function") PB.glass.set(Number(glassRange.value));
+          var shown = PB.glass && typeof PB.glass.get === "function" ? PB.glass.get() : glassRange.value;
+          glassVal.textContent = String(shown);
+        }
+      }
+    });
     var info = coreInfo();
     var coreSub = info.path ? ((info.version ? info.version + " · " : "") + info.path) : "尚未导入 mihomo.exe";
     var ports = L.portsFrom(PB.state && PB.state.core);
@@ -239,6 +260,7 @@
           refreshBar();
         } }
       });
+      fields[item[0]] = button;
       return h("div", { class: "row" },
         h("div", { class: "row-main" },
           h("div", { class: "row-title", text: item[1] }),
@@ -264,14 +286,24 @@
     add(root,
       h("div", { class: "settings" },
         h("h3", { class: "group-t", text: "外观" }),
-        h("div", { class: "list" }, h("div", { class: "row has-ic" },
-          icon("sun", "#ff9f0a"),
-          h("div", { class: "row-main" },
-            h("div", { class: "row-title", text: "主题" }),
-            h("div", { class: "row-sub", text: "浅色玻璃为默认，深色适合夜间使用" })
+        h("div", { class: "list" },
+          h("div", { class: "row has-ic" },
+            icon("sun", "#ff9f0a"),
+            h("div", { class: "row-main" },
+              h("div", { class: "row-title", text: "主题" }),
+              h("div", { class: "row-sub", text: "浅色玻璃为默认，深色适合夜间使用" })
+            ),
+            themeSeg
           ),
-          themeSeg
-        )),
+          h("div", { class: "row has-ic" },
+            icon("layers", "var(--blue)"),
+            h("div", { class: "row-main" },
+              h("div", { class: "row-title", text: "玻璃透明度" }),
+              h("div", { class: "row-sub", text: "数值越高，侧栏和顶栏越透，背后的颜色越能透出来" })
+            ),
+            h("div", { class: "glass-ctl" }, glassRange, glassVal)
+          )
+        ),
         h("h3", { class: "group-t", text: "内核" }),
         h("div", { class: "list" }, h("div", { class: "row has-ic" },
           icon("bolt", "var(--green)"),
@@ -333,6 +365,66 @@
       refreshBar();
     });
     refreshBar();
+    renderedSig = L.draftSignature(draft);
+    watchCompose(root);
+  }
+
+  function watchCompose(node) {
+    if (!node || node._pbCompose || typeof node.addEventListener !== "function") return;
+    node._pbCompose = true;
+    node.addEventListener("compositionstart", function () { composing = true; });
+    node.addEventListener("compositionend", function () { composing = false; });
+    node.addEventListener("focusout", function () {
+      if (composing) return;
+      L.KEYS.forEach(paintField);
+      refreshBar();
+    });
+  }
+
+  function formHeld() {
+    if (isDirty() || composing) return true;
+    if (typeof document === "undefined" || !root || typeof root.contains !== "function") return false;
+    var active = document.activeElement;
+    if (!active || active === document.body) return false;
+    return root.contains(active);
+  }
+
+  function paintField(key) {
+    if (key === "speedTestMaxMB") {
+      if (!mbSeg || typeof PB.segSet !== "function") return;
+      var active = typeof document !== "undefined" ? document.activeElement : null;
+      if (active && (active === mbSeg || (mbSeg.contains && mbSeg.contains(active)))) return;
+      PB.segSet(mbSeg, draft.speedTestMaxMB);
+      return;
+    }
+    var input = fields[key];
+    if (!input) return;
+    var active = typeof document !== "undefined" ? document.activeElement : null;
+    if (active && active === input) return;
+    if (typeof input.getAttribute === "function" && input.getAttribute("role") === "switch") {
+      input.setAttribute("aria-checked", draft[key] ? "true" : "false");
+      return;
+    }
+    input.value = draft[key] == null ? "" : String(draft[key]);
+  }
+
+  function applyServerConfig() {
+    var merged = L.mergeServer(baseline, draft, configNow());
+    var held = formHeld();
+    baseline = merged.baseline;
+    draft = merged.draft;
+    var onPage = root && (!PB.current || PB.current() === "settings");
+    if (!onPage) return;
+    if (held) {
+      merged.untouched.forEach(paintField);
+      refreshBar();
+      return;
+    }
+    if (renderedSig === L.draftSignature(draft) && root.querySelector && root.querySelector(".settings")) {
+      refreshBar();
+      return;
+    }
+    render();
   }
 
   function mergeSaved(body) {
@@ -449,9 +541,14 @@
     });
   }
 
-  function leave() {
-    if (allowLeave || !isDirty()) return;
-    var id = pendingTab;
+  function leave(targetId, opt) {
+    var decision = L.leaveDecision({
+      dirty: isDirty(),
+      force: !!(opt && opt.force),
+      target: targetId
+    });
+    if (decision.allow) return;
+    var id = decision.target;
     if (!id || id === "settings" || typeof PB.openSheet !== "function") return false;
     PB.openSheet({
       title: "有未保存的更改",
@@ -461,29 +558,17 @@
         { label: "继续编辑", kind: "plain" },
         { label: "放弃更改", kind: "plain danger-text", fn: function () {
           resetDraft();
-          allowLeave = true;
-          try { PB.goTab(id, { force: true }); }
-          finally { allowLeave = false; }
+          PB.goTab(id, { force: true });
         } },
         { label: "保存并离开", kind: "prominent", fn: function () {
           return save({ render: false }).then(function (ok) {
             if (!ok) return false;
-            allowLeave = true;
-            try { PB.goTab(id, { force: true }); }
-            finally { allowLeave = false; }
+            PB.goTab(id, { force: true });
           });
         } }
       ]
     });
     return false;
-  }
-
-  if (typeof PB.goTab === "function") {
-    var goTab = PB.goTab;
-    PB.goTab = function (id, opt) {
-      pendingTab = id;
-      return goTab(id, opt);
-    };
   }
 
   PB.registerTab("settings", {
@@ -515,9 +600,8 @@
       paintPorts(status);
     },
     onSSE: function (msg) {
-      if (!msg || msg.type !== "sync" || isDirty()) return;
-      resetDraft();
-      if (root && (!PB.current || PB.current() === "settings")) render();
+      if (!msg || msg.type !== "sync") return;
+      applyServerConfig();
     }
   });
 })();

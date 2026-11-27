@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"net"
 	"net/http"
@@ -35,9 +36,6 @@ var embeddedUI embed.FS
 
 const appWindowTitle = "Proxy Box - 本地代理工作台"
 
-// appVersion can be overridden at build time via: -ldflags "-X main.appVersion=v1.0.0"
-var appVersion = "v1.0.0"
-
 type sseEvent struct {
 	Type       string                    `json:"type"`
 	Reason     string                    `json:"reason,omitempty"`
@@ -57,8 +55,10 @@ func newSSEHub() *sseHub {
 	return &sseHub{clients: make(map[chan []byte]struct{})}
 }
 
+const sseClientBuffer = 32
+
 func (h *sseHub) subscribe() chan []byte {
-	ch := make(chan []byte, 8)
+	ch := make(chan []byte, sseClientBuffer)
 	h.mu.Lock()
 	h.clients[ch] = struct{}{}
 	h.mu.Unlock()
@@ -80,11 +80,24 @@ func (h *sseHub) broadcast(ev sseEvent) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	for ch := range h.clients {
-		select {
-		case ch <- data:
-		default:
-			// Drop stale frame if slow consumer
-		}
+		enqueueSSE(ch, data)
+	}
+}
+
+// enqueueSSE keeps the newest frame. A full buffer drops the oldest frame.
+func enqueueSSE(ch chan []byte, data []byte) {
+	select {
+	case ch <- data:
+		return
+	default:
+	}
+	select {
+	case <-ch:
+	default:
+	}
+	select {
+	case ch <- data:
+	default:
 	}
 }
 
@@ -96,15 +109,7 @@ func main() {
 	restarted := flag.Bool("restarted", false, "Internal flag indicating process was restarted after self-update")
 	flag.Parse()
 
-	if *showVersion {
-		fmt.Println("Proxy Box", appVersion)
-		return
-	}
-
-	updater.CleanupOldBinary()
-
-	if *selfTest {
-		runSelfTest()
+	if takeEarlyCLI(os.Stdout, *showVersion, *selfTest, updater.CleanupOldBinary, runSelfTest) {
 		return
 	}
 
@@ -162,9 +167,6 @@ func main() {
 	defer releaseMutex()
 	_ = sysproxy.RecoverIfStale(false)
 
-	var w webview2.WebView
-	var trayMgr *tray.Manager
-
 	appUpdater := updater.New(appVersion)
 	hub := newSSEHub()
 	rt := newAppRuntime(hub)
@@ -174,32 +176,28 @@ func main() {
 		rt.Shutdown()
 	}
 	defer stopRuntime()
-	srvURL, err := startLocalAPIServer(hub, rt, appUpdater, func() {
-		stopRuntime()
-		releaseMutex()
-		if trayMgr != nil {
-			trayMgr.Cleanup()
-		}
-	}, func() {
-		if w != nil {
-			w.Dispatch(func() {
-				w.Terminate()
-			})
-		}
-		go func() {
-			time.Sleep(1500 * time.Millisecond)
-			os.Exit(0)
-		}()
-	})
-	if err != nil {
-		showMessageBox("Proxy Box 启动失败", "无法启动本地控制服务: "+err.Error(), 0x10)
-		return
-	}
-	go rt.bootCore()
 
 	dataPath := filepath.Join(os.Getenv("LOCALAPPDATA"), "ProxyBox", "WebView2Data")
 	_ = os.MkdirAll(dataPath, 0755)
+	w := webview2.NewWithOptions(webview2.WebViewOptions{
+		Debug:     false,
+		AutoFocus: true,
+		DataPath:  dataPath,
+		WindowOptions: webview2.WindowOptions{
+			Title:  appWindowTitle,
+			Width:  1180,
+			Height: 780,
+			Center: true,
+		},
+	})
+	if w == nil {
+		showMessageBox("缺少 WebView2 运行时", "未检测到 Microsoft Edge WebView2 Runtime，请安装后再运行。", 0x10)
+		return
+	}
+	defer w.Destroy()
 
+	var quitApp *quitSeq
+	var trayMgr *tray.Manager
 	trayMgr = tray.NewManager(func(menuID int, arg string) {
 		if trayMenuCommand(menuID) {
 			rt.handleTrayCommand(menuID, arg, trayMgr.NotifyBalloon)
@@ -243,42 +241,45 @@ func main() {
 			}
 			hub.broadcast(sseEvent{Type: "open_update"})
 		case tray.MenuQuit:
-			stopRuntime()
-			trayMgr.Cleanup()
-			if w != nil {
-				w.Terminate()
-			}
+			quitApp.run()
 		}
 	}, func() bool {
-		return configstore.LoadConfig().MinimizeToTray
+		cfg, _ := configstore.LoadConfig()
+		return cfg.MinimizeToTray
 	})
 
 	trayMgr.SetMenu(func() []tray.MenuItem {
 		return buildTrayMenu(rt.cachedTrayState())
 	})
 	trayMgr.SetShutdown(stopRuntime)
+	quitApp = &quitSeq{
+		shutdown: stopRuntime,
+		cleanup:  trayMgr.Cleanup,
+		release:  releaseMutex,
+		win: func() uiQuitter {
+			return w
+		},
+		exit:    os.Exit,
+		timeout: 3 * time.Second,
+	}
+
+	srvURL, err := startLocalAPIServer(hub, rt, appUpdater, func() {
+		stopRuntime()
+		releaseMutex()
+		trayMgr.Cleanup()
+	}, func() {
+		requestUITerminate(w, releaseMutex, os.Exit, 3*time.Second)
+	})
+	if err != nil {
+		showMessageBox("Proxy Box 启动失败", "无法启动本地控制服务: "+err.Error(), 0x10)
+		return
+	}
+	go rt.bootCore()
 	trayMgr.Start("Proxy Box - 本地代理工作台")
 	defer trayMgr.Cleanup()
 
 	// Start real-time proxy config / subscription / node watcher
 	go startLiveWatcher(hub, trayMgr, rt)
-
-	w = webview2.NewWithOptions(webview2.WebViewOptions{
-		Debug:     false,
-		AutoFocus: true,
-		DataPath:  dataPath,
-		WindowOptions: webview2.WindowOptions{
-			Title:  appWindowTitle,
-			Width:  1180,
-			Height: 780,
-			Center: true,
-		},
-	})
-	if w == nil {
-		showMessageBox("缺少 WebView2 运行时", "未检测到 Microsoft Edge WebView2 Runtime，请安装后再运行。", 0x10)
-		return
-	}
-	defer w.Destroy()
 
 	w.Dispatch(func() {
 		trayMgr.AttachMainWindow(uintptr(w.Window()))
@@ -289,7 +290,7 @@ func main() {
 }
 
 func startLiveWatcher(hub *sseHub, trayMgr *tray.Manager, rt *appRuntime) {
-	cfg := configstore.LoadConfig()
+	cfg, _ := configstore.LoadConfig()
 	prevStamp := detector.FastConfigStamp()
 	prevSnap := detector.DetectAll()
 	lastOptimizeAt := time.Time{}
@@ -329,7 +330,7 @@ func startLiveWatcher(hub *sseHub, trayMgr *tray.Manager, rt *appRuntime) {
 
 	for range ticker.C {
 		tickCount++
-		cfg = configstore.LoadConfig()
+		cfg, _ = configstore.LoadConfig()
 		currStamp := detector.FastConfigStamp()
 		stampChanged := currStamp != prevStamp
 
@@ -444,245 +445,48 @@ func startLocalAPIServer(hub *sseHub, rt *appRuntime, appUpdater *updater.Update
 		mux.HandleFunc("/api/diagnostics", rt.handleDiagnostics)
 	}
 
-	mux.HandleFunc("/api/events", func(rw http.ResponseWriter, r *http.Request) {
-		flusher, ok := rw.(http.Flusher)
-		if !ok {
-			http.Error(rw, "SSE unsupported", http.StatusInternalServerError)
-			return
-		}
-		rw.Header().Set("Content-Type", "text/event-stream")
-		rw.Header().Set("Cache-Control", "no-cache")
-		rw.Header().Set("Connection", "keep-alive")
-
-		ch := hub.subscribe()
-		defer hub.unsubscribe(ch)
-
-		ping := time.NewTicker(20 * time.Second)
-		defer ping.Stop()
-
-		_, _ = fmt.Fprintf(rw, ": connected\n\n")
-		flusher.Flush()
-
-		for {
-			select {
-			case <-r.Context().Done():
-				return
-			case payload := <-ch:
-				_, _ = fmt.Fprintf(rw, "data: %s\n\n", payload)
-				flusher.Flush()
-			case <-ping.C:
-				_, _ = fmt.Fprintf(rw, ": ping\n\n")
-				flusher.Flush()
-			}
-		}
-	})
-
-	mux.HandleFunc("/api/snapshot", func(rw http.ResponseWriter, r *http.Request) {
-		writeJSON(rw, http.StatusOK, detector.DetectAll())
-	})
-
-	mux.HandleFunc("/api/optimize-node", func(rw http.ResponseWriter, r *http.Request) {
-		snap := detector.DetectAll()
-		res, err := detector.OptimizeClientNode(snap.ActiveClient)
-		if err != nil {
-			writeErr(rw, err)
-			return
-		}
-		cfg := configstore.LoadConfig()
-		cfg.NodeSelectionMode = "auto"
-		cfg.ManualNodeName = ""
-		_ = configstore.SaveConfig(cfg)
-
-		fresh := detector.DetectAll()
-		hub.broadcast(sseEvent{
-			Type:       "sync",
-			Reason:     res.Message,
-			ShouldDiag: true,
-			Snapshot:   &fresh,
-		})
-		writeJSON(rw, http.StatusOK, map[string]any{
-			"ok":       true,
-			"result":   res,
-			"message":  res.Message,
-			"snapshot": fresh,
-		})
-	})
-
-	mux.HandleFunc("/api/launch", func(rw http.ResponseWriter, r *http.Request) {
-		var req struct {
-			TargetID         string `json:"targetId"`
-			RestartIfRunning bool   `json:"restartIfRunning"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeErr(rw, err)
-			return
-		}
-		snap := detector.DetectAll()
-		if err := quickSyncAndLaunch(req.TargetID, req.RestartIfRunning); err != nil {
-			writeErr(rw, err)
-			return
-		}
-		writeJSON(rw, http.StatusOK, map[string]any{
-			"ok":      true,
-			"message": fmt.Sprintf("已携带 %s (%s) 代理参数免 TUN 启动 %s", snap.ActiveClient.Name, snap.ActiveClient.ProxyURL, strings.ToUpper(req.TargetID[:1])+req.TargetID[1:]),
-		})
-	})
-
-	mux.HandleFunc("/api/shortcut", func(rw http.ResponseWriter, r *http.Request) {
-		var req struct {
-			TargetID string `json:"targetId"`
-		}
-		_ = json.NewDecoder(r.Body).Decode(&req)
-		snap := detector.DetectAll()
-		var exePath, title string
-		for _, t := range snap.Targets {
-			if t.ID == req.TargetID {
-				exePath = t.ExePath
-				break
-			}
-		}
-		if req.TargetID == "cursor" {
-			title = "Cursor (免TUN代理)"
-		} else if req.TargetID == "antigravity" {
-			title = "Antigravity (免TUN代理)"
-		} else if req.TargetID == "codex" {
-			title = "Codex (免TUN代理)"
-		} else {
-			writeErr(rw, fmt.Errorf("不支持的目标类型"))
-			return
-		}
-		lnk, err := launcher.CreateProxyDesktopShortcut(req.TargetID, title, exePath)
-		if err != nil {
-			writeErr(rw, err)
-			return
-		}
-		writeJSON(rw, http.StatusOK, map[string]any{
-			"ok":      true,
-			"message": "已在桌面生成快捷方式: " + filepath.Base(lnk),
-		})
-	})
-
+	mux.HandleFunc("/api/events", handleEvents(hub))
+	mux.HandleFunc("/api/snapshot", handleSnapshot)
+	mux.HandleFunc("/api/optimize-node", handleOptimizeNode(hub))
+	mux.HandleFunc("/api/launch", handleLaunch)
+	mux.HandleFunc("/api/shortcut", handleShortcut)
 	mux.HandleFunc("/api/open-backups", handleOpenBackups)
 	mux.HandleFunc("/api/open-path", handleOpenPath)
-
-	mux.HandleFunc("/api/browse-exe", func(rw http.ResponseWriter, r *http.Request) {
-		p := openFileDialogExe()
-		writeJSON(rw, http.StatusOK, map[string]any{"path": p})
-	})
-
+	mux.HandleFunc("/api/browse-exe", handleBrowseExe)
 	mux.HandleFunc("/api/save-config", handleSaveConfig)
-
-	mux.HandleFunc("/api/version", func(rw http.ResponseWriter, r *http.Request) {
-		writeJSON(rw, http.StatusOK, map[string]any{
-			"version":     appVersion,
-			"repoUrl":     appUpdater.RepoURL(),
-			"releasesUrl": appUpdater.ReleasesURL(),
-		})
-	})
-
+	mux.HandleFunc("/api/version", handleVersion(appUpdater))
 	mux.HandleFunc("/api/open-url", handleOpenURL)
 
-	mux.HandleFunc("/api/update/check", func(rw http.ResponseWriter, r *http.Request) {
-		snap := detector.DetectAll()
-		proxyURL := ""
-		if snap.ActiveClient.PortReachable {
-			proxyURL = snap.ActiveClient.ProxyURL
-		}
-		ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
-		defer cancel()
+	registerUpdateRoutes(mux, hub, appUpdater, onBeforeRestart, onAfterRestart)
 
-		res, err := appUpdater.CheckLatest(ctx, proxyURL)
-		if err != nil {
-			writeErr(rw, err)
-			return
-		}
-		writeJSON(rw, http.StatusOK, res)
-	})
-
-	mux.HandleFunc("/api/update/status", func(rw http.ResponseWriter, r *http.Request) {
-		writeJSON(rw, http.StatusOK, appUpdater.GetProgress())
-	})
-
-	mux.HandleFunc("/api/update/apply", func(rw http.ResponseWriter, r *http.Request) {
-		var req struct {
-			DownloadURL   string `json:"downloadUrl"`
-			TargetVersion string `json:"targetVersion"`
-			AssetSize     int64  `json:"assetSize"`
-		}
-		_ = json.NewDecoder(r.Body).Decode(&req)
-
-		snap := detector.DetectAll()
-		proxyURL := ""
-		if snap.ActiveClient.PortReachable {
-			proxyURL = snap.ActiveClient.ProxyURL
-		}
-
-		downloadURL := strings.TrimSpace(req.DownloadURL)
-		targetVer := strings.TrimSpace(req.TargetVersion)
-		assetSize := req.AssetSize
-
-		if downloadURL == "" {
-			if last := appUpdater.LastCheck(); last != nil && last.DownloadURL != "" {
-				downloadURL = last.DownloadURL
-				targetVer = last.LatestVersion
-				assetSize = last.AssetSize
-			} else {
-				ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
-				res, err := appUpdater.CheckLatest(ctx, proxyURL)
-				cancel()
-				if err != nil {
-					writeErr(rw, err)
-					return
-				}
-				if !res.HasUpdate {
-					writeErr(rw, fmt.Errorf("当前已是最新版本 (%s)", res.CurrentVersion))
-					return
-				}
-				downloadURL = res.DownloadURL
-				targetVer = res.LatestVersion
-				assetSize = res.AssetSize
-			}
-		}
-
-		if downloadURL == "" {
-			writeErr(rw, fmt.Errorf("未找到可下载的 Windows 程序附件，请前往 GitHub Releases 手动下载"))
-			return
-		}
-
-		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
-			defer cancel()
-			err := appUpdater.DownloadAndApply(
-				ctx,
-				downloadURL,
-				targetVer,
-				assetSize,
-				proxyURL,
-				func(p updater.DownloadProgress) {
-					cp := p
-					hub.broadcast(sseEvent{
-						Type:   "update",
-						Update: &cp,
-					})
-				},
-				onBeforeRestart,
-			)
-			if err == nil && onAfterRestart != nil {
-				onAfterRestart()
-			}
-		}()
-
-		writeJSON(rw, http.StatusOK, map[string]any{
-			"ok":      true,
-			"message": "已开始下载新版本更新包...",
-		})
-	})
-
+	token, err := newSessionToken()
+	if err != nil {
+		_ = ln.Close()
+		return "", err
+	}
+	guard := newAPIGuard(token, ln.Addr().String())
 	go func() {
-		_ = http.Serve(ln, mux)
+		_ = http.Serve(ln, guard.wrap(mux))
 	}()
 
-	return "http://" + ln.Addr().String(), nil
+	return guard.bootstrapURL(), nil
+}
+
+func takeEarlyCLI(w io.Writer, showVersion, selfTest bool, cleanup func(), selfTestFn func()) bool {
+	if showVersion {
+		fmt.Fprintln(w, versionLine())
+		return true
+	}
+	if cleanup != nil {
+		cleanup()
+	}
+	if selfTest {
+		if selfTestFn != nil {
+			selfTestFn()
+		}
+		return true
+	}
+	return false
 }
 
 var detectSnapshot = detector.DetectAll

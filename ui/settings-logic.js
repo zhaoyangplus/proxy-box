@@ -58,15 +58,53 @@
     return draft;
   }
 
+  function sameValue(a, b) {
+    return a === b || (typeof a === "number" && typeof b === "number" && isNaN(a) && isNaN(b));
+  }
+
   function changedFields(saved, draft) {
     var before = draftFrom(saved);
     var after = draftFrom(draft);
     var out = {};
     for (var i = 0; i < KEYS.length; i++) {
       var key = KEYS[i];
-      if (before[key] !== after[key]) out[key] = after[key];
+      if (!sameValue(before[key], after[key])) out[key] = after[key];
     }
     return out;
+  }
+
+  function sameDraft(a, b) {
+    return Object.keys(changedFields(a, b)).length === 0;
+  }
+
+  function draftSignature(config) {
+    var next = draftFrom(config);
+    var parts = new Array(KEYS.length);
+    for (var i = 0; i < KEYS.length; i++) parts[i] = String(next[KEYS[i]]);
+    return parts.join("\u0001");
+  }
+
+  function mergeServer(baseline, draft, server) {
+    var prev = draftFrom(baseline);
+    var edited = draftFrom(draft);
+    var incoming = draftFrom(server);
+    var next = {};
+    var untouched = [];
+    for (var i = 0; i < KEYS.length; i++) {
+      var key = KEYS[i];
+      if (sameValue(prev[key], edited[key])) {
+        next[key] = incoming[key];
+        if (!sameValue(prev[key], incoming[key])) untouched.push(key);
+      } else next[key] = edited[key];
+    }
+    return { baseline: incoming, draft: next, untouched: untouched };
+  }
+
+  function leaveDecision(input) {
+    input = input || {};
+    var target = input.target == null ? "" : String(input.target);
+    if (input.force || !input.dirty) return { allow: true, target: target };
+    return { allow: false, target: target };
   }
 
   function validURL(value) {
@@ -121,6 +159,10 @@
     MB_ERROR: MB_ERROR,
     draftFrom: draftFrom,
     changedFields: changedFields,
+    sameDraft: sameDraft,
+    draftSignature: draftSignature,
+    mergeServer: mergeServer,
+    leaveDecision: leaveDecision,
     validate: validate,
     portsFrom: portsFrom
   };

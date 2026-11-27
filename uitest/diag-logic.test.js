@@ -13,6 +13,37 @@ function assertInert(html) {
   assert.match(html, /&lt;img src=x onerror=alert\(1\)&gt;/);
 }
 
+test("a diagnostic result applies only to the channel and run that started it", function () {
+  let book = D.emptyRuns();
+  const ai = D.beginRun(book, "ai");
+  book = ai.book;
+  const daily = D.beginRun(book, "daily");
+  book = daily.book;
+  assert.equal(D.viewRun(book, "ai").status, "running");
+  assert.equal(D.viewRun(book, "daily").status, "running");
+  const aiDone = D.finishRun(book, "ai", ai.run, { ok: true, report: { channel: "ai", exitIp: "1.1.1.1" } });
+  assert.equal(aiDone.applied, true);
+  book = aiDone.book;
+  assert.equal(D.viewRun(book, "ai").status, "result");
+  assert.equal(D.viewRun(book, "ai").report.exitIp, "1.1.1.1");
+  assert.equal(D.viewRun(book, "daily").status, "running");
+  const again = D.beginRun(book, "ai");
+  book = again.book;
+  const stale = D.finishRun(book, "ai", ai.run, { ok: true, report: { channel: "ai", exitIp: "9.9.9.9" } });
+  assert.equal(stale.applied, false);
+  assert.equal(D.viewRun(stale.book, "ai").status, "running");
+  assert.equal(D.viewRun(book, "daily").status, "running");
+  const failed = D.finishRun(book, "daily", daily.run, { ok: false, error: "诊断失败" });
+  assert.equal(failed.applied, true);
+  assert.equal(D.viewRun(failed.book, "daily").status, "error");
+  assert.equal(D.viewRun(failed.book, "daily").error, "诊断失败");
+  assert.equal(D.viewRun(failed.book, "ai").status, "running");
+  const wiped = D.clearRuns(failed.book);
+  assert.equal(D.viewRun(wiped, "ai").status, "idle");
+  assert.equal(D.viewRun(wiped, "daily").status, "idle");
+  assert.equal(D.finishRun(wiped, "daily", daily.run, { ok: true, report: { exitIp: "stale" } }).applied, false);
+});
+
 test("diagnostic rows map error to fail and total the ring", function () {
   const report = D.mapReport({
     channel: "daily",

@@ -82,3 +82,12 @@ test("channel chips use a real port only when the app is enabled", function () {
   assert.deepEqual(on, [{ tone: "indigo", text: "AI 通道 :27892" }]);
   assert.deepEqual(T.chips({ enabledByUser: false, statusText: HOSTILE }, 27892), []);
 });
+
+test("tool signatures change only the apps whose fields changed", function () {
+  const saved = [{ id: "cursor", enabledByUser: true, running: false, settingsPath: "C:\\c.json" }];
+  const same = [{ settingsPath: "C:\\c.json", running: false, enabledByUser: true, id: "cursor" }];
+  assert.equal(T.toolsSignature(saved, 27892, ""), T.toolsSignature(same, 27892, ""));
+  assert.deepEqual(T.diffTargets(saved, same, 27892, ""), []);
+  const next = [{ id: "cursor", enabledByUser: false, running: true, settingsPath: "C:\\c.json" }];
+  assert.deepEqual(T.diffTargets(saved, next, 27892, ""), ["cursor"]);
+});

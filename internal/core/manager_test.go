@@ -327,6 +327,53 @@ func TestStaleExitLeavesCurrentRun(t *testing.T) {
 	}
 }
 
+func TestExitHookSkipsStopAndRunsOnce(t *testing.T) {
+	m := NewManager(t.TempDir())
+	calls := 0
+	m.SetExitHook(func() { calls++ })
+
+	run := finishedRun(t)
+	m.mu.Lock()
+	m.phase = phaseRunning
+	m.generation = 2
+	m.run = run
+	m.mu.Unlock()
+	if err := m.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	m.watchDone(2, run)
+	if calls != 0 {
+		t.Fatalf("stop calls %d", calls)
+	}
+
+	run = finishedRun(t)
+	m.mu.Lock()
+	m.phase = phaseRunning
+	m.generation = 4
+	m.run = run
+	m.mu.Unlock()
+	m.watchDone(4, run)
+	m.watchDone(4, run)
+	if calls != 1 {
+		t.Fatalf("crash calls %d", calls)
+	}
+}
+
+func finishedRun(t *testing.T) *running {
+	t.Helper()
+	logf, err := os.Create(filepath.Join(t.TempDir(), "exit.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err := newJob()
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	close(done)
+	return &running{done: done, stopLog: make(chan struct{}), logFile: logf, job: job}
+}
+
 func fakeCoreParams() ConfigParams {
 	return ConfigParams{
 		Secret:          "sek",

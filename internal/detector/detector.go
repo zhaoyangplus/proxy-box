@@ -100,7 +100,8 @@ type procDetail struct {
 
 func controllerClient(c ProxyClientInfo) *mihomo.Client {
 	mc := mihomo.NewClient(c.ExternalController, c.Secret)
-	mc.SetDelayTestURL(configstore.LoadConfig().DelayTestURL)
+	cfg, _ := configstore.LoadConfig()
+	mc.SetDelayTestURL(cfg.DelayTestURL)
 	return mc
 }
 
@@ -297,7 +298,7 @@ func isHTTPProxyPort(host string, port int) (reachable bool, speaksHTTP bool) {
 }
 
 func DetectAll() SystemSnapshot {
-	cfg := configstore.LoadConfig()
+	cfg, _ := configstore.LoadConfig()
 	st := configstore.LoadState()
 	procs := snapshotProcessesAndPorts()
 	active := detectBuiltin(procs)
