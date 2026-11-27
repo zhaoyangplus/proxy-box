@@ -806,7 +806,7 @@
       tr.children[2].textContent = node.type || "—";
       const info = delayInfo(node);
       const delay = tr.children[3];
-      delay.children[0].className = info.cls;
+      delay.children[0].className = "pb-delay " + info.cls;
       delay.children[0].textContent = info.text;
       const busy = testing === node.name;
       delay.children[1].textContent = busy ? "测速中" : "测速";

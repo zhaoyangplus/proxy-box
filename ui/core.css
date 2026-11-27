@@ -119,9 +119,12 @@
   color: var(--lime);
 }
 
-.pb-seg button:disabled {
+.pb-seg button:disabled,
+.pb-seg button:disabled.is-on {
+  background: transparent;
+  color: var(--text-muted);
   cursor: not-allowed;
-  opacity: 0.45;
+  opacity: 1;
 }
 
 .pb-line {
@@ -326,8 +329,12 @@ button.pb-switch:disabled {
   color: var(--lime);
 }
 
-.pb-groups button:disabled {
-  opacity: 0.45;
+.pb-groups button:disabled,
+.pb-groups button:disabled.is-on {
+  background: var(--bg-surface);
+  border-color: var(--border);
+  color: var(--text-muted);
+  opacity: 1;
   cursor: not-allowed;
 }
 
