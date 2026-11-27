@@ -8,6 +8,34 @@ const O = require("../ui/overview-logic.js");
 
 const HOSTILE = '<img src=x onerror=alert(1)>';
 
+test("core start settles to error, running, or stopped without reviving download", function () {
+  assert.deepEqual(O.settleStart({ cancelled: true, error: "已取消" }), { phase: "stopped", error: "", warning: "" });
+  assert.deepEqual(O.settleStart({ error: "内核下载失败" }), { phase: "error", error: "内核下载失败", warning: "" });
+  const warned = O.settleStart({ warning: "系统代理没有打开", running: false });
+  assert.equal(warned.phase, "running");
+  assert.equal(warned.error, "");
+  assert.equal(warned.warning, "系统代理没有打开");
+  assert.equal(O.settleStart({ running: true }).phase, "running");
+  assert.equal(O.settleStart({}).phase, "running");
+  assert.equal(O.settleStart({ running: false }).phase, "stopped");
+
+  assert.equal(O.nextCorePhase({ running: false, phase: "download", holdDownload: true }), "download");
+  assert.equal(O.nextCorePhase({ running: false, phase: "download", holdDownload: false }), "stopped");
+  assert.equal(O.nextCorePhase({ running: false, phase: "download", holdDownload: true, cancelRequested: true }), "stopped");
+  assert.equal(O.nextCorePhase({ running: true, phase: "download", holdDownload: true }), "running");
+  assert.equal(O.nextCorePhase({ running: false, phase: "error", holdDownload: false }), "error");
+  assert.equal(O.nextCorePhase({ running: false, phase: "geo" }), "geo");
+
+  assert.equal(O.applyCorePhase({ phase: "download", holdDownload: true }, { phase: "download" }), "download");
+  assert.equal(O.applyCorePhase({ phase: "download", holdDownload: true }, { phase: "error" }), "error");
+  assert.equal(O.applyCorePhase({ phase: "error", holdDownload: false }, { phase: "download" }), "error");
+  assert.equal(O.applyCorePhase({ phase: "error", holdDownload: false }, { phase: "error" }), "error");
+  assert.equal(O.applyCorePhase({ phase: "running", holdDownload: false }, { phase: "download" }), "running");
+  assert.equal(O.applyCorePhase({ phase: "stopped", holdDownload: false }, { phase: "download" }), "stopped");
+  assert.equal(O.applyCorePhase({ phase: "download", cancelRequested: true }, { phase: "error" }), "stopped");
+  assert.equal(O.applyCorePhase({ phase: "running", cancelRequested: true }, { phase: "stopped" }), "stopped");
+});
+
 test("mode text follows the three routing modes", function () {
   assert.equal(O.modeText("rule"), O.MODE_TEXT.rule);
   assert.equal(O.modeText("global"), O.MODE_TEXT.global);

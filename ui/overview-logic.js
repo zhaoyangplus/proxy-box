@@ -143,6 +143,39 @@
     return value.toFixed(1) + "%";
   }
 
+  function settleStart(input) {
+    input = input || {};
+    if (input.cancelled) return { phase: "stopped", error: "", warning: "" };
+    if (input.error) return { phase: "error", error: String(input.error), warning: "" };
+    var warning = input.warning ? String(input.warning) : "";
+    if (warning) return { phase: "running", error: "", warning: warning };
+    if (input.running === false) return { phase: "stopped", error: "", warning: "" };
+    return { phase: "running", error: "", warning: "" };
+  }
+
+  function nextCorePhase(input) {
+    input = input || {};
+    if (input.running) return "running";
+    var phase = input.phase || "stopped";
+    if (input.holdDownload && !input.cancelRequested && phase === "download") return "download";
+    if (phase === "error" || phase === "geo") return phase;
+    return "stopped";
+  }
+
+  function applyCorePhase(state, event) {
+    state = state || {};
+    event = event || {};
+    var next = event.phase || state.phase || "stopped";
+    if (state.cancelRequested && next !== "running" && next !== "stopped") {
+      return state.phase === "running" ? "running" : "stopped";
+    }
+    if (next === "download" && !(state.holdDownload && !state.cancelRequested)) {
+      if (state.phase === "error" || state.phase === "running" || state.phase === "geo") return state.phase;
+      return "stopped";
+    }
+    return next;
+  }
+
   function heroState(input) {
     input = input || {};
     var running = !!input.running;
@@ -351,6 +384,9 @@
     modeText: modeText,
     modeLabel: modeLabel,
     channelTile: channelTile,
+    settleStart: settleStart,
+    nextCorePhase: nextCorePhase,
+    applyCorePhase: applyCorePhase,
     heroState: heroState,
     geoStatus: geoStatus,
     sysSub: sysSub,

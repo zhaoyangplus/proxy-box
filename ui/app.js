@@ -53,7 +53,9 @@
     version: "",
     releasesUrl: "",
     update: null,
-    phase: "stopped"
+    phase: "stopped",
+    holdDownload: false,
+    cancelStart: false
   };
   var es = null;
   var retryMs = 1000;
@@ -664,10 +666,22 @@
     }
   }
 
+  function phaseFlags() {
+    return {
+      phase: state.phase,
+      holdDownload: !!state.holdDownload,
+      cancelRequested: !!state.cancelStart
+    };
+  }
+
   function publishCore(status) {
     state.core = status || null;
-    if (status && status.running) state.phase = "running";
-    else if (state.phase !== "download" && state.phase !== "error" && state.phase !== "geo") state.phase = "stopped";
+    var logic = globalThis.PBOverview;
+    var input = phaseFlags();
+    input.running = !!(status && status.running);
+    state.phase = logic && typeof logic.nextCorePhase === "function"
+      ? logic.nextCorePhase(input)
+      : (input.running ? "running" : (input.holdDownload && !input.cancelRequested && input.phase === "download" ? "download" : (input.phase === "error" || input.phase === "geo" ? input.phase : "stopped")));
     paintSide();
     eachTab("onCore", status || null);
   }
@@ -687,7 +701,12 @@
   }
 
   function applyCoreEvent(core) {
-    if (core && core.phase) state.phase = core.phase;
+    if (core && core.phase) {
+      var logic = globalThis.PBOverview;
+      state.phase = logic && typeof logic.applyCorePhase === "function"
+        ? logic.applyCorePhase(phaseFlags(), core)
+        : core.phase;
+    }
     paintSide();
     if (core && (core.phase === "running" || core.phase === "stopped")) refreshCore().catch(function () {});
   }
