@@ -180,6 +180,27 @@
       { v: "dark", label: "深色" },
       { v: "auto", label: "跟随系统" }
     ], theme, "sm");
+    var glassNow = PB.glass && typeof PB.glass.get === "function" ? PB.glass.get() : 74;
+    var glassVal = h("b", { class: "glass-val", attrs: { id: "stGlassVal" }, text: String(glassNow) });
+    var glassRange = h("input", {
+      class: "glass-range",
+      attrs: {
+        type: "range",
+        min: "0",
+        max: "100",
+        step: "1",
+        value: String(glassNow),
+        id: "stGlass",
+        "aria-label": "玻璃透明度"
+      },
+      on: {
+        input: function () {
+          if (PB.glass && typeof PB.glass.set === "function") PB.glass.set(Number(glassRange.value));
+          var shown = PB.glass && typeof PB.glass.get === "function" ? PB.glass.get() : glassRange.value;
+          glassVal.textContent = String(shown);
+        }
+      }
+    });
     var info = coreInfo();
     var coreSub = info.path ? ((info.version ? info.version + " · " : "") + info.path) : "尚未导入 mihomo.exe";
     var ports = L.portsFrom(PB.state && PB.state.core);
@@ -265,14 +286,24 @@
     add(root,
       h("div", { class: "settings" },
         h("h3", { class: "group-t", text: "外观" }),
-        h("div", { class: "list" }, h("div", { class: "row has-ic" },
-          icon("sun", "#ff9f0a"),
-          h("div", { class: "row-main" },
-            h("div", { class: "row-title", text: "主题" }),
-            h("div", { class: "row-sub", text: "浅色玻璃为默认，深色适合夜间使用" })
+        h("div", { class: "list" },
+          h("div", { class: "row has-ic" },
+            icon("sun", "#ff9f0a"),
+            h("div", { class: "row-main" },
+              h("div", { class: "row-title", text: "主题" }),
+              h("div", { class: "row-sub", text: "浅色玻璃为默认，深色适合夜间使用" })
+            ),
+            themeSeg
           ),
-          themeSeg
-        )),
+          h("div", { class: "row has-ic" },
+            icon("layers", "var(--blue)"),
+            h("div", { class: "row-main" },
+              h("div", { class: "row-title", text: "玻璃透明度" }),
+              h("div", { class: "row-sub", text: "数值越高，侧栏和顶栏越透，背后的颜色越能透出来" })
+            ),
+            h("div", { class: "glass-ctl" }, glassRange, glassVal)
+          )
+        ),
         h("h3", { class: "group-t", text: "内核" }),
         h("div", { class: "list" }, h("div", { class: "row has-ic" },
           icon("bolt", "var(--green)"),

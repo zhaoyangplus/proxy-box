@@ -7,6 +7,8 @@
   "use strict";
 
   var THEME_KEY = "pb-v22-theme";
+  var GLASS_KEY = "pb-v23-glass";
+  var GLASS_DEFAULT = 74;
   var MIN = 60000;
   var DAY = 86400000;
   var ESC = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
@@ -127,6 +129,27 @@
     return { pref: pref, resolved: resolveTheme(pref, !!prefersDark) };
   }
 
+  function glassLevel(raw) {
+    if (typeof raw === "number" && isFinite(raw) && raw === Math.trunc(raw) && raw >= 0 && raw <= 100) return raw;
+    if (typeof raw === "string" && /^(?:0|[1-9]\d?|100)$/.test(raw)) return Number(raw);
+    return GLASS_DEFAULT;
+  }
+
+  function glassFromStorage(storage) {
+    var raw = null;
+    try {
+      raw = storage && storage.getItem(GLASS_KEY);
+    } catch (err) {
+      raw = null;
+    }
+    return glassLevel(raw);
+  }
+
+  function glassAlpha(level) {
+    var thousandths = 820 - Math.round(glassLevel(level) * 540 / 100);
+    return (thousandths / 1000).toFixed(3).replace(/0+$/, "").replace(/\.$/, "");
+  }
+
   function segHTML(id, opts, active, cls) {
     var buttons = (opts || []).map(function (opt) {
       var on = String(opt.v) === String(active);
@@ -173,6 +196,8 @@
 
   return {
     THEME_KEY: THEME_KEY,
+    GLASS_KEY: GLASS_KEY,
+    GLASS_DEFAULT: GLASS_DEFAULT,
     esc: esc,
     safeClass: safeClass,
     ic: ic,
@@ -188,6 +213,8 @@
     normalizeTheme: normalizeTheme,
     resolveTheme: resolveTheme,
     themeFromStorage: themeFromStorage,
+    glassFromStorage: glassFromStorage,
+    glassAlpha: glassAlpha,
     segHTML: segHTML,
     segThumbPlacement: segThumbPlacement,
     navIndicatorPlacement: navIndicatorPlacement,
