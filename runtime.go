@@ -144,23 +144,23 @@ func (a *appRuntime) Shutdown() {
 func (a *appRuntime) bootCore() {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
-	if _, err := a.StartEnabled(ctx); err != nil {
+	if _, _, err := a.StartEnabled(ctx); err != nil {
 		a.broadcastCore("error", startFailure(err), 0, 0)
 	}
 }
 
-func (a *appRuntime) StartEnabled(ctx context.Context) (core.Status, error) {
+func (a *appRuntime) StartEnabled(ctx context.Context) (core.Status, string, error) {
 	settings, err := configstore.LoadCoreSettings()
 	if err != nil {
-		return core.Status{}, err
+		return core.Status{}, "", err
 	}
 	if !settings.Enabled {
-		return core.Status{}, nil
+		return core.Status{}, "", nil
 	}
 	return a.startCore(ctx, settings)
 }
 
-func (a *appRuntime) startCore(ctx context.Context, settings configstore.CoreSettings) (core.Status, error) {
+func (a *appRuntime) startCore(ctx context.Context, settings configstore.CoreSettings) (core.Status, string, error) {
 	runCtx, cancel := a.replaceStart(ctx)
 	defer cancel()
 
@@ -169,21 +169,21 @@ func (a *appRuntime) startCore(ctx context.Context, settings configstore.CoreSet
 		a.broadcastCore("download", "正在下载内核", downloaded, total)
 	})
 	if err != nil {
-		return core.Status{}, err
+		return core.Status{}, "", err
 	}
 	if err := runCtx.Err(); err != nil {
-		return core.Status{}, err
+		return core.Status{}, "", err
 	}
 	subs, err := configstore.LoadSubscriptions()
 	if err != nil {
-		return core.Status{}, err
+		return core.Status{}, "", err
 	}
 	if err := runCtx.Err(); err != nil {
-		return core.Status{}, err
+		return core.Status{}, "", err
 	}
 	st, err := a.core.Start(runCtx, path, a.coreParams(settings), providerSpecs(subs))
 	if err != nil {
-		return core.Status{}, err
+		return core.Status{}, "", err
 	}
 	a.opMu.Lock()
 	defer a.opMu.Unlock()
@@ -195,20 +195,26 @@ func (a *appRuntime) startCore(ctx context.Context, settings configstore.CoreSet
 	if st.Mode != "" {
 		settings.Mode = st.Mode
 	}
+	var warns []string
 	if err := configstore.SaveCoreSettings(settings); err != nil {
-		return st, err
+		warns = append(warns, "内核已启动，但保存设置失败")
 	}
 	if err := a.applyEnabledTargetsLocked(st.Ports.AIDedicated); err != nil {
-		return st, err
+		warns = append(warns, "内核已启动，但应用代理未能生效")
 	}
 	a.kickGeoDownload()
 	if settings.SystemProxy {
 		if err := a.enableSystemProxy(runCtx, st.Ports.Mixed); err != nil {
-			return st, err
+			warns = append(warns, "内核已启动，但系统代理未能开启")
 		}
 	}
-	a.broadcastCore("running", "内核已启动", 0, 0)
-	return st, nil
+	warn := strings.Join(warns, "；")
+	msg := "内核已启动"
+	if warn != "" {
+		msg = warn
+	}
+	a.broadcastCore("running", msg, 0, 0)
+	return st, warn, nil
 }
 
 func (a *appRuntime) replaceStart(parent context.Context) (context.Context, context.CancelFunc) {

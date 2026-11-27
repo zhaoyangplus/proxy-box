@@ -265,7 +265,7 @@ func TestStartCoreAppliesOnlyEnabledApps(t *testing.T) {
 	settings.Enabled = true
 	settings.SystemProxy = false
 	settings.BypassCN = false
-	if _, err := rt.startCore(context.Background(), settings); err != nil {
+	if _, _, err := rt.startCore(context.Background(), settings); err != nil {
 		t.Fatal(err)
 	}
 	if len(fc.started.EnabledAIApps) != 1 || fc.started.EnabledAIApps[0] != "cursor" {

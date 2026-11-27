@@ -455,7 +455,7 @@ func TestStartWithBypassCNKicksDownloadOnceNodesExist(t *testing.T) {
 	settings.Enabled = true
 	settings.BypassCN = true
 	settings.SystemProxy = false
-	if _, err := rt.startCore(context.Background(), settings); err != nil {
+	if _, _, err := rt.startCore(context.Background(), settings); err != nil {
 		t.Fatal(err)
 	}
 	if fc.started.GeoReady || !fc.started.BypassCN {

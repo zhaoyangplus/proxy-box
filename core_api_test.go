@@ -274,6 +274,98 @@ func TestStartFailureTellsUserToImport(t *testing.T) {
 	}
 }
 
+func TestCoreStartFailureBroadcastsError(t *testing.T) {
+	useTempConfig(t)
+	hub := newSSEHub()
+	ch := hub.subscribe()
+	defer hub.unsubscribe(ch)
+	rt := &appRuntime{
+		hub:  hub,
+		core: &fakeCore{},
+		ensureBinary: func(context.Context, string, []string, core.ProgressFunc) (string, error) {
+			return "", errors.New("download failed")
+		},
+		proxyURLs: func() []string { return nil },
+	}
+	rec := postJSON(rt.handleCoreStart, "")
+	if rec.Code == http.StatusOK {
+		t.Fatalf("body %s", rec.Body.String())
+	}
+	sawError := false
+	for {
+		select {
+		case payload := <-ch:
+			var ev sseEvent
+			if err := json.Unmarshal(payload, &ev); err != nil {
+				t.Fatal(err)
+			}
+			if ev.Type == "core" && ev.Core != nil && ev.Core.Phase == "error" && containsChinese(ev.Core.Message) {
+				sawError = true
+			}
+		default:
+			if !sawError {
+				t.Fatal("start failure did not broadcast an error")
+			}
+			return
+		}
+	}
+}
+
+func TestCoreStartKeepsRunningWhenFollowUpFails(t *testing.T) {
+	useTempConfig(t)
+	settings, err := configstore.LoadCoreSettings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings.SystemProxy = true
+	if err := configstore.SaveCoreSettings(settings); err != nil {
+		t.Fatal(err)
+	}
+	hub := newSSEHub()
+	ch := hub.subscribe()
+	defer hub.unsubscribe(ch)
+	fc := &fakeCore{ports: core.Ports{Mixed: 27890, Controller: 27891, AIDedicated: 27892}}
+	rt := &appRuntime{
+		hub:  hub,
+		core: fc,
+		ensureBinary: func(context.Context, string, []string, core.ProgressFunc) (string, error) {
+			return "mihomo.exe", nil
+		},
+		setProxy: func(string, int, string) error {
+			return errors.New("access denied")
+		},
+		proxyURLs: func() []string { return nil },
+	}
+	rec := postJSON(rt.handleCoreStart, "")
+	if rec.Code != http.StatusOK || !fc.running {
+		t.Fatalf("code %d running %v body %s", rec.Code, fc.running, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"warning"`) || !strings.Contains(rec.Body.String(), "系统代理") {
+		t.Fatalf("body %s", rec.Body.String())
+	}
+	var sawRunning bool
+	for {
+		select {
+		case payload := <-ch:
+			var ev sseEvent
+			if err := json.Unmarshal(payload, &ev); err != nil {
+				t.Fatal(err)
+			}
+			if ev.Core != nil && ev.Core.Phase == "running" {
+				sawRunning = true
+			}
+			if ev.Core != nil && ev.Core.Phase == "error" {
+				t.Fatalf("follow-up was broadcast as start failure: %s", ev.Core.Message)
+			}
+		default:
+			if !sawRunning {
+				t.Fatal("running was not broadcast")
+			}
+			return
+		}
+	}
+}
+
 func TestSubsRoundTripAndCoreNodeCount(t *testing.T) {
 	useTempConfig(t)
 	t.Setenv("LOCALAPPDATA", t.TempDir())

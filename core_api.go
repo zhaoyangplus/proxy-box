@@ -50,6 +50,7 @@ type coreStatusResponse struct {
 	GeoReady          bool             `json:"geoReady"`
 	GeoDownloading    bool             `json:"geoDownloading"`
 	GeoError          string           `json:"geoError"`
+	Warning           string           `json:"warning,omitempty"`
 }
 
 type subsResponse struct {
@@ -213,7 +214,8 @@ func (a *appRuntime) handleCoreStart(rw http.ResponseWriter, r *http.Request) {
 		return
 	}
 	settings.Enabled = true
-	if _, err := a.startCore(r.Context(), settings); err != nil {
+	_, warn, err := a.startCore(r.Context(), settings)
+	if err != nil {
 		if errors.Is(err, core.ErrAlreadyRunning) {
 			body, statusErr := a.coreStatusResponse()
 			if statusErr != nil {
@@ -223,6 +225,7 @@ func (a *appRuntime) handleCoreStart(rw http.ResponseWriter, r *http.Request) {
 			writeJSON(rw, http.StatusOK, body)
 			return
 		}
+		a.broadcastCore("error", startFailure(err), 0, 0)
 		writeErr(rw, errors.New(startFailure(err)))
 		return
 	}
@@ -231,6 +234,7 @@ func (a *appRuntime) handleCoreStart(rw http.ResponseWriter, r *http.Request) {
 		writeUserErr(rw, err)
 		return
 	}
+	body.Warning = warn
 	writeJSON(rw, http.StatusOK, body)
 }
 

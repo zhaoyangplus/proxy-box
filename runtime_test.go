@@ -313,7 +313,7 @@ func TestModeSwitchProceedsWhileCoreStartIsBlocked(t *testing.T) {
 		if err != nil {
 			return
 		}
-		_, _ = rt.startCore(context.Background(), settings)
+		_, _, _ = rt.startCore(context.Background(), settings)
 	}()
 	select {
 	case <-started:
