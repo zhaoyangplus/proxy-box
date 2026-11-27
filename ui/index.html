@@ -2,94 +2,129 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Proxy Box</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect fill='%2310b981' width='16' height='16' rx='4'/%3E%3C/svg%3E" />
+<script>
+(function () {
+  var theme = "auto";
+  try {
+    var saved = localStorage.getItem("pb-v22-theme");
+    if (saved === "light" || saved === "dark" || saved === "auto") theme = saved;
+  } catch (err) {}
+  var dark = theme === "dark" || (theme !== "light" && window.matchMedia("(prefers-color-scheme: dark)").matches);
+  document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");
+})();
+</script>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect fill='%232c7a52' width='16' height='16' rx='4'/%3E%3C/svg%3E" />
 <link rel="stylesheet" href="styles.css" />
-<link rel="stylesheet" href="nodes.css" />
-<link rel="stylesheet" href="subs.css" />
 </head>
 <body>
-<div class="pb-app">
-  <aside class="pb-side">
-    <div class="pb-brand">
-      <svg class="pb-logo" viewBox="0 0 32 32" width="32" height="32" aria-hidden="true">
-        <rect width="32" height="32" rx="10" fill="#10b981"/>
-        <rect x="7" y="7" width="18" height="18" rx="5" fill="none" stroke="#ffffff" stroke-width="2"/>
-        <circle cx="16" cy="16" r="3" fill="#ffffff"/>
-      </svg>
-      <div>
-        <div class="pb-brand-name">Proxy Box</div>
-        <button type="button" class="pb-version" id="pb-version" aria-label="检查更新">
-          <span class="pb-num" id="pb-version-text">…</span>
-          <span class="pb-dot" id="pb-version-dot" hidden></span>
-        </button>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="i-home" viewBox="0 0 24 24"><path d="M4 10.2 12 4l8 6.2V19a1 1 0 0 1-1 1h-4.5v-5.5h-5V20H5a1 1 0 0 1-1-1z"/></symbol>
+    <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3.6 9h16.8M3.6 15h16.8"/><path d="M12 3a14 14 0 0 1 0 18a14 14 0 0 1 0-18"/></symbol>
+    <symbol id="i-layers" viewBox="0 0 24 24"><path d="m12 3 9 4.5-9 4.5-9-4.5z"/><path d="m3 12 9 4.5 9-4.5"/><path d="m3 16.5 9 4.5 9-4.5"/></symbol>
+    <symbol id="i-sparkle" viewBox="0 0 24 24"><path d="M11 3.5 12.9 9l5.6 1.9-5.6 1.9L11 18.4l-1.9-5.6L3.5 11 9.1 9z"/><path d="M18.5 15.5l.7 1.8 1.8.7-1.8.7-.7 1.8-.7-1.8-1.8-.7 1.8-.7z"/></symbol>
+    <symbol id="i-pulse" viewBox="0 0 24 24"><path d="M3 12h4l2.5-6 4 12 2.5-6H21"/></symbol>
+    <symbol id="i-gear" viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 12h4M12 12h8M4 17h12M20 17h0"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="17" r="2"/></symbol>
+    <symbol id="i-bolt" viewBox="0 0 24 24"><path d="M13 2.5 4.5 13.5H11l-1 8 8.5-11H12z"/></symbol>
+    <symbol id="i-gauge" viewBox="0 0 24 24"><path d="M4.6 17.5a9 9 0 1 1 14.8 0"/><path d="m12 13.5 4-4.5"/><circle cx="12" cy="14" r="1.6"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.6-3.6"/></symbol>
+    <symbol id="i-chev-down" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+    <symbol id="i-chev-right" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
+    <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.34-5.66L20 8.5"/><path d="M20 3.5v5h-5"/></symbol>
+    <symbol id="i-undo" viewBox="0 0 24 24"><path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></symbol>
+    <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2.5h8a2 2 0 0 1 2 2V18a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></symbol>
+    <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2.5"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 12.5a1.5 1.5 0 0 0 1.5 1.5h7a1.5 1.5 0 0 0 1.5-1.5L18 7M9 7V4.5h6V7"/></symbol>
+    <symbol id="i-pencil" viewBox="0 0 24 24"><path d="M4 20h4L19 9l-4-4L4 16z"/><path d="m13.5 6.5 4 4"/></symbol>
+    <symbol id="i-play" viewBox="0 0 24 24"><path d="M7 4.8v14.4a.8.8 0 0 0 1.2.7l11.3-7.2a.8.8 0 0 0 0-1.4L8.2 4.1A.8.8 0 0 0 7 4.8z"/></symbol>
+    <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2.5"/></symbol>
+    <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2.5v2M12 19.5v2M4.6 4.6 6 6M18 18l1.4 1.4M2.5 12h2M19.5 12h2M4.6 19.4 6 18M18 6l1.4-1.4"/></symbol>
+    <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/></symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3 19.5 6v5.5c0 4.6-3.2 8.4-7.5 9.5-4.3-1.1-7.5-4.9-7.5-9.5V6z"/><path d="m9 12 2.2 2.2L15.5 10"/></symbol>
+    <symbol id="i-grid" viewBox="0 0 24 24"><rect x="4" y="4" width="7" height="7" rx="2"/><rect x="13" y="4" width="7" height="7" rx="2"/><rect x="4" y="13" width="7" height="7" rx="2"/><rect x="13" y="13" width="7" height="7" rx="2"/></symbol>
+    <symbol id="i-list" viewBox="0 0 24 24"><path d="M9 6h11M9 12h11M9 18h11"/><circle cx="4.5" cy="6" r=".8"/><circle cx="4.5" cy="12" r=".8"/><circle cx="4.5" cy="18" r=".8"/></symbol>
+    <symbol id="i-sort" viewBox="0 0 24 24"><path d="M7 4v16M4 17l3 3 3-3"/><path d="M17 20V4M14 7l3-3 3 3"/></symbol>
+    <symbol id="i-up" viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6"/></symbol>
+    <symbol id="i-down" viewBox="0 0 24 24"><path d="M12 5v14M6 13l6 6 6-6"/></symbol>
+    <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v5.5M12 7.8v.1"/></symbol>
+    <symbol id="i-warn" viewBox="0 0 24 24"><path d="M10.3 4.2 2.6 17.5A2 2 0 0 0 4.3 20.5h15.4a2 2 0 0 0 1.7-3L13.7 4.2a2 2 0 0 0-3.4 0z"/><path d="M12 9.5v4M12 16.8v.1"/></symbol>
+    <symbol id="i-ok-circle" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m8 12.3 2.8 2.8L16.2 9.6"/></symbol>
+    <symbol id="i-x-circle" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m15 9-6 6M9 9l6 6"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+    <symbol id="i-terminal" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="m7 9 3 3-3 3M13 15h4"/></symbol>
+    <symbol id="i-desktop" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></symbol>
+    <symbol id="i-route" viewBox="0 0 24 24"><circle cx="6" cy="18" r="2.2"/><circle cx="18" cy="6" r="2.2"/><path d="M8.2 18H15a3.5 3.5 0 0 0 0-7H9a3.5 3.5 0 0 1 0-7h6.8"/></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4v11M7 10.5l5 5 5-5M5 20h14"/></symbol>
+    <symbol id="i-link" viewBox="0 0 24 24"><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/></symbol>
+    <symbol id="i-cpu" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2.5"/><path d="M9 2.5V6M15 2.5V6M9 18v3.5M15 18v3.5M2.5 9H6M2.5 15H6M18 9h3.5M18 15h3.5"/></symbol>
+    <symbol id="i-flask" viewBox="0 0 24 24"><path d="M9.5 3.5h5M10.5 3.5v5.2L5 18.2A1.6 1.6 0 0 0 6.4 20.5h11.2a1.6 1.6 0 0 0 1.4-2.3l-5.5-9.5V3.5"/><path d="M7.5 15h9"/></symbol>
+  </defs>
+</svg>
+
+<div class="app" id="app">
+  <aside class="side glass" id="side">
+    <div class="brand">
+      <div class="logo" aria-hidden="true">
+        <svg width="22" height="22" viewBox="0 0 32 32"><rect x="7" y="7" width="18" height="18" rx="5" fill="none" stroke="#c4f269" stroke-width="2.4"/><circle cx="16" cy="16" r="3.2" fill="#c4f269"/></svg>
+      </div>
+      <div class="brand-txt">
+        <div class="brand-name">Proxy Box</div>
+        <button type="button" class="ver" id="verBtn" title="检查更新"><span id="verText">…</span><span class="ver-dot" id="verDot" hidden></span></button>
       </div>
     </div>
-    <nav class="pb-nav" id="pb-nav" aria-label="页面"></nav>
-    <div class="pb-mini">
-      <div class="pb-mini-row">
-        <span class="pb-light pb-light-off" id="pb-core-light"></span>
-        <span id="pb-core-word">已停止</span>
+
+    <nav class="nav" id="nav" aria-label="主导航">
+      <span class="nav-ind" id="navInd" aria-hidden="true"></span>
+      <button type="button" class="nav-item is-active" data-tab="overview" aria-current="page" title="总览  Ctrl+1"><svg class="i"><use href="#i-home"/></svg><span class="lbl">总览</span><span class="nav-badge" data-nb="overview" hidden></span></button>
+      <button type="button" class="nav-item" data-tab="nodes" aria-current="false" title="代理节点  Ctrl+2"><svg class="i"><use href="#i-globe"/></svg><span class="lbl">代理节点</span><span class="nav-badge" data-nb="nodes" hidden></span></button>
+      <button type="button" class="nav-item" data-tab="subs" aria-current="false" title="订阅管理  Ctrl+3"><svg class="i"><use href="#i-layers"/></svg><span class="lbl">订阅管理</span><span class="nav-badge" data-nb="subs" hidden></span></button>
+      <button type="button" class="nav-item" data-tab="tools" aria-current="false" title="AI 工具  Ctrl+4"><svg class="i"><use href="#i-sparkle"/></svg><span class="lbl">AI 工具</span><span class="nav-badge" data-nb="tools" hidden></span></button>
+      <button type="button" class="nav-item" data-tab="diag" aria-current="false" title="连接诊断  Ctrl+5"><svg class="i"><use href="#i-pulse"/></svg><span class="lbl">连接诊断</span><span class="nav-badge" data-nb="diag" hidden></span></button>
+      <button type="button" class="nav-item" data-tab="settings" aria-current="false" title="设置  Ctrl+6"><svg class="i"><use href="#i-gear"/></svg><span class="lbl">设置</span><span class="nav-badge" data-nb="settings" hidden></span></button>
+    </nav>
+
+    <div class="side-foot">
+      <button type="button" class="status" id="sideStatus" title="前往总览">
+        <span class="status-top"><span class="pulse off" id="sideDot"></span><span id="sideCore">内核已停止</span></span>
+        <span class="status-chips"><span class="mchip" id="sideMode">规则分流</span><span class="mchip" id="sideSys">系统代理 关</span></span>
+      </button>
+      <div class="side-tools">
+        <button type="button" class="btn sm plain grow" id="sideHome" title="在资源管理器中打开 ~/.proxy-box"><svg class="i"><use href="#i-folder"/></svg><span class="lbl">~/.proxy-box</span></button>
+        <button type="button" class="btn sm icon plain" id="sideTheme" title="切换浅色 / 深色"><svg class="i" aria-hidden="true"><use href="#i-sun"/></svg></button>
       </div>
-      <div class="pb-mini-row">
-        <span id="pb-mode-word">规则</span>
-        <span class="pb-badge pb-badge-muted" id="pb-sys-badge">系统代理 关</span>
-      </div>
-      <button type="button" class="pb-btn pb-btn-ghost pb-btn-sm" id="pb-open-home">打开 ~/.proxy-box</button>
     </div>
   </aside>
-  <div class="pb-main">
-    <header class="pb-head">
-      <div class="pb-head-text">
-        <h1 id="pb-title">总览</h1>
-        <p id="pb-sub">内核、双通道出口和常用开关</p>
+
+  <main class="main" id="main" data-ch="daily">
+    <div class="scroll" id="scroll"><div class="page" id="page"></div></div>
+    <header class="topbar glass" id="topbar">
+      <div class="tb-row">
+        <div class="tb-titles"><h1 class="tb-title" id="tbTitle">总览</h1><p class="tb-sub" id="tbSub"></p></div>
+        <div class="tb-actions" id="tbActions"></div>
       </div>
-      <div class="pb-actions" id="pb-actions"></div>
+      <div class="tb-acc" id="tbAcc" hidden></div>
     </header>
-    <div class="pb-content" id="pb-content">
-      <section id="tab-overview" class="pb-tab" aria-label="总览"></section>
-      <section id="tab-nodes" class="pb-tab" aria-label="代理节点" hidden></section>
-      <section id="tab-subs" class="pb-tab" aria-label="订阅管理" hidden></section>
-      <section id="tab-tools" class="pb-tab" aria-label="AI 工具" hidden></section>
-      <section id="tab-diag" class="pb-tab" aria-label="连接诊断" hidden></section>
-      <section id="tab-settings" class="pb-tab" aria-label="设置" hidden></section>
-    </div>
-  </div>
+    <div class="toast glass" id="toast" role="status" aria-live="polite" hidden></div>
+  </main>
 </div>
 
-<div class="pb-toast" id="pb-toast" role="status" aria-live="polite" hidden></div>
+<div class="pop glass" id="pop" hidden></div>
+<div class="sheet-wrap" id="sheet" hidden><div class="sheet glass" id="sheetCard" role="dialog" aria-modal="true"></div></div>
 
-<div class="pb-modal" id="pb-update" hidden>
-  <div class="pb-modal-backdrop" id="pb-update-backdrop"></div>
-  <div class="pb-modal-card" role="dialog" aria-modal="true" aria-labelledby="pb-update-title">
-    <div class="pb-modal-head">
-      <h2 id="pb-update-title">检查更新</h2>
-      <button type="button" class="pb-btn pb-btn-ghost pb-btn-sm" id="pb-update-close">关闭</button>
-    </div>
-    <p class="pb-muted" id="pb-update-caption"></p>
-    <div class="pb-update-flow" id="pb-update-flow"></div>
-    <span class="pb-badge pb-badge-muted" id="pb-update-pill"></span>
-    <p class="pb-muted" id="pb-update-meta"></p>
-    <pre class="pb-notes" id="pb-update-notes"></pre>
-    <div class="pb-progress" id="pb-update-progress" hidden><span id="pb-update-bar"></span></div>
-    <p class="pb-muted" id="pb-update-msg"></p>
-    <p class="pb-mono pb-num" id="pb-update-bytes"></p>
-    <div class="pb-modal-actions">
-      <button type="button" class="pb-btn pb-btn-ghost" id="pb-update-releases">打开发布页</button>
-      <button type="button" class="pb-btn" id="pb-update-recheck">重新检查</button>
-      <button type="button" class="pb-btn pb-btn-primary" id="pb-update-apply" hidden>立即更新并重启</button>
-    </div>
-  </div>
-</div>
-
+<script src="util.js"></script>
 <script src="app.js"></script>
 <script src="tab-overview.js"></script>
-<script src="tab-tools.js"></script>
-<script src="tab-diag.js"></script>
-<script src="tab-settings.js"></script>
 <script src="nodes-filter.js"></script>
 <script src="nodes.js"></script>
 <script src="subs.js"></script>
+<script src="tab-tools.js"></script>
+<script src="tab-diag.js"></script>
+<script src="tab-settings.js"></script>
+<script src="update.js"></script>
 </body>
 </html>
