@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"net"
 	"net/http"
@@ -96,15 +97,7 @@ func main() {
 	restarted := flag.Bool("restarted", false, "Internal flag indicating process was restarted after self-update")
 	flag.Parse()
 
-	if *showVersion {
-		fmt.Println("Proxy Box", appVersion)
-		return
-	}
-
-	updater.CleanupOldBinary()
-
-	if *selfTest {
-		runSelfTest()
+	if takeEarlyCLI(os.Stdout, *showVersion, *selfTest, updater.CleanupOldBinary, runSelfTest) {
 		return
 	}
 
@@ -678,11 +671,34 @@ func startLocalAPIServer(hub *sseHub, rt *appRuntime, appUpdater *updater.Update
 		})
 	})
 
+	token, err := newSessionToken()
+	if err != nil {
+		_ = ln.Close()
+		return "", err
+	}
+	guard := newAPIGuard(token, ln.Addr().String())
 	go func() {
-		_ = http.Serve(ln, mux)
+		_ = http.Serve(ln, guard.wrap(mux))
 	}()
 
-	return "http://" + ln.Addr().String(), nil
+	return guard.bootstrapURL(), nil
+}
+
+func takeEarlyCLI(w io.Writer, showVersion, selfTest bool, cleanup func(), selfTestFn func()) bool {
+	if showVersion {
+		fmt.Fprintln(w, "Proxy Box", appVersion)
+		return true
+	}
+	if cleanup != nil {
+		cleanup()
+	}
+	if selfTest {
+		if selfTestFn != nil {
+			selfTestFn()
+		}
+		return true
+	}
+	return false
 }
 
 var detectSnapshot = detector.DetectAll
