@@ -22,6 +22,7 @@
    PB.setBadge(key, text, cls?) / PB.setChannel("daily"|"ai")
    PB.topbar(cfg) / PB.setActions(value) / PB.setAcc(value)
    PB.theme.get() / PB.theme.set(pref) / PB.theme.resolved()
+   PB.glass.get() / PB.glass.set(level)
    PB.refreshCore() / PB.refreshSnapshot() -> Promise
    PB.state is one object: core, snapshot, version, releasesUrl, update, phase
    PB.openUpdate is assigned later by update.js. The shell calls it when present.
@@ -825,6 +826,16 @@
     if (seg) segSet(seg, next);
   }
 
+  function glassGet() {
+    return U.glassFromStorage(window.localStorage);
+  }
+
+  function glassSet(n) {
+    var level = U.glassFromStorage({ getItem: function () { return n == null ? null : String(n); } });
+    try { window.localStorage.setItem(U.GLASS_KEY, String(level)); } catch (err) {}
+    document.documentElement.style.setProperty("--glass-alpha", U.glassAlpha(level));
+  }
+
   function onKey(event) {
     if (event.isComposing || event.key === "Process") return;
     if (event.key === "Escape") {
@@ -974,6 +985,10 @@
       set: themeSet,
       resolved: function () { return themeView().resolved; }
     },
+    glass: {
+      get: glassGet,
+      set: glassSet
+    },
     refreshCore: refreshCore,
     refreshSnapshot: refreshSnapshot,
     state: state,
@@ -985,6 +1000,7 @@
   document.addEventListener("DOMContentLoaded", function () {
     bindShell();
     applyTheme();
+    document.documentElement.style.setProperty("--glass-alpha", U.glassAlpha(glassGet()));
     goTab("overview", { initial: true });
     connectEvents();
     refreshCore().catch(function () {});

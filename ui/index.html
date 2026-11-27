@@ -13,6 +13,13 @@
   } catch (err) {}
   var dark = theme === "dark" || (theme !== "light" && window.matchMedia("(prefers-color-scheme: dark)").matches);
   document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");
+  var glass = 74;
+  try {
+    var raw = localStorage.getItem("pb-v23-glass");
+    if (/^(?:0|[1-9]\d?|100)$/.test(raw)) glass = +raw;
+  } catch (err) {}
+  var alpha = (820 - Math.round(glass * 540 / 100)) / 1000;
+  document.documentElement.style.setProperty("--glass-alpha", alpha.toFixed(3).replace(/0+$/, "").replace(/\.$/, ""));
 })();
 </script>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect fill='%232c7a52' width='16' height='16' rx='4'/%3E%3C/svg%3E" />

@@ -127,6 +127,25 @@ test("settings validation accepts only http(s) URLs and 5, 10, or 25 MB", functi
   assert.equal(S.validate({ speedTestURL: "http://example.com/a" }).ok, true);
 });
 
+test("glass transparency is not part of the settings draft", function () {
+  const saved = {
+    delayTestURL: "http://www.gstatic.com/generate_204",
+    speedTestURL: "",
+    speedTestMaxMB: 10,
+    minimizeToTray: true
+  };
+  const withGlass = Object.assign({}, saved, {
+    glass: 0,
+    glassAlpha: 0.28,
+    "pb-v23-glass": 100
+  });
+  assert.equal(S.KEYS.includes("glass"), false);
+  assert.equal(S.KEYS.includes("glassAlpha"), false);
+  assert.equal(S.KEYS.includes("pb-v23-glass"), false);
+  assert.equal(S.draftSignature(saved), S.draftSignature(withGlass));
+  assert.deepEqual(S.changedFields(saved, withGlass), {});
+});
+
 test("port numbers prefer the live status and fall back to the fixed defaults", function () {
   assert.deepEqual(S.portsFrom({
     mixedPort: 27990,

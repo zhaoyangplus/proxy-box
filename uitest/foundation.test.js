@@ -2,6 +2,9 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
+const vm = require("node:vm");
 const U = require("../ui/util.js");
 
 function storage(initial) {
@@ -91,6 +94,85 @@ test("theme resolution reads pb-v22-theme and follows the system only for auto",
   assert.deepEqual(U.themeFromStorage({ getItem: function () { throw new Error("blocked"); } }, false), { pref: "auto", resolved: "light" });
   assert.equal(U.normalizeTheme("auto"), "auto");
   assert.equal(U.resolveTheme("dark", false), "dark");
+});
+
+function glassStore(raw, throwing) {
+  return {
+    getItem: function (key) {
+      if (throwing) throw new Error("blocked");
+      if (key !== U.GLASS_KEY) return null;
+      return raw === undefined ? null : raw;
+    }
+  };
+}
+
+test("glass level falls back unless storage holds an integer from 0 to 100", function () {
+  assert.equal(U.glassFromStorage(glassStore(undefined)), U.GLASS_DEFAULT);
+  assert.equal(U.glassFromStorage(glassStore(null)), U.GLASS_DEFAULT);
+  assert.equal(U.glassFromStorage(null), U.GLASS_DEFAULT);
+  assert.equal(U.glassFromStorage(glassStore("40")), 40);
+  assert.equal(U.glassFromStorage(glassStore("0")), 0);
+  assert.equal(U.glassFromStorage(glassStore("100")), 100);
+  assert.equal(U.glassFromStorage(glassStore("7")), 7);
+  assert.equal(U.glassFromStorage(glassStore("40.5")), U.GLASS_DEFAULT);
+  assert.equal(U.glassFromStorage(glassStore("74.0")), U.GLASS_DEFAULT);
+  assert.equal(U.glassFromStorage(glassStore("101")), U.GLASS_DEFAULT);
+  assert.equal(U.glassFromStorage(glassStore("-1")), U.GLASS_DEFAULT);
+  assert.equal(U.glassFromStorage(glassStore("1000")), U.GLASS_DEFAULT);
+  assert.equal(U.glassFromStorage(glassStore("nope")), U.GLASS_DEFAULT);
+  assert.equal(U.glassFromStorage(glassStore("")), U.GLASS_DEFAULT);
+  assert.equal(U.glassFromStorage(glassStore(" 40")), U.GLASS_DEFAULT);
+  assert.equal(U.glassFromStorage(glassStore(undefined, true)), U.GLASS_DEFAULT);
+});
+
+test("glass alpha matches the stylesheet and gets clearer as the level rises", function () {
+  const css = fs.readFileSync(path.join(__dirname, "..", "ui", "styles.css"), "utf8");
+  const declared = css.match(/--glass-alpha:\s*([0-9.]+)\s*;/);
+  assert.ok(declared);
+  assert.equal(U.glassAlpha(U.glassFromStorage(glassStore(undefined))), declared[1]);
+  assert.equal(U.glassAlpha(0), "0.82");
+  assert.equal(U.glassAlpha(100), "0.28");
+  assert.equal(U.glassAlpha(U.GLASS_DEFAULT), declared[1]);
+  let prev = Number(U.glassAlpha(0));
+  for (let n = 1; n <= 100; n += 1) {
+    const alpha = Number(U.glassAlpha(n));
+    assert.ok(alpha < prev, String(n));
+    assert.ok(alpha >= 0.28 && alpha <= 0.82, String(n));
+    prev = alpha;
+  }
+});
+
+test("the first paint script uses the same glass alpha and does not write storage", function () {
+  const html = fs.readFileSync(path.join(__dirname, "..", "ui", "index.html"), "utf8");
+  const script = html.match(/<script>([\s\S]*?)<\/script>/)[1];
+  assert.equal(script.includes("setItem"), false);
+  function boot(raw, throwing) {
+    const props = {};
+    let writes = 0;
+    vm.runInNewContext(script, {
+      localStorage: {
+        getItem: function (key) {
+          if (throwing) throw new Error("blocked");
+          if (key === "pb-v23-glass") return raw == null ? null : String(raw);
+          return null;
+        },
+        setItem: function () { writes += 1; }
+      },
+      document: {
+        documentElement: {
+          setAttribute: function () {},
+          style: { setProperty: function (name, value) { props[name] = value; } }
+        }
+      },
+      window: { matchMedia: function () { return { matches: false }; } }
+    });
+    assert.equal(writes, 0);
+    return props["--glass-alpha"];
+  }
+  for (const raw of [null, "0", "40", "74", "100", "40.5", "74.0", "101", "-1", "nope", ""]) {
+    assert.equal(boot(raw, false), U.glassAlpha(U.glassFromStorage(glassStore(raw))));
+  }
+  assert.equal(boot(null, true), U.glassAlpha(U.GLASS_DEFAULT));
 });
 
 test("seg markup escapes attributes and the thumb skips its first animation", function () {

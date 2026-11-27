@@ -127,6 +127,29 @@ test("a clean settings page shows no unsaved bar", function () {
   });
 });
 
+test("the glass slider applies immediately and leaves the draft clean", function () {
+  const page = mount({});
+  let level = 41;
+  page.PB.glass = {
+    get: function () { return level; },
+    set: function (n) { level = n; }
+  };
+  page.PB.tab.enter(page.root);
+  const nodes = walk(page.root, []);
+  const range = nodes.find(function (node) { return node.tag === "INPUT" && node.attrs.type === "range"; });
+  const label = nodes.find(function (node) { return node.attrs && node.attrs.id === "stGlassVal"; });
+  assert.ok(range);
+  assert.equal(range.value, "41");
+  assert.equal(range.attrs["aria-label"], "玻璃透明度");
+  assert.equal(label.textContent, "41");
+  assert.equal(page.root.textContent.includes("数值越高，侧栏和顶栏越透，背后的颜色越能透出来"), true);
+  range.value = "88";
+  range.input();
+  assert.equal(level, 88);
+  assert.equal(label.textContent, "88");
+  assert.equal(saveBar(page.root).className.includes("show"), false);
+});
+
 test("an equivalent sync does not mark settings dirty, and an edit does", function () {
   const page = mount({
     delayTestURL: "http://www.gstatic.com/generate_204",
