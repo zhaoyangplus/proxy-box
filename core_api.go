@@ -45,6 +45,9 @@ type coreStatusResponse struct {
 	AIDedicatedPort   int              `json:"aiDedicatedPort"`
 	Settings          coreSettingsView `json:"settings"`
 	SystemProxyActive bool             `json:"systemProxyActive"`
+	GeoReady          bool             `json:"geoReady"`
+	GeoDownloading    bool             `json:"geoDownloading"`
+	GeoError          string           `json:"geoError"`
 }
 
 type subsResponse struct {
@@ -110,6 +113,7 @@ func (a *appRuntime) register(mux *http.ServeMux) {
 	mux.HandleFunc("/api/subs", a.handleSubs)
 	mux.HandleFunc("/api/subs/update", a.handleSubsUpdate)
 	mux.HandleFunc("/api/core/status", a.handleCoreStatus)
+	mux.HandleFunc("/api/core/bypass-cn", a.handleBypassCN)
 	mux.HandleFunc("/api/core/start", a.handleCoreStart)
 	mux.HandleFunc("/api/core/stop", a.handleCoreStop)
 	mux.HandleFunc("/api/core/mode", a.handleCoreMode)
@@ -147,6 +151,10 @@ func (a *appRuntime) coreStatusResponse() (coreStatusResponse, error) {
 		}
 	}
 	settings.Mode = mode
+	ready, busy, geoErr := false, false, ""
+	if a != nil {
+		ready, busy, geoErr = a.geoView()
+	}
 	return coreStatusResponse{
 		OK:                true,
 		Running:           st.Running,
@@ -158,6 +166,9 @@ func (a *appRuntime) coreStatusResponse() (coreStatusResponse, error) {
 		AIDedicatedPort:   ai,
 		Settings:          viewSettings(settings),
 		SystemProxyActive: st.Running && settings.SystemProxy,
+		GeoReady:          ready,
+		GeoDownloading:    busy,
+		GeoError:          geoErr,
 	}, nil
 }
 
@@ -677,9 +688,10 @@ func (a *appRuntime) reloadIfRunning(ctx context.Context, subs []configstore.Sub
 	if mode := strings.TrimSpace(a.core.Status().Mode); mode != "" {
 		settings.Mode = mode
 	}
-	if err := a.core.Reload(ctx, coreParams(settings), providerSpecs(subs)); err != nil {
+	if err := a.core.Reload(ctx, a.coreParams(settings), providerSpecs(subs)); err != nil {
 		return err
 	}
+	defer a.kickGeoDownload()
 	counts, err := providerNodeCounts(ctx, a.core.Status().Ports.Controller, settings.Secret)
 	if err != nil {
 		return nil

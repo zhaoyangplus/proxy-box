@@ -25,6 +25,12 @@ func publicErr(err error) string {
 		return "内核校验失败"
 	case errors.Is(err, core.ErrNoPE):
 		return "文件不是有效的 Windows 可执行程序"
+	case errors.Is(err, core.ErrGeoHTML):
+		return "地理数据下载到了网页，不是规则库"
+	case errors.Is(err, core.ErrGeoTooSmall):
+		return "地理数据文件不完整"
+	case errors.Is(err, core.ErrGeoPreflight):
+		return "地理数据无法加载，已关闭绕过大陆"
 	}
 	var syntax *json.SyntaxError
 	var typeErr *json.UnmarshalTypeError
@@ -61,6 +67,8 @@ func publicErr(err error) string {
 		return "模式只能是 rule、global 或 direct"
 	case strings.Contains(msg, "want .exe or .zip"):
 		return "请选择 mihomo.exe 或 zip 压缩包"
+	case strings.Contains(msg, "geo download"):
+		return "地理数据下载失败"
 	case strings.Contains(msg, "download stalled"):
 		return "内核下载超时"
 	case strings.Contains(msg, "download failed"), strings.Contains(msg, "sha256"):
