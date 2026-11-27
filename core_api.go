@@ -139,6 +139,7 @@ func (a *appRuntime) register(mux *http.ServeMux) {
 	mux.HandleFunc("/api/nodes/list", a.handleNodesList)
 	mux.HandleFunc("/api/nodes/select", a.handleNodesSelect)
 	mux.HandleFunc("/api/nodes/test", a.handleNodesTest)
+	a.registerSpeedTest(mux)
 }
 
 func (a *appRuntime) coreStatusResponse() (coreStatusResponse, error) {
@@ -785,6 +786,7 @@ func (a *appRuntime) handleNodesList(rw http.ResponseWriter, r *http.Request) {
 		writeUserErr(rw, err)
 		return
 	}
+	mergeSpeedCache(res, a.speedCache())
 	writeJSON(rw, http.StatusOK, res)
 }
 
