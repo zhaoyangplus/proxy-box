@@ -3,16 +3,18 @@ package configurator
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 	"unsafe"
 
-	"proxy-box/internal/configstore"
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
+	"proxy-box/internal/configstore"
 )
 
 const DefaultNoProxy = "localhost,127.0.0.1,::1,.local"
@@ -136,18 +138,36 @@ func rawJSON(v any) json.RawMessage {
 	return b
 }
 
-func ensureRawFileBackup(targetID, path string) {
+func saveOriginalBackup(backupKey, path string, sessionStart bool) {
+	if !sessionStart {
+		return
+	}
 	backupsDir, err := configstore.BackupsDir()
 	if err != nil {
 		return
 	}
-	bakPath := filepath.Join(backupsDir, targetID+"_original.json.bak")
-	if _, err := os.Stat(bakPath); err == nil {
-		return // Keep earliest untouched backup
+	bakPath := filepath.Join(backupsDir, backupKey+"_original.json.bak")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		_ = os.Remove(bakPath)
+		return
 	}
-	if raw, err := os.ReadFile(path); err == nil {
-		_ = os.WriteFile(bakPath, raw, 0644)
+	_ = os.WriteFile(bakPath, raw, 0644)
+}
+
+func saveAppliedSnapshot(backupKey, path string) error {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
 	}
+	backupsDir, err := configstore.BackupsDir()
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(backupsDir, backupKey+"_applied.json.bak"), raw, 0644)
 }
 
 func CursorSettingsPath() string {
@@ -204,55 +224,182 @@ type ApplyOptions struct {
 	SyncUserEnv bool   `json:"syncUserEnv"`
 }
 
-func ApplyAll(opts ApplyOptions) ([]string, error) {
-	proxyURL := strings.TrimSpace(opts.ProxyURL)
+// ErrUnknownTarget is returned for an id outside the four AI apps.
+var ErrUnknownTarget = errors.New("未知的应用标识，仅支持 cursor、antigravity、claude_code、codex")
+
+var fileMu sync.Mutex
+
+type appTarget struct {
+	id          string
+	backupKey   string
+	appliedMsg  string
+	restoredMsg string
+	failPrefix  string
+	directKeys  []string
+	envKey      string
+	dotenv      bool
+	path        func() string
+	apply       func(path, proxyURL string, st *configstore.StateManifest) error
+	restore     func(path string, st *configstore.StateManifest) error
+}
+
+func appTargetTable() []appTarget {
+	return []appTarget{
+		{
+			id: "cursor", backupKey: "cursor",
+			appliedMsg:  "Cursor: 已禁用 HTTP/2 并写入本地代理与终端环境变量",
+			restoredMsg: "Cursor: 已还原代理与 HTTP/2 设置",
+			failPrefix:  "配置 Cursor 失败",
+			directKeys:  []string{"cursor.general.disableHttp2", "http.proxy", "http.proxySupport", "http.proxyStrictSSL"},
+			envKey:      "terminal.integrated.env.windows",
+			path:        CursorSettingsPath,
+			apply: func(path, proxyURL string, st *configstore.StateManifest) error {
+				return applyIDEConfig("cursor", path, proxyURL, true, st)
+			},
+			restore: func(path string, st *configstore.StateManifest) error {
+				return restoreIDETarget("cursor", path, []string{"cursor.general.disableHttp2", "http.proxy", "http.proxySupport", "http.proxyStrictSSL"}, st)
+			},
+		},
+		{
+			id: "claude_code", backupKey: "claude_code",
+			appliedMsg:  "Claude Code: 已写入 ~/.claude/settings.json 代理环境变量",
+			restoredMsg: "Claude Code: 已还原 ~/.claude/settings.json",
+			failPrefix:  "配置 Claude Code 失败",
+			envKey:      "env",
+			path:        ClaudeCodeSettingsPath,
+			apply: func(path, proxyURL string, st *configstore.StateManifest) error {
+				return applyClaudeCodeConfig(path, proxyURL, st)
+			},
+			restore: func(path string, st *configstore.StateManifest) error {
+				return restoreClaudeTarget(path, st)
+			},
+		},
+		{
+			id: "antigravity", backupKey: "antigravity",
+			appliedMsg:  "Antigravity: 已写入 IDE 代理及内置终端环境变量",
+			restoredMsg: "Antigravity: 已还原 IDE 代理设置",
+			failPrefix:  "配置 Antigravity 失败",
+			directKeys:  []string{"http.proxy", "http.proxySupport", "http.proxyStrictSSL"},
+			envKey:      "terminal.integrated.env.windows",
+			path:        AntigravitySettingsPath,
+			apply: func(path, proxyURL string, st *configstore.StateManifest) error {
+				return applyIDEConfig("antigravity", path, proxyURL, false, st)
+			},
+			restore: func(path string, st *configstore.StateManifest) error {
+				return restoreIDETarget("antigravity", path, []string{"http.proxy", "http.proxySupport", "http.proxyStrictSSL"}, st)
+			},
+		},
+		{
+			id: "codex", backupKey: "codex_env",
+			appliedMsg:  "OpenAI Codex: 已写入 ~/.codex/.env 代理与本地回环排除",
+			restoredMsg: "OpenAI Codex: 已还原 ~/.codex/.env",
+			failPrefix:  "配置 OpenAI Codex 失败",
+			dotenv:      true,
+			path:        CodexEnvPath,
+			apply: func(path, proxyURL string, st *configstore.StateManifest) error {
+				return applyCodexEnvConfig(path, proxyURL, st)
+			},
+			restore: func(path string, st *configstore.StateManifest) error {
+				return restoreCodexEnvConfig(path, st)
+			},
+		},
+	}
+}
+
+func targetByID(id string) (appTarget, bool) {
+	id = strings.TrimSpace(id)
+	for _, spec := range appTargetTable() {
+		if spec.id == id {
+			return spec, true
+		}
+	}
+	return appTarget{}, false
+}
+
+// KnownTarget reports whether id is one of the four AI apps.
+func KnownTarget(id string) bool {
+	_, ok := targetByID(id)
+	return ok
+}
+
+func normalizeProxyURL(proxyURL string) (string, error) {
+	proxyURL = strings.TrimSpace(proxyURL)
 	if proxyURL == "" {
-		return nil, fmt.Errorf("代理地址不能为空")
+		return "", fmt.Errorf("代理地址不能为空")
 	}
 	if !strings.HasPrefix(proxyURL, "http://") && !strings.HasPrefix(proxyURL, "https://") {
 		proxyURL = "http://" + proxyURL
 	}
+	return proxyURL, nil
+}
 
+// ApplyTarget writes one app's proxy settings and records state.json.
+// The original file bytes are kept from the first apply in this managed session.
+func ApplyTarget(targetID, proxyURL string) (string, error) {
+	fileMu.Lock()
+	defer fileMu.Unlock()
+	return applyTargetLocked(targetID, proxyURL)
+}
+
+func applyTargetLocked(targetID, proxyURL string) (string, error) {
+	spec, ok := targetByID(targetID)
+	if !ok {
+		return "", ErrUnknownTarget
+	}
+	proxyURL, err := normalizeProxyURL(proxyURL)
+	if err != nil {
+		return "", err
+	}
 	st := configstore.LoadState()
+	path := spec.path()
+	if err := spec.apply(path, proxyURL, &st); err != nil {
+		return "", fmt.Errorf("%s: %w", spec.failPrefix, err)
+	}
+	if err := saveAppliedSnapshot(spec.backupKey, path); err != nil {
+		return "", err
+	}
+	if err := configstore.SaveState(st); err != nil {
+		return "", err
+	}
+	return spec.appliedMsg, nil
+}
+
+func ApplyAll(opts ApplyOptions) ([]string, error) {
+	fileMu.Lock()
+	defer fileMu.Unlock()
+	proxyURL, err := normalizeProxyURL(opts.ProxyURL)
+	if err != nil {
+		return nil, err
+	}
+	selected := []struct {
+		on bool
+		id string
+	}{
+		{opts.Cursor, "cursor"},
+		{opts.ClaudeCode, "claude_code"},
+		{opts.Antigravity, "antigravity"},
+		{opts.Codex, "codex"},
+	}
 	var summary []string
-
-	if opts.Cursor {
-		if err := applyIDEConfig("cursor", CursorSettingsPath(), proxyURL, true, &st); err != nil {
-			return summary, fmt.Errorf("配置 Cursor 失败: %w", err)
+	for _, item := range selected {
+		if !item.on {
+			continue
 		}
-		summary = append(summary, "Cursor: 已禁用 HTTP/2 并写入本地代理与终端环境变量")
-	}
-
-	if opts.ClaudeCode {
-		if err := applyClaudeCodeConfig(ClaudeCodeSettingsPath(), proxyURL, &st); err != nil {
-			return summary, fmt.Errorf("配置 Claude Code 失败: %w", err)
+		msg, err := applyTargetLocked(item.id, proxyURL)
+		if err != nil {
+			return summary, err
 		}
-		summary = append(summary, "Claude Code: 已写入 ~/.claude/settings.json 代理环境变量")
+		summary = append(summary, msg)
 	}
-
-	if opts.Antigravity {
-		if err := applyIDEConfig("antigravity", AntigravitySettingsPath(), proxyURL, false, &st); err != nil {
-			return summary, fmt.Errorf("配置 Antigravity 失败: %w", err)
-		}
-		summary = append(summary, "Antigravity: 已写入 IDE 代理及内置终端环境变量")
-	}
-
-	if opts.Codex {
-		if err := applyCodexEnvConfig(CodexEnvPath(), proxyURL, &st); err != nil {
-			return summary, fmt.Errorf("配置 OpenAI Codex 失败: %w", err)
-		}
-		summary = append(summary, "OpenAI Codex: 已写入 ~/.codex/.env 代理与本地回环排除")
-	}
-
 	if opts.SyncUserEnv {
+		st := configstore.LoadState()
 		if err := applyWindowsUserEnv(proxyURL, &st); err != nil {
 			return summary, fmt.Errorf("写入用户环境变量失败: %w", err)
 		}
+		if err := configstore.SaveState(st); err != nil {
+			return summary, err
+		}
 		summary = append(summary, "Windows 用户环境变量: 已同步 HTTP_PROXY / HTTPS_PROXY / NO_PROXY")
-	}
-
-	if err := configstore.SaveState(st); err != nil {
-		return summary, err
 	}
 	return summary, nil
 }
@@ -263,8 +410,6 @@ func applyIDEConfig(targetID, path, proxyURL string, setDisableHttp2 bool, st *c
 		return err
 	}
 
-	ensureRawFileBackup(targetID, path)
-
 	managedKeys := []string{"http.proxy", "http.proxySupport", "http.proxyStrictSSL"}
 	if setDisableHttp2 {
 		managedKeys = append(managedKeys, "cursor.general.disableHttp2")
@@ -272,7 +417,9 @@ func applyIDEConfig(targetID, path, proxyURL string, setDisableHttp2 bool, st *c
 	envSubKeys := []string{"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"}
 
 	tb, alreadyManaged := st.Targets[targetID]
-	if !alreadyManaged || !tb.Managed {
+	sessionStart := !alreadyManaged || !tb.Managed
+	saveOriginalBackup(targetID, path, sessionStart)
+	if sessionStart {
 		tb = configstore.TargetBackupState{
 			Managed:     true,
 			FileExisted: existed,
@@ -337,11 +484,12 @@ func applyClaudeCodeConfig(path, proxyURL string, st *configstore.StateManifest)
 		return err
 	}
 
-	ensureRawFileBackup("claude_code", path)
 	envSubKeys := []string{"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"}
 
 	tb, alreadyManaged := st.Targets["claude_code"]
-	if !alreadyManaged || !tb.Managed {
+	sessionStart := !alreadyManaged || !tb.Managed
+	saveOriginalBackup("claude_code", path, sessionStart)
+	if sessionStart {
 		tb = configstore.TargetBackupState{
 			Managed:     true,
 			FileExisted: existed,
@@ -393,13 +541,11 @@ func applyCodexEnvConfig(path, proxyURL string, st *configstore.StateManifest) e
 	if err != nil {
 		return err
 	}
-	if existed {
-		ensureRawFileBackup("codex_env", path)
-	}
-
 	managedKeys := []string{"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"}
 	tb, alreadyManaged := st.Targets["codex"]
-	if !alreadyManaged || !tb.Managed {
+	sessionStart := !alreadyManaged || !tb.Managed
+	saveOriginalBackup("codex_env", path, sessionStart)
+	if sessionStart {
 		tb = configstore.TargetBackupState{
 			Managed:     true,
 			FileExisted: existed,
@@ -516,38 +662,171 @@ func upsertEnvFile(path string, updates map[string]string, deletes map[string]bo
 	return os.WriteFile(path, []byte(content), 0644)
 }
 
-// RestoreAll rolls back proxy settings written by CursorBox while keeping unrelated user edits intact.
-func RestoreAll() ([]string, error) {
+// RestoreTarget rolls one app back to the bytes from before it was managed.
+// Proxy keys are restored alone when the file gained unrelated edits since the last apply.
+// A target that was never applied is left untouched.
+func RestoreTarget(targetID string) (string, error) {
+	fileMu.Lock()
+	defer fileMu.Unlock()
+	return restoreTargetLocked(targetID)
+}
+
+func restoreTargetLocked(targetID string) (string, error) {
+	spec, ok := targetByID(targetID)
+	if !ok {
+		return "", ErrUnknownTarget
+	}
 	st := configstore.LoadState()
+	tb, ok := st.Targets[spec.id]
+	if !ok || !tb.Managed {
+		return "", nil
+	}
+	path := spec.path()
+	exact, err := tryExactRestore(spec, path, tb)
+	if err != nil {
+		return "", err
+	}
+	if exact {
+		tb.Managed = false
+		st.Targets[spec.id] = tb
+	} else if err := spec.restore(path, &st); err != nil {
+		return "", err
+	}
+	if err := configstore.SaveState(st); err != nil {
+		return "", err
+	}
+	return spec.restoredMsg, nil
+}
+
+func tryExactRestore(spec appTarget, path string, tb configstore.TargetBackupState) (bool, error) {
+	dir, err := configstore.BackupsDir()
+	if err != nil {
+		return false, nil
+	}
+	applied, err := os.ReadFile(filepath.Join(dir, spec.backupKey+"_applied.json.bak"))
+	if err != nil {
+		return false, nil
+	}
+	current, err := os.ReadFile(path)
+	if err != nil {
+		return false, nil
+	}
+	if !bytes.Equal(current, applied) {
+		return false, nil
+	}
+	var original []byte
+	if tb.FileExisted {
+		original, err = os.ReadFile(filepath.Join(dir, spec.backupKey+"_original.json.bak"))
+		if err != nil {
+			return false, nil
+		}
+	}
+	match, err := sameNonProxy(spec, original, current)
+	if err != nil || !match {
+		return false, nil
+	}
+	if !tb.FileExisted {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return false, err
+		}
+		return true, nil
+	}
+	if err := os.WriteFile(path, original, 0644); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func sameNonProxy(spec appTarget, original, current []byte) (bool, error) {
+	if spec.dotenv {
+		return dotenvRemainder(original) == dotenvRemainder(current), nil
+	}
+	a, err := jsonRemainder(original, spec.directKeys, spec.envKey)
+	if err != nil {
+		return false, err
+	}
+	b, err := jsonRemainder(current, spec.directKeys, spec.envKey)
+	if err != nil {
+		return false, err
+	}
+	return a == b, nil
+}
+
+func jsonRemainder(raw []byte, direct []string, envKey string) (string, error) {
+	stripped := bytes.TrimSpace(StripJSONC(raw))
+	if len(stripped) == 0 {
+		return "{}", nil
+	}
+	var m map[string]any
+	if err := json.Unmarshal(stripped, &m); err != nil {
+		return "", err
+	}
+	if m == nil {
+		return "{}", nil
+	}
+	for _, key := range direct {
+		delete(m, key)
+	}
+	if envKey != "" {
+		if env, ok := m[envKey].(map[string]any); ok {
+			delete(env, "HTTP_PROXY")
+			delete(env, "HTTPS_PROXY")
+			delete(env, "NO_PROXY")
+			if len(env) == 0 {
+				delete(m, envKey)
+			} else {
+				m[envKey] = env
+			}
+		}
+	}
+	out, err := json.Marshal(m)
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
+}
+
+func dotenvRemainder(raw []byte) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	text := strings.ReplaceAll(string(raw), "\r\n", "\n")
+	var keep []string
+	for _, line := range strings.Split(text, "\n") {
+		trim := strings.TrimSpace(line)
+		if eq := strings.IndexByte(trim, '='); eq > 0 {
+			key := strings.TrimSpace(trim[:eq])
+			if key == "HTTP_PROXY" || key == "HTTPS_PROXY" || key == "NO_PROXY" {
+				continue
+			}
+		}
+		keep = append(keep, line)
+	}
+	return strings.TrimRight(strings.Join(keep, "\n"), "\n")
+}
+
+// RestoreAll rolls back every app Proxy Box is managing.
+// Windows user env is restored only when SyncUserEnv had been applied.
+func RestoreAll() ([]string, error) {
+	fileMu.Lock()
+	defer fileMu.Unlock()
 	var summary []string
-
-	if err := restoreIDETarget("cursor", CursorSettingsPath(), []string{"cursor.general.disableHttp2", "http.proxy", "http.proxySupport", "http.proxyStrictSSL"}, &st); err != nil {
-		return summary, err
+	for _, id := range []string{"cursor", "claude_code", "antigravity", "codex"} {
+		msg, err := restoreTargetLocked(id)
+		if err != nil {
+			return summary, err
+		}
+		if msg != "" {
+			summary = append(summary, msg)
+		}
 	}
-	summary = append(summary, "Cursor: 已还原代理与 HTTP/2 设置")
-
-	if err := restoreClaudeTarget(ClaudeCodeSettingsPath(), &st); err != nil {
-		return summary, err
-	}
-	summary = append(summary, "Claude Code: 已还原 ~/.claude/settings.json")
-
-	if err := restoreIDETarget("antigravity", AntigravitySettingsPath(), []string{"http.proxy", "http.proxySupport", "http.proxyStrictSSL"}, &st); err != nil {
-		return summary, err
-	}
-	summary = append(summary, "Antigravity: 已还原 IDE 代理设置")
-
-	if err := restoreCodexEnvConfig(CodexEnvPath(), &st); err != nil {
-		return summary, err
-	}
-	summary = append(summary, "OpenAI Codex: 已还原 ~/.codex/.env")
-
+	st := configstore.LoadState()
 	if st.UserEnvManaged {
 		if err := restoreWindowsUserEnv(&st); err == nil {
 			summary = append(summary, "Windows 用户环境变量: 已清理还原")
+			_ = configstore.SaveState(st)
 		}
 	}
-
-	_ = configstore.SaveState(st)
 	return summary, nil
 }
 
