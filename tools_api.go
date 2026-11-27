@@ -114,21 +114,7 @@ func (a *appRuntime) toggleApp(ctx context.Context, id string, enabled bool) (ms
 }
 
 func (a *appRuntime) reloadCoreLocked(ctx context.Context) error {
-	if a == nil || a.core == nil || !a.core.Status().Running {
-		return nil
-	}
-	settings, err := configstore.LoadCoreSettings()
-	if err != nil {
-		return err
-	}
-	if mode := strings.TrimSpace(a.core.Status().Mode); mode != "" {
-		settings.Mode = mode
-	}
-	subs, err := configstore.LoadSubscriptions()
-	if err != nil {
-		return err
-	}
-	return a.core.Reload(ctx, a.coreParams(settings), providerSpecs(subs))
+	return a.reloadLive(ctx, nil)
 }
 
 func (a *appRuntime) applyEnabledTargetsLocked(port int) error {

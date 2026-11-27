@@ -201,10 +201,10 @@ func (a *appRuntime) applyBypass(ctx context.Context, gen int) error {
 	if gen != 0 && !a.geoCurrent(gen) {
 		return nil
 	}
-	if err := configstore.SaveCoreSettings(settings); err != nil {
-		return err
-	}
-	if err := a.core.Reload(ctx, params, providerSpecs(subs)); err != nil {
+	if err := a.reloadLive(ctx, func(current *configstore.CoreSettings) error {
+		current.BypassCN = true
+		return nil
+	}); err != nil {
 		return a.failApply(ctx, gen, errors.New("绕过大陆切换失败，已恢复原配置"))
 	}
 	a.clearGeoError()
@@ -216,22 +216,11 @@ func (a *appRuntime) failApply(ctx context.Context, gen int, cause error) error 
 	if gen != 0 && !a.geoCurrent(gen) {
 		return nil
 	}
-	settings, err := configstore.LoadCoreSettings()
 	msg := publicErr(cause)
-	if err == nil {
-		settings.BypassCN = false
-		if a.core != nil {
-			if mode := strings.TrimSpace(a.core.Status().Mode); mode != "" {
-				settings.Mode = mode
-			}
-		}
-		_ = configstore.SaveCoreSettings(settings)
-		if a.core != nil && a.core.Status().Running {
-			if subs, loadErr := configstore.LoadSubscriptions(); loadErr == nil {
-				_ = a.core.Reload(ctx, a.coreParams(settings), providerSpecs(subs))
-			}
-		}
-	}
+	_ = a.reloadLive(ctx, func(current *configstore.CoreSettings) error {
+		current.BypassCN = false
+		return nil
+	})
 	a.storeGeoError(gen, msg)
 	a.broadcastCore("geo", msg, 0, 0)
 	return errors.New(msg)
@@ -240,27 +229,10 @@ func (a *appRuntime) failApply(ctx context.Context, gen int, cause error) error 
 func (a *appRuntime) persistBypass(ctx context.Context, on bool) error {
 	a.opMu.Lock()
 	defer a.opMu.Unlock()
-	settings, err := configstore.LoadCoreSettings()
-	if err != nil {
-		return err
-	}
-	settings.BypassCN = on
-	if a.core != nil {
-		if mode := strings.TrimSpace(a.core.Status().Mode); mode != "" {
-			settings.Mode = mode
-		}
-	}
-	if err := configstore.SaveCoreSettings(settings); err != nil {
-		return err
-	}
-	if a.core == nil || !a.core.Status().Running {
+	return a.reloadLive(ctx, func(settings *configstore.CoreSettings) error {
+		settings.BypassCN = on
 		return nil
-	}
-	subs, err := configstore.LoadSubscriptions()
-	if err != nil {
-		return err
-	}
-	return a.core.Reload(ctx, a.coreParams(settings), providerSpecs(subs))
+	})
 }
 
 func (a *appRuntime) callDownload(ctx context.Context, proxy string) error {

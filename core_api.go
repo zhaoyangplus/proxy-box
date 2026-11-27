@@ -276,15 +276,21 @@ func (a *appRuntime) handleCoreMode(rw http.ResponseWriter, r *http.Request) {
 
 func (a *appRuntime) applyCoreMode(ctx context.Context, mode string) (modeResponse, error) {
 	mode = strings.ToLower(strings.TrimSpace(mode))
-	if err := a.core.SwitchMode(ctx, mode); err != nil {
+	a.opMu.Lock()
+	err := a.core.SwitchMode(ctx, mode)
+	if err != nil {
+		a.opMu.Unlock()
 		return modeResponse{}, err
 	}
 	settings, err := configstore.LoadCoreSettings()
 	if err != nil {
+		a.opMu.Unlock()
 		return modeResponse{}, err
 	}
 	settings.Mode = mode
-	if err := configstore.SaveCoreSettings(settings); err != nil {
+	err = configstore.SaveCoreSettings(settings)
+	a.opMu.Unlock()
+	if err != nil {
 		return modeResponse{}, err
 	}
 	a.invalidateTrayState()
@@ -375,35 +381,39 @@ func (a *appRuntime) handleSysproxySet(rw http.ResponseWriter, r *http.Request) 
 }
 
 func (a *appRuntime) applySystemProxy(enable bool) (bool, error) {
-	if enable && (a.core == nil || !a.core.Status().Running) {
-		return false, errors.New("内核未运行，不能开启系统代理")
-	}
-	settings, err := configstore.LoadCoreSettings()
-	if err != nil {
-		return false, err
-	}
+	a.shutdownMu.Lock()
+	defer a.shutdownMu.Unlock()
 	if enable {
+		if a.core == nil || !a.core.Status().Running || a.setProxy == nil {
+			return false, errors.New("内核未运行，不能开启系统代理")
+		}
+		settings, err := configstore.LoadCoreSettings()
+		if err != nil {
+			return false, err
+		}
 		port := settings.MixedPort
 		if st := a.core.Status(); st.Ports.Mixed > 0 {
 			port = st.Ports.Mixed
 		}
+		if port <= 0 {
+			return false, errors.New("内核未运行，不能开启系统代理")
+		}
 		if err := a.setProxy("127.0.0.1", port, ""); err != nil {
 			return false, err
 		}
-		settings.SystemProxy = true
-	} else {
-		if a.restore != nil {
-			if err := a.restore(); err != nil {
-				return false, err
-			}
+	} else if a.restore != nil {
+		if err := a.restore(); err != nil {
+			return false, err
 		}
-		settings.SystemProxy = false
 	}
-	if err := configstore.SaveCoreSettings(settings); err != nil {
+	if err := configstore.UpdateCoreSettings(func(settings *configstore.CoreSettings) error {
+		settings.SystemProxy = enable
+		return nil
+	}); err != nil {
 		return false, err
 	}
 	a.invalidateTrayState()
-	return settings.SystemProxy, nil
+	return enable, nil
 }
 
 func (a *appRuntime) handleSubs(rw http.ResponseWriter, r *http.Request) {
@@ -500,7 +510,12 @@ func (a *appRuntime) updateSubFields(rw http.ResponseWriter, r *http.Request) {
 	}
 	id = strings.TrimSpace(id)
 	a.opMu.Lock()
-	defer a.opMu.Unlock()
+	locked := true
+	defer func() {
+		if locked {
+			a.opMu.Unlock()
+		}
+	}()
 	subs, err := configstore.LoadSubscriptions()
 	if err != nil {
 		writeUserErr(rw, err)
@@ -562,10 +577,13 @@ func (a *appRuntime) updateSubFields(rw http.ResponseWriter, r *http.Request) {
 		writeUserErr(rw, err)
 		return
 	}
-	if err := a.reloadIfRunning(r.Context(), subs); err != nil {
+	if err := a.reloadLive(r.Context(), nil); err != nil {
 		writeUserErr(rw, err)
 		return
 	}
+	a.opMu.Unlock()
+	locked = false
+	a.noteProviderCounts(r.Context())
 	writeJSON(rw, http.StatusOK, subResponse{OK: true, Subscription: sub})
 }
 
@@ -583,7 +601,12 @@ func (a *appRuntime) deleteSub(rw http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.opMu.Lock()
-	defer a.opMu.Unlock()
+	locked := true
+	defer func() {
+		if locked {
+			a.opMu.Unlock()
+		}
+	}()
 	subs, err := configstore.LoadSubscriptions()
 	if err != nil {
 		writeUserErr(rw, err)
@@ -600,10 +623,13 @@ func (a *appRuntime) deleteSub(rw http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = os.Remove(filepath.Join(a.coreDir, "providers", id+".txt"))
-	if err := a.reloadIfRunning(r.Context(), subs); err != nil {
+	if err := a.reloadLive(r.Context(), nil); err != nil {
 		writeUserErr(rw, err)
 		return
 	}
+	a.opMu.Unlock()
+	locked = false
+	a.noteProviderCounts(r.Context())
 	writeJSON(rw, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -716,14 +742,12 @@ func (a *appRuntime) updateSubscription(ctx context.Context, sub configstore.Sub
 // reloadSubs hot-reloads the running core from the saved subscriptions and returns the stored list.
 func (a *appRuntime) reloadSubs(ctx context.Context) ([]configstore.Subscription, error) {
 	a.opMu.Lock()
-	defer a.opMu.Unlock()
-	subs, err := configstore.LoadSubscriptions()
+	err := a.reloadLive(ctx, nil)
+	a.opMu.Unlock()
 	if err != nil {
 		return nil, err
 	}
-	if err := a.reloadIfRunning(ctx, subs); err != nil {
-		return nil, err
-	}
+	a.noteProviderCounts(ctx)
 	return configstore.LoadSubscriptions()
 }
 
@@ -744,40 +768,6 @@ func (a *appRuntime) saveSubResult(id string, apply func(*configstore.Subscripti
 		return nil
 	}
 	apply(&subs[idx])
-	return configstore.SaveSubscriptions(subs)
-}
-
-func (a *appRuntime) reloadIfRunning(ctx context.Context, subs []configstore.Subscription) error {
-	if a == nil || a.core == nil || !a.core.Status().Running {
-		return nil
-	}
-	settings, err := configstore.LoadCoreSettings()
-	if err != nil {
-		return err
-	}
-	if mode := strings.TrimSpace(a.core.Status().Mode); mode != "" {
-		settings.Mode = mode
-	}
-	if err := a.core.Reload(ctx, a.coreParams(settings), providerSpecs(subs)); err != nil {
-		return err
-	}
-	defer a.kickGeoDownload()
-	counts, err := providerNodeCounts(ctx, a.core.Status().Ports.Controller, settings.Secret)
-	if err != nil {
-		return nil
-	}
-	changed := false
-	for i := range subs {
-		n, ok := counts[subs[i].ID]
-		if !ok || subs[i].NodeCount == n {
-			continue
-		}
-		subs[i].NodeCount = n
-		changed = true
-	}
-	if !changed {
-		return nil
-	}
 	return configstore.SaveSubscriptions(subs)
 }
 

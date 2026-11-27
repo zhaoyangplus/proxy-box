@@ -457,7 +457,28 @@ type CoreSettings struct {
 func LoadCoreSettings() (CoreSettings, error) {
 	mu.Lock()
 	defer mu.Unlock()
+	return loadCoreSettingsLocked()
+}
 
+// UpdateCoreSettings reads and writes core.json inside one lock.
+// A failed load does not write.
+func UpdateCoreSettings(fn func(*CoreSettings) error) error {
+	if fn == nil {
+		return nil
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	cfg, err := loadCoreSettingsLocked()
+	if err != nil {
+		return err
+	}
+	if err := fn(&cfg); err != nil {
+		return err
+	}
+	return saveCoreSettingsLocked(cfg)
+}
+
+func loadCoreSettingsLocked() (CoreSettings, error) {
 	path, err := corePath()
 	if err != nil {
 		return CoreSettings{}, err
@@ -505,7 +526,10 @@ func LoadCoreSettings() (CoreSettings, error) {
 func SaveCoreSettings(cfg CoreSettings) error {
 	mu.Lock()
 	defer mu.Unlock()
+	return saveCoreSettingsLocked(cfg)
+}
 
+func saveCoreSettingsLocked(cfg CoreSettings) error {
 	path, err := corePath()
 	if err != nil {
 		return err
