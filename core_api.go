@@ -305,6 +305,7 @@ func (a *appRuntime) followGlobal() (string, error) {
 	}
 	st := a.core.Status()
 	mc := mihomo.NewClient(fmt.Sprintf("127.0.0.1:%d", st.Ports.Controller), settings.Secret)
+	mc.SetDelayTestURL(configstore.LoadConfig().DelayTestURL)
 	if !mc.Available() {
 		return "", errors.New("未能连接到内置内核")
 	}
@@ -881,20 +882,12 @@ func (a *appRuntime) selectRequestedNode(clientID, group, node string) (string, 
 	return msg, live, fresh, nil
 }
 
-func nodeClient(snap detector.SystemSnapshot, clientID string) (detector.ProxyClientInfo, error) {
-	if strings.TrimSpace(clientID) != "builtin" {
-		return snap.ActiveClient, nil
+func nodeClient(snap detector.SystemSnapshot, _ string) (detector.ProxyClientInfo, error) {
+	client := snap.ActiveClient
+	if client.ID != "builtin" || !client.Running {
+		return detector.ProxyClientInfo{}, errors.New("内置内核未运行")
 	}
-	for _, client := range snap.Clients {
-		if client.ID != "builtin" {
-			continue
-		}
-		if !client.Running {
-			return detector.ProxyClientInfo{}, errors.New("内置内核未运行")
-		}
-		return client, nil
-	}
-	return detector.ProxyClientInfo{}, errors.New("内置内核未运行")
+	return client, nil
 }
 
 func listClientGroup(client detector.ProxyClientInfo, group string, testDelay bool) (*mihomo.NodeListResult, error) {
@@ -937,10 +930,8 @@ func (a *appRuntime) selectClientGroup(client detector.ProxyClientInfo, group, n
 }
 
 func groupClient(client detector.ProxyClientInfo) (*mihomo.Client, error) {
-	if client.ID == "v2rayn" {
-		return nil, errors.New("v2rayN 暂不支持按组选择节点")
-	}
 	mc := mihomo.NewClient(client.ExternalController, client.Secret)
+	mc.SetDelayTestURL(configstore.LoadConfig().DelayTestURL)
 	if !mc.Available() {
 		return nil, fmt.Errorf("未能连接到 %s 内核控制接口", client.Name)
 	}
@@ -956,7 +947,7 @@ func nodeSelectMessage(group, node string, live *mihomo.LiveNodeStatus) string {
 		if node == clashscript.AIAutoName {
 			return fmt.Sprintf("Proxy Box 专属通道已切回自动优选：%s", resolved)
 		}
-		return fmt.Sprintf("Proxy Box 专属通道已锁定节点：%s（外部代理软件节点不受影响）", resolved)
+		return fmt.Sprintf("Proxy Box 专属通道已锁定节点：%s", resolved)
 	}
 	shown := node
 	if node == core.BrowsingAutoName && live != nil && live.ExternalNode != "" {

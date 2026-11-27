@@ -16,7 +16,6 @@ import (
 	"time"
 	"unsafe"
 
-	"proxy-box/internal/clashscript"
 	"proxy-box/internal/configstore"
 	"proxy-box/internal/configurator"
 	"proxy-box/internal/detector"
@@ -88,7 +87,7 @@ func (h *sseHub) broadcast(ev sseEvent) {
 }
 
 func main() {
-	launchTarget := flag.String("launch", "", "Quickly launch target IDE (cursor or antigravity) with live proxy")
+	launchTarget := flag.String("launch", "", "Launch cursor, antigravity, or codex through the builtin proxy")
 	selfTest := flag.Bool("self-test", false, "Run non-destructive self-test JSON output and exit")
 	optimizeNow := flag.Bool("optimize", false, "Run optimal compliant node selection and print JSON result")
 	showVersion := flag.Bool("version", false, "Print Proxy Box version and exit")
@@ -235,26 +234,17 @@ func main() {
 				Codex:       true,
 				SyncUserEnv: snap.AppConfig.SyncUserEnv,
 			})
-			if snap.ActiveClient.ID == "clash_verge" && snap.ActiveClient.ConfigDir != "" {
-				_, _ = clashscript.Inject(snap.ActiveClient.ConfigDir, snap.ActiveClient.ControllerPipe, snap.ActiveClient.ExternalController, snap.ActiveClient.Secret)
-			}
 			if snap.ActiveClient.ControllerReachable {
 				_, _ = detector.OptimizeClientNode(snap.ActiveClient)
 			}
 			if err != nil {
 				trayMgr.NotifyBalloon("配置失败", err.Error())
 			} else {
-				trayMgr.NotifyBalloon("免 TUN 代理已生效", fmt.Sprintf("已同步 %s 端口 %s 并优选最优节点", snap.ActiveClient.Name, snap.ActiveClient.ProxyURL))
+				trayMgr.NotifyBalloon("免 TUN 代理已生效", fmt.Sprintf("已同步内置内核端口 %s 并优选节点", snap.ActiveClient.ProxyURL))
 			}
 		case tray.MenuRestoreAll:
 			_, _ = configurator.RestoreAll()
-			snap := detector.DetectAll()
-			for _, c := range snap.Clients {
-				if c.ID == "clash_verge" && c.ConfigDir != "" && c.RuleInjected {
-					_ = clashscript.Remove(c.ConfigDir, c.ControllerPipe, c.ExternalController, c.Secret)
-				}
-			}
-			trayMgr.NotifyBalloon("已还原默认配置", "Cursor / Claude Code / Antigravity 及扩展脚本已恢复")
+			trayMgr.NotifyBalloon("已还原默认配置", "已还原 Cursor、Claude Code、Antigravity 与 Codex 的配置")
 		case tray.MenuCheckUpdate:
 			if w != nil {
 				w.Dispatch(func() {
@@ -310,7 +300,7 @@ func main() {
 
 func startLiveWatcher(hub *sseHub, trayMgr *tray.Manager) {
 	cfg := configstore.LoadConfig()
-	prevStamp := detector.FastConfigStamp(cfg)
+	prevStamp := detector.FastConfigStamp()
 	prevSnap := detector.DetectAll()
 	lastOptimizeAt := time.Time{}
 
@@ -321,14 +311,6 @@ func startLiveWatcher(hub *sseHub, trayMgr *tray.Manager) {
 		initSnap := detector.DetectAll()
 		changed := false
 		reason := ""
-
-		for _, c := range initSnap.Clients {
-			if c.ID == "clash_verge" && c.ConfigDir != "" && clashscript.NeedsUpgrade(c.ConfigDir) {
-				_, _ = clashscript.Inject(c.ConfigDir, c.ControllerPipe, c.ExternalController, c.Secret)
-				changed = true
-				reason = "已自动升级分流脚本至 v4（支持 :17897 独立隔离通道，刷新一次订阅即生效）"
-			}
-		}
 
 		if initSnap.AppConfig.IsAutoOptimizeEnabled() && initSnap.AppConfig.NodeSelectionMode != "manual" &&
 			initSnap.ActiveClient.ControllerReachable && initSnap.ActiveClient.IsolatedGroup {
@@ -358,7 +340,7 @@ func startLiveWatcher(hub *sseHub, trayMgr *tray.Manager) {
 	for range ticker.C {
 		tickCount++
 		cfg = configstore.LoadConfig()
-		currStamp := detector.FastConfigStamp(cfg)
+		currStamp := detector.FastConfigStamp()
 		stampChanged := currStamp != prevStamp
 
 		// Run full DetectAll immediately on any config/subscription file change, or every ~3.6s for live node/process changes
@@ -405,7 +387,7 @@ func startLiveWatcher(hub *sseHub, trayMgr *tray.Manager) {
 					SyncUserEnv: cfg.SyncUserEnv,
 				})
 				if currClient.DedicatedPortActive {
-					reasons = append(reasons, fmt.Sprintf("独立隔离通道 %s 已上线，已自动同步全部 AI 工具（与外部代理节点双向隔离）", currClient.ProxyURL))
+					reasons = append(reasons, fmt.Sprintf("独立隔离通道 %s 已上线，已自动同步全部 AI 工具", currClient.ProxyURL))
 				} else {
 					reasons = append(reasons, fmt.Sprintf("检测到代理切换至 %s (%s)，已自动同步 IDE 端口", currClient.Name, currClient.ProxyURL))
 				}
@@ -458,7 +440,7 @@ func startLiveWatcher(hub *sseHub, trayMgr *tray.Manager) {
 
 		anythingChanged := stampChanged || clientOrPortChanged || profileChanged || tunChanged || nodeChanged || extNodeChanged || reachChanged
 		if anythingChanged {
-			prevStamp = detector.FastConfigStamp(cfg)
+			prevStamp = detector.FastConfigStamp()
 			prevSnap = curr
 
 			reasonText := strings.Join(reasons, "；")
@@ -553,26 +535,6 @@ func startLocalAPIServer(hub *sseHub, rt *appRuntime, appUpdater *updater.Update
 		})
 	})
 
-	mux.HandleFunc("/api/select-client", func(rw http.ResponseWriter, r *http.Request) {
-		var req struct {
-			ClientID string `json:"clientId"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeErr(rw, err)
-			return
-		}
-		cfg := configstore.LoadConfig()
-		cfg.PreferredClient = strings.TrimSpace(req.ClientID)
-		if cfg.PreferredClient == "" {
-			cfg.PreferredClient = "auto"
-		}
-		if err := configstore.SaveConfig(cfg); err != nil {
-			writeErr(rw, err)
-			return
-		}
-		writeJSON(rw, http.StatusOK, detector.DetectAll())
-	})
-
 	mux.HandleFunc("/api/one-click", func(rw http.ResponseWriter, r *http.Request) {
 		var req struct {
 			ProxyURL    string `json:"proxyUrl"`
@@ -599,41 +561,12 @@ func startLocalAPIServer(hub *sseHub, rt *appRuntime, appUpdater *updater.Update
 			return
 		}
 
-		msg := fmt.Sprintf("已按 %s (%s) 配置全部工具", active.Name, proxyURL)
-		switch active.ID {
-		case "clash_verge":
-			if active.ConfigDir != "" {
-				reloaded, sErr := clashscript.Inject(active.ConfigDir, active.ControllerPipe, active.ExternalController, active.Secret)
-				if sErr == nil {
-					if reloaded {
-						msg += "，已热重载 AI 分流脚本"
-					} else {
-						msg += "，已写入 AI 分流脚本"
-					}
-				}
-			}
-			if active.ControllerReachable {
-				if opt, oErr := detector.OptimizeClientNode(active); oErr == nil {
-					msg += fmt.Sprintf("，已优选节点 %s (%d ms)", opt.SelectedNode, opt.DelayMs)
-				}
-			}
-		case "clash_mi":
-			if _, _, cErr := clashscript.ExportClashMiTemplates(); cErr == nil {
-				_ = setWindowsClipboard(clashscript.GenerateClashMiScript())
-				msg += "，已复制 Clash Mi 防香港覆写脚本"
-			}
-			if active.ControllerReachable {
-				if opt, oErr := detector.OptimizeClientNode(active); oErr == nil {
-					msg += fmt.Sprintf("，已优选节点 %s (%d ms)", opt.SelectedNode, opt.DelayMs)
-				}
-			}
-		case "v2rayn":
-			if rulesJSON, _, vErr := clashscript.GenerateV2rayNRulesJSON(); vErr == nil {
-				_ = setWindowsClipboard(rulesJSON)
-				msg += "，已复制 v2rayN 路由规则到剪贴板"
+		msg := fmt.Sprintf("已按内置内核 (%s) 配置全部工具", proxyURL)
+		if active.ControllerReachable {
+			if opt, oErr := detector.OptimizeClientNode(active); oErr == nil {
+				msg += fmt.Sprintf("，已优选节点 %s (%d ms)", opt.SelectedNode, opt.DelayMs)
 			}
 		}
-
 		writeJSON(rw, http.StatusOK, map[string]any{"ok": true, "message": msg})
 	})
 
@@ -657,101 +590,9 @@ func startLocalAPIServer(hub *sseHub, rt *appRuntime, appUpdater *updater.Update
 			writeErr(rw, err)
 			return
 		}
-		snap := detector.DetectAll()
-		for _, c := range snap.Clients {
-			if c.ID == "clash_verge" && c.ConfigDir != "" && c.RuleInjected {
-				_ = clashscript.Remove(c.ConfigDir, c.ControllerPipe, c.ExternalController, c.Secret)
-			}
-		}
 		writeJSON(rw, http.StatusOK, map[string]any{
 			"ok":      true,
-			"message": "已无损还原 Cursor / Claude Code / Antigravity 配置与扩展脚本",
-		})
-	})
-
-	mux.HandleFunc("/api/script/inject", func(rw http.ResponseWriter, r *http.Request) {
-		snap := detector.DetectAll()
-		var verge detector.ProxyClientInfo
-		for _, c := range snap.Clients {
-			if c.ID == "clash_verge" {
-				verge = c
-				break
-			}
-		}
-		reloaded, err := clashscript.Inject(verge.ConfigDir, verge.ControllerPipe, verge.ExternalController, verge.Secret)
-		if err != nil {
-			writeErr(rw, err)
-			return
-		}
-		msg := "已注入 v2 AI 分流脚本！请在 Clash Verge 订阅页点击刷新图标使新规则生效"
-		if reloaded {
-			msg = "已注入 v2 AI 分流脚本并已自动热重载 Mihomo 内核！"
-		}
-		if verge.ControllerReachable {
-			if opt, oErr := detector.OptimizeClientNode(verge); oErr == nil {
-				msg += fmt.Sprintf("（当前最优节点：%s · %d ms）", opt.SelectedNode, opt.DelayMs)
-			}
-		}
-		writeJSON(rw, http.StatusOK, map[string]any{"ok": true, "message": msg})
-	})
-
-	mux.HandleFunc("/api/script/remove", func(rw http.ResponseWriter, r *http.Request) {
-		snap := detector.DetectAll()
-		var verge detector.ProxyClientInfo
-		for _, c := range snap.Clients {
-			if c.ID == "clash_verge" {
-				verge = c
-				break
-			}
-		}
-		if err := clashscript.Remove(verge.ConfigDir, verge.ControllerPipe, verge.ExternalController, verge.Secret); err != nil {
-			writeErr(rw, err)
-			return
-		}
-		writeJSON(rw, http.StatusOK, map[string]any{"ok": true, "message": "已移除 AI 分流脚本并恢复原始 Script.js"})
-	})
-
-	mux.HandleFunc("/api/clashmi/export", func(rw http.ResponseWriter, r *http.Request) {
-		var req struct {
-			Format string `json:"format"`
-		}
-		_ = json.NewDecoder(r.Body).Decode(&req)
-		jsPath, yamlPath, err := clashscript.ExportClashMiTemplates()
-		if err != nil {
-			writeErr(rw, err)
-			return
-		}
-		if strings.ToLower(req.Format) == "yaml" {
-			_ = setWindowsClipboard(clashscript.GenerateClashMiYAMLOverride())
-			writeJSON(rw, http.StatusOK, map[string]any{
-				"ok":      true,
-				"path":    yamlPath,
-				"message": "已复制 Clash Mi YAML 覆写规则到剪贴板（模板已存至 ~/.proxy-box/）",
-			})
-			return
-		}
-		_ = setWindowsClipboard(clashscript.GenerateClashMiScript())
-		writeJSON(rw, http.StatusOK, map[string]any{
-			"ok":      true,
-			"path":    jsPath,
-			"message": "已复制 Clash Mi 防香港 JS 覆写脚本到剪贴板！在 Clash Mi 粘贴添加覆写即可生效",
-		})
-	})
-
-	mux.HandleFunc("/api/v2rayn/export", func(rw http.ResponseWriter, r *http.Request) {
-		rulesJSON, savedPath, err := clashscript.GenerateV2rayNRulesJSON()
-		if err != nil {
-			writeErr(rw, err)
-			return
-		}
-		if err := setWindowsClipboard(rulesJSON); err != nil {
-			writeErr(rw, fmt.Errorf("写入系统剪贴板失败: %w", err))
-			return
-		}
-		writeJSON(rw, http.StatusOK, map[string]any{
-			"ok":      true,
-			"path":    savedPath,
-			"message": "已复制 v2rayN 路由规则 JSON！打开 v2rayN「设置 -> 路由设置 -> 双击规则集 -> 从剪贴板导入规则」即可",
+			"message": "已无损还原 Cursor、Claude Code、Antigravity 与 Codex 的配置",
 		})
 	})
 
@@ -813,25 +654,6 @@ func startLocalAPIServer(hub *sseHub, rt *appRuntime, appUpdater *updater.Update
 		snap := detector.DetectAll()
 		rep := diagnostics.RunDiagnostics(snap.ActiveClient.Name, snap.ActiveClient.ProxyHost, snap.ActiveClient.MixedPort)
 		writeJSON(rw, http.StatusOK, rep)
-	})
-
-	mux.HandleFunc("/api/open-clash", func(rw http.ResponseWriter, r *http.Request) {
-		snap := detector.DetectAll()
-		active := snap.ActiveClient
-		if active.ExePath != "" {
-			if err := launcher.OpenAppOrPath(active.ExePath); err != nil {
-				writeErr(rw, err)
-				return
-			}
-			writeJSON(rw, http.StatusOK, map[string]any{"ok": true})
-			return
-		}
-		if active.ConfigDir != "" {
-			_ = launcher.OpenAppOrPath(active.ConfigDir)
-			writeJSON(rw, http.StatusOK, map[string]any{"ok": true})
-			return
-		}
-		writeErr(rw, fmt.Errorf("未找到 %s 程序路径，可在右上角设置中指定", active.Name))
 	})
 
 	mux.HandleFunc("/api/open-backups", func(rw http.ResponseWriter, r *http.Request) {
@@ -1018,8 +840,8 @@ func runQuickLaunch(targetID string) {
 	snap := detector.DetectAll()
 	if !snap.ActiveClient.PortReachable {
 		showMessageBox(
-			"代理客户端端口未就绪",
-			fmt.Sprintf("未能连接到 %s 本地端口 (%s)，请先启动代理客户端（Clash Verge / Clash Mi / v2rayN）后重试。", snap.ActiveClient.Name, snap.ActiveClient.ProxyURL),
+			"内置内核端口未就绪",
+			fmt.Sprintf("未能连接到内置内核端口 (%s)，请先启动 Proxy Box 内核后重试。", snap.ActiveClient.ProxyURL),
 			0x30,
 		)
 		return
@@ -1037,54 +859,6 @@ func runSelfTest() {
 		"diagnostics": rep,
 	}, "", "  ")
 	fmt.Println(string(out))
-}
-
-func setWindowsClipboard(text string) error {
-	user32 := windows.NewLazySystemDLL("user32.dll")
-	kernel32 := windows.NewLazySystemDLL("kernel32.dll")
-
-	openClip := user32.NewProc("OpenClipboard")
-	closeClip := user32.NewProc("CloseClipboard")
-	emptyClip := user32.NewProc("EmptyClipboard")
-	setClipData := user32.NewProc("SetClipboardData")
-
-	globalAlloc := kernel32.NewProc("GlobalAlloc")
-	globalLock := kernel32.NewProc("GlobalLock")
-	globalUnlock := kernel32.NewProc("GlobalUnlock")
-
-	utf16, err := windows.UTF16FromString(text)
-	if err != nil {
-		return err
-	}
-	byteSize := uintptr(len(utf16) * 2)
-
-	const gmemMoveable = 0x0002
-	const cfUnicodeText = 13
-
-	hMem, _, err := globalAlloc.Call(gmemMoveable, byteSize)
-	if hMem == 0 {
-		return fmt.Errorf("GlobalAlloc failed: %v", err)
-	}
-	ptr, _, _ := globalLock.Call(hMem)
-	if ptr == 0 {
-		return fmt.Errorf("GlobalLock failed")
-	}
-	rtlMoveMemory := kernel32.NewProc("RtlMoveMemory")
-	_, _, _ = rtlMoveMemory.Call(ptr, uintptr(unsafe.Pointer(&utf16[0])), byteSize)
-	globalUnlock.Call(hMem)
-
-	r, _, err := openClip.Call(0)
-	if r == 0 {
-		return fmt.Errorf("OpenClipboard failed: %v", err)
-	}
-	defer closeClip.Call()
-
-	emptyClip.Call()
-	res, _, err := setClipData.Call(cfUnicodeText, hMem)
-	if res == 0 {
-		return fmt.Errorf("SetClipboardData failed: %v", err)
-	}
-	return nil
 }
 
 func writeJSON(rw http.ResponseWriter, code int, v any) {

@@ -13,12 +13,14 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"proxy-box/internal/clashscript"
 )
 
 const (
 	AIGroupName          = "🤖 AI-IDE"
 	AIAutoName           = "⚡ AI-Auto"
-	speedTestGroupName   = "🧪 SPEEDTEST"
+	speedTestGroupName   = clashscript.SpeedTestGroupName
 	TestURL              = "http://www.gstatic.com/generate_204"
 	groupDelayTimeoutMs  = 5000
 	singleNodeDelayMs    = 5000

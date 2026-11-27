@@ -219,27 +219,15 @@ func (a *appRuntime) coreMode() string {
 }
 
 func reachableProxyURLs() []string {
-	snap := detector.DetectAll()
-	seen := map[string]bool{}
-	var urls []string
-	add := func(client detector.ProxyClientInfo) {
-		if !client.PortReachable || !client.HTTPVerified || client.ProxyURL == "" || seen[client.ProxyURL] {
-			return
-		}
-		seen[client.ProxyURL] = true
-		urls = append(urls, client.ProxyURL)
+	client := detector.DetectAll().ActiveClient
+	if client.ID != "builtin" || !client.Running || client.MixedPort <= 0 {
+		return nil
 	}
-	for _, client := range snap.Clients {
-		if client.ID == "builtin" && client.Running {
-			add(client)
-		}
+	host := client.ProxyHost
+	if host == "" {
+		host = "127.0.0.1"
 	}
-	for _, client := range snap.Clients {
-		if client.ID != "builtin" {
-			add(client)
-		}
-	}
-	return urls
+	return []string{fmt.Sprintf("http://%s:%d", host, client.MixedPort)}
 }
 
 func providerSpecs(subs []configstore.Subscription) []core.ProviderSpec {

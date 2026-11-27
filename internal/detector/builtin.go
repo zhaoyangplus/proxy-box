@@ -34,9 +34,6 @@ type builtinYAML struct {
 // IDESyncAllowed reports whether the live watcher may rewrite IDE proxy settings.
 // A builtin client with no subscription nodes and no selected proxy node is refused.
 func IDESyncAllowed(client ProxyClientInfo, subs []configstore.Subscription) bool {
-	if client.ID != "builtin" {
-		return true
-	}
 	for _, sub := range subs {
 		if sub.Enabled && sub.NodeCount > 0 {
 			return true
@@ -120,7 +117,7 @@ func assembleBuiltin(procs map[string]*procDetail, paths []string, settings conf
 		} else {
 			info.PortReachable, info.HTTPVerified = probe(info.ProxyHost, mixed)
 		}
-		mc := mihomo.NewClient(info.ExternalController, info.Secret)
+		mc := controllerClient(info)
 		live := mc.GetLiveStatus()
 		info.ControllerReachable = live.Connected
 		info.IsolatedGroup = live.IsolatedGroup

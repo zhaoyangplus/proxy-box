@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"proxy-box/internal/configstore"
@@ -14,76 +17,74 @@ func TestMergeAppConfigKeepsAbsentFields(t *testing.T) {
 	configstore.SetBaseDir(dir)
 	t.Cleanup(func() { configstore.SetBaseDir("") })
 
-	current := configstore.AppConfig{
-		PreferredClient:   "clash_verge",
-		CustomClashDir:    `D:\Clash`,
-		CustomClashExe:    `D:\Clash\clash-verge.exe`,
-		ExcludeRegionsRegex: "HK",
-		SyncUserEnv:       true,
-		MinimizeToTray:    true,
-		AutoOptimizeNode:  configstore.BoolPtr(false),
-		AutoSyncOnChange:  configstore.BoolPtr(true),
-		NodeSelectionMode: "manual",
-		ManualNodeName:    "US-01",
-	}
+	current := configstore.LoadConfig()
+	current.CustomCursorExe = `D:\Cursor\Cursor.exe`
+	current.CustomCodexExe = `D:\Codex\codex.exe`
+	current.SyncUserEnv = true
+	current.MinimizeToTray = true
+	current.AutoOptimizeNode = configstore.BoolPtr(false)
+	current.AutoSyncOnChange = configstore.BoolPtr(true)
+	current.NodeSelectionMode = "manual"
+	current.ManualNodeName = "US-01"
+	current.DelayTestURL = "http://127.0.0.1/generate_204"
+	current.ManagedApps = map[string]bool{"cursor": true}
 	if err := configstore.SaveConfig(current); err != nil {
 		t.Fatal(err)
 	}
+	current = configstore.LoadConfig()
 
-	merged, err := mergeAppConfig(current, []byte(`{"preferredClient":"builtin"}`))
+	merged, err := mergeAppConfig(current, []byte(`{"customCursorExe":"E:\\Cursor.exe","preferredClient":"builtin","excludeRegionsRegex":"HK"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if merged.PreferredClient != "builtin" {
-		t.Fatalf("preferred = %s", merged.PreferredClient)
+	if merged.CustomCursorExe != `E:\Cursor.exe` || merged.CustomCodexExe != current.CustomCodexExe {
+		t.Fatalf("paths = %+v", merged)
 	}
-	if merged.CustomClashDir != current.CustomClashDir || merged.CustomClashExe != current.CustomClashExe {
-		t.Fatalf("paths cleared: %+v", merged)
-	}
-	if merged.ExcludeRegionsRegex != "HK" || merged.ManualNodeName != "US-01" || merged.NodeSelectionMode != "manual" {
+	if merged.DelayTestURL != current.DelayTestURL || merged.ManualNodeName != "US-01" || merged.NodeSelectionMode != "manual" {
 		t.Fatalf("text fields cleared: %+v", merged)
 	}
-	if !merged.SyncUserEnv || !merged.MinimizeToTray {
+	if !merged.SyncUserEnv || !merged.MinimizeToTray || !merged.IsAppEnabled("cursor") {
 		t.Fatalf("bools cleared: %+v", merged)
 	}
 	if merged.AutoOptimizeNode == nil || *merged.AutoOptimizeNode {
 		t.Fatalf("auto optimize = %v", merged.AutoOptimizeNode)
 	}
 
-	off, err := mergeAppConfig(merged, []byte(`{"syncUserEnv":false,"manualNodeName":""}`))
+	off, err := mergeAppConfig(merged, []byte(`{"syncUserEnv":false,"manualNodeName":"","managedApps":{"codex":true}}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if off.SyncUserEnv {
-		t.Fatal("syncUserEnv stayed true")
+	if off.SyncUserEnv || off.ManualNodeName != "" {
+		t.Fatalf("cleared fields stayed: %+v", off)
 	}
-	if off.ManualNodeName != "" {
-		t.Fatalf("manual node = %q", off.ManualNodeName)
-	}
-	if off.PreferredClient != "builtin" || off.CustomClashDir != current.CustomClashDir {
-		t.Fatalf("unrelated fields changed: %+v", off)
+	if !off.IsAppEnabled("cursor") || !off.IsAppEnabled("codex") {
+		t.Fatalf("managed apps = %+v", off.ManagedApps)
 	}
 
-	if err := configstore.SaveConfig(current); err != nil {
-		t.Fatal(err)
-	}
-	req := httptest.NewRequest(http.MethodPost, "/api/save-config", bytes.NewBufferString(`{"minimizeToTray":false}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/save-config", bytes.NewBufferString(`{"minimizeToTray":false,"delayTestURL":"http://example.test/204","speedTestURL":"https://example.test/10mb","speedTestMaxMB":10}`))
 	rec := httptest.NewRecorder()
 	handleSaveConfig(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status %d body %s", rec.Code, rec.Body.String())
 	}
 	stored := configstore.LoadConfig()
-	if stored.PreferredClient != current.PreferredClient || stored.CustomClashDir != current.CustomClashDir || stored.ManualNodeName != current.ManualNodeName {
+	if stored.MinimizeToTray || stored.CustomCursorExe != `D:\Cursor\Cursor.exe` || stored.ManualNodeName != "US-01" {
 		t.Fatalf("stored = %+v", stored)
 	}
-	if stored.MinimizeToTray {
-		t.Fatal("minimize flag was not updated")
+	if stored.DelayTestURL != "http://example.test/204" || stored.SpeedTestURL != "https://example.test/10mb" || stored.SpeedTestMaxMB != 10 {
+		t.Fatalf("urls = %+v", stored)
 	}
-	if !stored.SyncUserEnv || stored.ExcludeRegionsRegex != "HK" {
+	if !stored.SyncUserEnv || stored.AutoOptimizeNode == nil || *stored.AutoOptimizeNode {
 		t.Fatalf("absent fields changed: %+v", stored)
 	}
-	if stored.AutoOptimizeNode == nil || *stored.AutoOptimizeNode {
-		t.Fatalf("auto optimize changed: %v", stored.AutoOptimizeNode)
+	if !stored.IsAppEnabled("cursor") || stored.IsAppEnabled("codex") {
+		t.Fatalf("apps = %+v", stored.ManagedApps)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "preferredClient") || strings.Contains(string(raw), "excludeRegionsRegex") {
+		t.Fatalf("saved removed fields: %s", raw)
 	}
 }
