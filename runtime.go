@@ -14,6 +14,7 @@ import (
 	"proxy-box/internal/configstore"
 	"proxy-box/internal/core"
 	"proxy-box/internal/detector"
+	"proxy-box/internal/speedtest"
 	"proxy-box/internal/sysproxy"
 )
 
@@ -35,6 +36,7 @@ type coreEvent struct {
 type appRuntime struct {
 	hub          *sseHub
 	core         coreController
+	speed        *speedtest.Runner
 	coreDir      string
 	restore      func() error
 	setProxy     func(host string, port int, bypass string) error
@@ -70,7 +72,7 @@ func newAppRuntime(hub *sseHub) *appRuntime {
 	}
 }
 
-// Shutdown cancels geo work, restores the system proxy, and then stops the core.
+// Shutdown stops a download test, cancels geo work, restores the system proxy, and then stops the core.
 // A second call repeats that order. Overlapping calls wait and do the same.
 func (a *appRuntime) Shutdown() {
 	if a == nil {
@@ -78,9 +80,13 @@ func (a *appRuntime) Shutdown() {
 	}
 	a.mu.Lock()
 	cancel := a.cancelStart
+	speed := a.speed
 	a.mu.Unlock()
 	if cancel != nil {
 		cancel()
+	}
+	if speed != nil {
+		speed.Stop()
 	}
 	a.cancelGeo()
 	a.shutdownMu.Lock()

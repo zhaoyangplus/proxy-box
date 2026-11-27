@@ -21,6 +21,7 @@ import (
 	"proxy-box/internal/detector"
 	"proxy-box/internal/diagnostics"
 	"proxy-box/internal/launcher"
+	"proxy-box/internal/speedtest"
 	"proxy-box/internal/sysproxy"
 	"proxy-box/internal/tray"
 	"proxy-box/internal/updater"
@@ -44,6 +45,7 @@ type sseEvent struct {
 	Snapshot   *detector.SystemSnapshot  `json:"snapshot,omitempty"`
 	Update     *updater.DownloadProgress `json:"update,omitempty"`
 	Core       *coreEvent                `json:"core,omitempty"`
+	Speedtest  *speedtest.Progress       `json:"speedtest,omitempty"`
 }
 
 type sseHub struct {

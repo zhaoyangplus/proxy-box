@@ -139,6 +139,7 @@ func (a *appRuntime) register(mux *http.ServeMux) {
 	mux.HandleFunc("/api/nodes/list", a.handleNodesList)
 	mux.HandleFunc("/api/nodes/select", a.handleNodesSelect)
 	mux.HandleFunc("/api/nodes/test", a.handleNodesTest)
+	a.registerSpeedTest(mux)
 }
 
 func (a *appRuntime) coreStatusResponse() (coreStatusResponse, error) {
