@@ -121,8 +121,31 @@ func TestBypassCNRollsBackWhenPreflightFails(t *testing.T) {
 	rt.downloadGeo = func(ctx context.Context, dir, proxy string, on core.ProgressFunc) error {
 		return writeReadyGeo(dir)
 	}
+	var holdMu sync.Mutex
+	var holds []*os.File
+	t.Cleanup(func() {
+		holdMu.Lock()
+		defer holdMu.Unlock()
+		for _, f := range holds {
+			_ = f.Close()
+		}
+	})
 	rt.preflightGeo = func(context.Context, string, string, string) error {
+		opened := make([]*os.File, 0, 2)
+		for _, name := range []string{core.GeoIPFile, core.GeoSiteFile} {
+			f, err := os.Open(filepath.Join(rt.coreDir, name))
+			if err != nil {
+				return err
+			}
+			opened = append(opened, f)
+		}
+		holdMu.Lock()
+		holds = opened
+		holdMu.Unlock()
 		return core.ErrGeoPreflight
+	}
+	if err := os.WriteFile(filepath.Join(rt.coreDir, core.GeoIPFile+".tmp"), []byte("partial"), 0644); err != nil {
+		t.Fatal(err)
 	}
 	rec := postJSON(rt.handleBypassCN, `{"enable":true}`)
 	if rec.Code != 200 {
@@ -145,6 +168,92 @@ func TestBypassCNRollsBackWhenPreflightFails(t *testing.T) {
 	}
 	if fc.running != true {
 		t.Fatal("core stopped")
+	}
+	body, err := rt.coreStatusResponse()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body.GeoReady || body.GeoError == "" || body.Settings.BypassCN || !strings.Contains(body.GeoError, "地理数据无法加载") {
+		t.Fatalf("status %+v", body)
+	}
+	if _, statErr := os.Stat(filepath.Join(rt.coreDir, core.GeoIPFile+".tmp")); !os.IsNotExist(statErr) {
+		t.Fatal("geo temp file remained")
+	}
+	if !core.GeoFilesReady(rt.coreDir) {
+		t.Fatal("locked geo files were deleted")
+	}
+	holdMu.Lock()
+	for _, f := range holds {
+		_ = f.Close()
+	}
+	holdMu.Unlock()
+	if err := writeReadyGeo(rt.coreDir); err != nil {
+		t.Fatal(err)
+	}
+	ipPath := filepath.Join(rt.coreDir, core.GeoIPFile)
+	ip, err := os.OpenFile(ipPath, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ip.Write([]byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	_ = ip.Close()
+	if ready, _, _ := rt.geoView(); !ready {
+		t.Fatal("replaced geo files stayed unready")
+	}
+
+	var downloads atomic.Int32
+	rt.downloadGeo = func(ctx context.Context, dir, proxy string, on core.ProgressFunc) error {
+		downloads.Add(1)
+		return writeReadyGeo(dir)
+	}
+	rt.preflightGeo = func(context.Context, string, string, string) error { return nil }
+	rec = postJSON(rt.handleBypassCN, `{"enable":true,"retry":true}`)
+	if rec.Code != 200 {
+		t.Fatalf("retry %s", rec.Body.String())
+	}
+	waitGeo(t, func() bool { return n.Load() >= 2 && downloads.Load() >= 1 })
+	if downloads.Load() != 1 {
+		t.Fatalf("retry downloads %d", downloads.Load())
+	}
+	body, err = rt.coreStatusResponse()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !body.GeoReady || body.GeoDownloading || body.GeoError != "" || !body.Settings.BypassCN {
+		t.Fatalf("retry status %+v", body)
+	}
+}
+
+func TestDownloadFailureLeavesGeoFilesReady(t *testing.T) {
+	rt, _ := newGeoRuntime(t)
+	rt.downloadGeo = func(ctx context.Context, dir, proxy string, on core.ProgressFunc) error {
+		if err := writeReadyGeo(dir); err != nil {
+			return err
+		}
+		return errors.New("geo download: timeout")
+	}
+	var preflight atomic.Bool
+	rt.preflightGeo = func(context.Context, string, string, string) error {
+		preflight.Store(true)
+		return errors.New("preflight")
+	}
+	rec := postJSON(rt.handleBypassCN, `{"enable":true}`)
+	if rec.Code != 200 {
+		t.Fatalf("body %s", rec.Body.String())
+	}
+	waitGeo(t, func() bool {
+		_, _, geoErr := rt.geoView()
+		return strings.Contains(geoErr, "地理数据下载失败")
+	})
+	ready, busy, geoErr := rt.geoView()
+	settings, err := configstore.LoadCoreSettings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preflight.Load() || !ready || busy || settings.BypassCN || !core.GeoFilesReady(rt.coreDir) || !strings.Contains(geoErr, "地理数据下载失败") {
+		t.Fatalf("preflight %v ready %v busy %v bypass %v err %q", preflight, ready, busy, settings.BypassCN, geoErr)
 	}
 }
 

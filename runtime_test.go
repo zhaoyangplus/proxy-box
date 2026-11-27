@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"proxy-box/internal/core"
 )
@@ -106,5 +107,45 @@ func TestShutdownRestoresProxyBeforeStop(t *testing.T) {
 		if log[i] != "restore" || log[i+1] != "stop" {
 			t.Fatalf("order = %v", log)
 		}
+	}
+}
+
+func TestShutdownCancelsGeoBeforeRestore(t *testing.T) {
+	rt, fc := newGeoRuntime(t)
+	entered := make(chan struct{})
+	var mu sync.Mutex
+	var geoCtx context.Context
+	rt.downloadGeo = func(ctx context.Context, dir, proxy string, on core.ProgressFunc) error {
+		mu.Lock()
+		geoCtx = ctx
+		mu.Unlock()
+		close(entered)
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	var log []string
+	fc.log = &log
+	rt.restore = func() error {
+		mu.Lock()
+		ctx := geoCtx
+		mu.Unlock()
+		if ctx == nil || ctx.Err() == nil {
+			t.Errorf("geo job was not cancelled before restore")
+		}
+		log = append(log, "restore")
+		return nil
+	}
+	if err := rt.beginGeo(true, false); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("geo download did not start")
+	}
+	rt.Shutdown()
+	rt.Shutdown()
+	if strings.Join(log, ",") != "restore,stop,restore,stop" {
+		t.Fatalf("log = %v", log)
 	}
 }

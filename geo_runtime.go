@@ -14,13 +14,27 @@ import (
 )
 
 // geoCtl is the single background download. gen rejects a job that lost the race with retry or disable.
+// untrusted is set when preflight rejects the files. geoView stays false while those same files remain.
 type geoCtl struct {
-	mu      sync.Mutex
-	gen     int
-	busy    bool
-	apply   bool
-	errText string
-	cancel  context.CancelFunc
+	mu        sync.Mutex
+	gen       int
+	busy      bool
+	apply     bool
+	errText   string
+	cancel    context.CancelFunc
+	untrusted bool
+	badStamp  geoFileStamp
+}
+
+type geoFileStamp struct {
+	ip   geoOneStamp
+	site geoOneStamp
+}
+
+type geoOneStamp struct {
+	ok   bool
+	size int64
+	mod  int64
 }
 
 func (a *appRuntime) geoCtl() *geoCtl {
@@ -35,7 +49,17 @@ func (a *appRuntime) geoView() (ready, downloading bool, errText string) {
 	g := a.geoCtl()
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	return core.GeoFilesReady(a.coreDir), g.busy, g.errText
+	return a.geoFilesReady(g), g.busy, g.errText
+}
+
+func (a *appRuntime) geoFilesReady(g *geoCtl) bool {
+	if !core.GeoFilesReady(a.coreDir) {
+		return false
+	}
+	if g.untrusted && currentGeoStamp(a.coreDir) == g.badStamp {
+		return false
+	}
+	return true
 }
 
 func (a *appRuntime) setBypassCN(ctx context.Context, enable, retry bool) error {
@@ -129,6 +153,7 @@ func (a *appRuntime) runGeo(ctx context.Context, gen int) {
 		a.failGeo(gen, err)
 		return
 	}
+	a.clearGeoUntrusted()
 	g := a.geoCtl()
 	g.mu.Lock()
 	apply := g.apply && g.gen == gen
@@ -170,6 +195,7 @@ func (a *appRuntime) applyBypass(ctx context.Context, gen int) error {
 		return err
 	}
 	if err := a.callPreflight(ctx, a.core.Status().BinaryPath, body); err != nil {
+		a.markGeoUntrusted()
 		return a.failApply(ctx, gen, err)
 	}
 	if gen != 0 && !a.geoCurrent(gen) {
@@ -304,6 +330,24 @@ func (a *appRuntime) clearGeoError() {
 	a.storeGeoError(0, "")
 }
 
+func (a *appRuntime) clearGeoUntrusted() {
+	g := a.geoCtl()
+	g.mu.Lock()
+	g.untrusted = false
+	g.badStamp = geoFileStamp{}
+	g.mu.Unlock()
+}
+
+func (a *appRuntime) markGeoUntrusted() {
+	removeGeoFiles(a.coreDir)
+	stamp := currentGeoStamp(a.coreDir)
+	g := a.geoCtl()
+	g.mu.Lock()
+	g.untrusted = true
+	g.badStamp = stamp
+	g.mu.Unlock()
+}
+
 func (a *appRuntime) failGeo(gen int, err error) {
 	msg := publicErr(err)
 	a.storeGeoError(gen, msg)
@@ -330,4 +374,19 @@ func removeGeoFiles(dir string) {
 		_ = os.Remove(filepath.Join(dir, name))
 		_ = os.Remove(filepath.Join(dir, name+".tmp"))
 	}
+}
+
+func currentGeoStamp(dir string) geoFileStamp {
+	return geoFileStamp{
+		ip:   oneGeoStamp(filepath.Join(dir, core.GeoIPFile)),
+		site: oneGeoStamp(filepath.Join(dir, core.GeoSiteFile)),
+	}
+}
+
+func oneGeoStamp(path string) geoOneStamp {
+	info, err := os.Stat(path)
+	if err != nil || info.IsDir() {
+		return geoOneStamp{}
+	}
+	return geoOneStamp{ok: true, size: info.Size(), mod: info.ModTime().UnixNano()}
 }

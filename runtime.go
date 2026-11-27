@@ -70,7 +70,7 @@ func newAppRuntime(hub *sseHub) *appRuntime {
 	}
 }
 
-// Shutdown restores the system proxy and then stops the core.
+// Shutdown cancels geo work, restores the system proxy, and then stops the core.
 // A second call repeats that order. Overlapping calls wait and do the same.
 func (a *appRuntime) Shutdown() {
 	if a == nil {
@@ -82,6 +82,7 @@ func (a *appRuntime) Shutdown() {
 	if cancel != nil {
 		cancel()
 	}
+	a.cancelGeo()
 	a.shutdownMu.Lock()
 	defer a.shutdownMu.Unlock()
 	if a.restore != nil {
