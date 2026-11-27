@@ -135,19 +135,31 @@ func normalizeParams(p ConfigParams) (ConfigParams, error) {
 	return p, nil
 }
 
+// InvalidModeError is an empty mode or a mode other than rule, global, or direct.
+type InvalidModeError struct {
+	Mode string
+}
+
+func (e *InvalidModeError) Error() string {
+	if e == nil || e.Mode == "" {
+		return "mode is empty"
+	}
+	return fmt.Sprintf("mode %q", e.Mode)
+}
+
 func normalizeMode(mode string, emptyMeansRule bool) (string, error) {
 	mode = strings.TrimSpace(mode)
 	if mode == "" {
 		if emptyMeansRule {
 			return ModeRule, nil
 		}
-		return "", fmt.Errorf("mode is empty")
+		return "", &InvalidModeError{}
 	}
 	switch mode {
 	case ModeRule, ModeGlobal, ModeDirect:
 		return mode, nil
 	default:
-		return "", fmt.Errorf("mode %q", mode)
+		return "", &InvalidModeError{Mode: mode}
 	}
 }
 

@@ -118,6 +118,27 @@ func TestPublicErrIsChinese(t *testing.T) {
 	}
 }
 
+func TestPublicErrModeMatchIgnoresUnrelatedText(t *testing.T) {
+	const modeText = "模式只能是 rule、global 或 direct"
+	unrelated := []error{
+		errors.New("failed to switch mode for the user"),
+		errors.New("the mode is not available right now"),
+		errors.New("switch mode http 500: bad gateway"),
+	}
+	for _, err := range unrelated {
+		got := publicErr(err)
+		if got == modeText {
+			t.Fatalf("%v mapped to %s", err, got)
+		}
+	}
+	if publicErr(errors.New("mode is empty")) != modeText || publicErr(errors.New(`mode "tun"`)) != modeText {
+		t.Fatal("exact mode errors were not translated")
+	}
+	if publicErr(&core.InvalidModeError{Mode: "tun"}) != modeText || publicErr(&core.InvalidModeError{}) != modeText {
+		t.Fatal("typed invalid mode was not translated")
+	}
+}
+
 func TestCoreStatusSystemProxyActiveFollowsRunningCore(t *testing.T) {
 	useTempConfig(t)
 	settings, err := configstore.LoadCoreSettings()
