@@ -15,6 +15,8 @@ import (
 
 const stoppedSwitchMessage = "已开启，启动内核后自动生效"
 
+const errNeedManagedApp = "请先在「AI 工具」页开启至少一个需要免 TUN 代理的应用"
+
 func (a *appRuntime) handleToolsToggle(rw http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeUserErr(rw, errors.New("请使用 POST"))
@@ -125,4 +127,140 @@ func (a *appRuntime) applyEnabledTargetsLocked(port int) error {
 		}
 	}
 	return nil
+}
+
+func (a *appRuntime) handleOneClick(rw http.ResponseWriter, r *http.Request) {
+	var req struct {
+		SyncUserEnv bool `json:"syncUserEnv"`
+	}
+	if r.Body != nil {
+		_ = json.NewDecoder(r.Body).Decode(&req)
+	}
+	cfg := configstore.LoadConfig()
+	if len(cfg.EnabledAppIDs()) == 0 {
+		writeUserErr(rw, errors.New(errNeedManagedApp))
+		return
+	}
+	port := a.aiDedicatedPort()
+	a.opMu.Lock()
+	_, err := configurator.ApplyAll(managedApplyOptions(cfg, port, req.SyncUserEnv))
+	a.opMu.Unlock()
+	if err != nil {
+		writeUserErr(rw, err)
+		return
+	}
+	msg := fmt.Sprintf("已按 AI 专属端口 %d 配置已开启的应用", port)
+	snap := a.snapshot()
+	if snap.ActiveClient.ControllerReachable {
+		if opt, oErr := detector.OptimizeClientNode(snap.ActiveClient); oErr == nil {
+			msg += fmt.Sprintf("，已优选节点 %s (%d ms)", opt.SelectedNode, opt.DelayMs)
+		}
+	}
+	writeJSON(rw, http.StatusOK, map[string]any{"ok": true, "message": msg})
+}
+
+func (a *appRuntime) handleRestoreAll(rw http.ResponseWriter, r *http.Request) {
+	msg, err := a.restoreAllManaged(r.Context())
+	if err != nil {
+		writeUserErr(rw, err)
+		return
+	}
+	writeJSON(rw, http.StatusOK, map[string]any{"ok": true, "message": msg})
+}
+
+func (a *appRuntime) restoreAllManaged(ctx context.Context) (string, error) {
+	if a != nil {
+		a.opMu.Lock()
+		defer a.opMu.Unlock()
+	}
+	if _, err := configurator.RestoreAll(); err != nil {
+		return "", err
+	}
+	cfg := configstore.LoadConfig()
+	for id := range cfg.ManagedApps {
+		cfg.ManagedApps[id] = false
+	}
+	if err := configstore.SaveConfig(cfg); err != nil {
+		return "", err
+	}
+	if err := a.reloadCoreLocked(ctx); err != nil {
+		return "", err
+	}
+	return "已还原已开启应用的配置，并关闭全部免 TUN 开关", nil
+}
+
+func (a *appRuntime) applyEnabledFromTray(balloon func(title, info string)) {
+	if balloon == nil {
+		return
+	}
+	cfg := configstore.LoadConfig()
+	if len(cfg.EnabledAppIDs()) == 0 {
+		balloon(errNeedManagedApp, errNeedManagedApp)
+		return
+	}
+	port := a.aiDedicatedPort()
+	a.opMu.Lock()
+	_, err := configurator.ApplyAll(managedApplyOptions(cfg, port, cfg.SyncUserEnv))
+	a.opMu.Unlock()
+	if err != nil {
+		balloon("配置失败", err.Error())
+		return
+	}
+	snap := a.snapshot()
+	if snap.ActiveClient.ControllerReachable {
+		_, _ = detector.OptimizeClientNode(snap.ActiveClient)
+	}
+	balloon("免 TUN 代理已生效", fmt.Sprintf("已同步 AI 专属端口 %d", port))
+}
+
+func (a *appRuntime) syncLiveApps(cfg configstore.AppConfig, client detector.ProxyClientInfo, subs []configstore.Subscription, subErr error) (bool, string, error) {
+	if a != nil {
+		a.opMu.Lock()
+		defer a.opMu.Unlock()
+	}
+	return syncEnabledApps(cfg, client, subs, subErr)
+}
+
+func syncEnabledApps(cfg configstore.AppConfig, client detector.ProxyClientInfo, subs []configstore.Subscription, subErr error) (bool, string, error) {
+	if client.ID == "builtin" && (subErr != nil || !detector.IDESyncAllowed(client, subs)) {
+		return false, "内置内核还没有可用订阅或节点，未改写 IDE 配置", nil
+	}
+	if len(cfg.EnabledAppIDs()) == 0 {
+		return false, fmt.Sprintf("检测到代理源变更为 %s (%s)", client.Name, client.ProxyURL), nil
+	}
+	if client.DedicatedPort <= 0 {
+		return false, "", errors.New("AI 专属端口未知")
+	}
+	if _, err := configurator.ApplyAll(managedApplyOptions(cfg, client.DedicatedPort, cfg.SyncUserEnv)); err != nil {
+		return false, "", err
+	}
+	proxyURL := fmt.Sprintf("http://127.0.0.1:%d", client.DedicatedPort)
+	if client.DedicatedPortActive {
+		return true, fmt.Sprintf("独立隔离通道 %s 已上线，已自动同步已开启的 AI 工具", proxyURL), nil
+	}
+	return true, fmt.Sprintf("检测到代理切换至 %s (%s)，已自动同步已开启的 IDE 端口", client.Name, proxyURL), nil
+}
+
+func (a *appRuntime) aiDedicatedPort() int {
+	if a != nil && a.core != nil && a.core.Status().Running {
+		if port := a.core.Status().Ports.AIDedicated; port > 0 {
+			return port
+		}
+	}
+	settings, err := configstore.LoadCoreSettings()
+	if err == nil && settings.AIDedicatedPort > 0 {
+		return settings.AIDedicatedPort
+	}
+	return 27892
+}
+
+func managedApplyOptions(cfg configstore.AppConfig, port int, syncUserEnv bool) configurator.ApplyOptions {
+	return configurator.ApplyOptions{
+		ProxyURL:    fmt.Sprintf("http://127.0.0.1:%d", port),
+		Cursor:      cfg.IsAppEnabled("cursor"),
+		Antigravity: cfg.IsAppEnabled("antigravity"),
+		ClaudeCode:  cfg.IsAppEnabled("claude_code"),
+		Codex:       cfg.IsAppEnabled("codex"),
+		SyncUserEnv: syncUserEnv,
+	}
 }

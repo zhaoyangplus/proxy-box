@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"testing"
 
 	"proxy-box/internal/configstore"
+	"proxy-box/internal/configurator"
 	"proxy-box/internal/core"
 	"proxy-box/internal/detector"
 )
@@ -249,6 +251,204 @@ func TestStartCoreAppliesOnlyEnabledApps(t *testing.T) {
 	}
 	if !bytes.Equal(mustRead(t, codexEnv(t)), codexBody) {
 		t.Fatal("codex was rewritten")
+	}
+}
+
+func TestOneClickRefusesWhenEveryAppIsOff(t *testing.T) {
+	useTempHome(t)
+	original := []byte("{\"editor.fontSize\":1}\n")
+	writeRaw(t, cursorSettings(t), original)
+	rt := &appRuntime{core: &fakeCore{running: true, ports: core.Ports{Mixed: 27890, AIDedicated: 27892}}}
+	rec := postJSON(rt.handleOneClick, `{}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("code %d body %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Error != errNeedManagedApp {
+		t.Fatalf("error %q", body.Error)
+	}
+	if !bytes.Equal(mustRead(t, cursorSettings(t)), original) {
+		t.Fatal("one-click wrote a file while every app was off")
+	}
+}
+
+func TestOneClickWritesOnlyEnabledApps(t *testing.T) {
+	useTempHome(t)
+	writeRaw(t, cursorSettings(t), []byte("{}\n"))
+	codexBody := []byte("# c\n")
+	writeRaw(t, codexEnv(t), codexBody)
+	enableApp(t, "cursor", true)
+	fc := &fakeCore{running: true, ports: core.Ports{Mixed: 27890, AIDedicated: 27992}}
+	rt := &appRuntime{
+		core: fc,
+		detect: func() detector.SystemSnapshot {
+			return detector.SystemSnapshot{AppConfig: configstore.LoadConfig()}
+		},
+	}
+	rec := postJSON(rt.handleOneClick, `{"syncUserEnv":false}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code %d body %s", rec.Code, rec.Body.String())
+	}
+	if !bytes.Contains(mustRead(t, cursorSettings(t)), []byte("http://127.0.0.1:27992")) {
+		t.Fatalf("cursor = %s", mustRead(t, cursorSettings(t)))
+	}
+	if !bytes.Equal(mustRead(t, codexEnv(t)), codexBody) {
+		t.Fatal("codex changed")
+	}
+	if configstore.LoadState().UserEnvManaged {
+		t.Fatal("user env written")
+	}
+}
+
+func TestRestoreAllClearsFlags(t *testing.T) {
+	useTempHome(t)
+	original := []byte("{\r\n  \"editor.fontSize\": 3\r\n}\r\n")
+	writeRaw(t, cursorSettings(t), original)
+	enableApp(t, "cursor", true)
+	enableApp(t, "codex", true)
+	if _, err := configurator.ApplyTarget("cursor", "http://127.0.0.1:27892"); err != nil {
+		t.Fatal(err)
+	}
+	fc := &fakeCore{running: true, ports: core.Ports{Mixed: 27890, AIDedicated: 27892}}
+	rt := &appRuntime{core: fc}
+	rec := postJSON(rt.handleRestoreAll, ``)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code %d body %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		OK      bool   `json:"ok"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if !body.OK || !bytes.Contains([]byte(body.Message), []byte("关闭")) {
+		t.Fatalf("body %s", rec.Body.String())
+	}
+	cfg := configstore.LoadConfig()
+	if cfg.IsAppEnabled("cursor") || cfg.IsAppEnabled("codex") || len(cfg.EnabledAppIDs()) != 0 {
+		t.Fatalf("flags %+v", cfg.ManagedApps)
+	}
+	if !bytes.Equal(mustRead(t, cursorSettings(t)), original) {
+		t.Fatalf("cursor = %s", mustRead(t, cursorSettings(t)))
+	}
+	if fc.reloads != 1 || len(fc.last.EnabledAIApps) != 0 {
+		t.Fatalf("reload %+v count %d", fc.last.EnabledAIApps, fc.reloads)
+	}
+}
+
+func TestSyncSkipsDisabledAppsAndUnusableCore(t *testing.T) {
+	useTempHome(t)
+	cursorBody := []byte("{}\n")
+	codexBody := []byte("# c\n")
+	writeRaw(t, cursorSettings(t), cursorBody)
+	writeRaw(t, codexEnv(t), codexBody)
+	enableApp(t, "cursor", true)
+	cfg := configstore.LoadConfig()
+	if cfg.SyncUserEnv {
+		t.Fatal("sync user env defaulted on")
+	}
+	client := detector.ProxyClientInfo{
+		ID: "builtin", Name: "内置内核", DedicatedPort: 27892, ProxyURL: "http://127.0.0.1:27890",
+	}
+	applied, reason, err := syncEnabledApps(cfg, client, nil, nil)
+	if err != nil || applied || reason == "" {
+		t.Fatalf("applied %v reason %q err %v", applied, reason, err)
+	}
+	if !bytes.Equal(mustRead(t, cursorSettings(t)), cursorBody) {
+		t.Fatal("sync wrote a file without a usable subscription")
+	}
+	subs := []configstore.Subscription{{ID: "s", Enabled: true, NodeCount: 2}}
+	applied, _, err = syncEnabledApps(cfg, client, subs, nil)
+	if err != nil || !applied {
+		t.Fatalf("applied %v err %v", applied, err)
+	}
+	if !bytes.Contains(mustRead(t, cursorSettings(t)), []byte("http://127.0.0.1:27892")) {
+		t.Fatalf("cursor = %s", mustRead(t, cursorSettings(t)))
+	}
+	if !bytes.Equal(mustRead(t, codexEnv(t)), codexBody) {
+		t.Fatal("disabled codex was rewritten")
+	}
+	written := mustRead(t, cursorSettings(t))
+	client.DedicatedPort = 27999
+	applied, reason, err = syncEnabledApps(cfg, client, subs, errors.New("load failed"))
+	if err != nil || applied || reason != "内置内核还没有可用订阅或节点，未改写 IDE 配置" {
+		t.Fatalf("applied %v reason %q err %v", applied, reason, err)
+	}
+	if !bytes.Equal(mustRead(t, cursorSettings(t)), written) {
+		t.Fatal("sync rewrote a file after the core became unusable")
+	}
+
+	off := configstore.LoadConfig()
+	off.ManagedApps["cursor"] = false
+	applied, _, err = syncEnabledApps(off, client, subs, nil)
+	if err != nil || applied {
+		t.Fatalf("all off applied %v err %v", applied, err)
+	}
+}
+
+func TestTrayApplyAllBalloonWhenNoneEnabled(t *testing.T) {
+	useTempHome(t)
+	rt := &appRuntime{}
+	var title, info string
+	rt.applyEnabledFromTray(func(a, b string) {
+		title, info = a, b
+	})
+	if title != errNeedManagedApp || info != errNeedManagedApp {
+		t.Fatalf("balloon %q %q", title, info)
+	}
+}
+
+func TestQuickSyncWritesOnlyEnabledApp(t *testing.T) {
+	useTempHome(t)
+	cursorBody := []byte("{\"a\":1}\n")
+	writeRaw(t, cursorSettings(t), cursorBody)
+	prevDetect := detectSnapshot
+	prevLaunch := launchWithProxy
+	t.Cleanup(func() {
+		detectSnapshot = prevDetect
+		launchWithProxy = prevLaunch
+	})
+	var calls int
+	var gotProxy string
+	detectSnapshot = func() detector.SystemSnapshot {
+		return detector.SystemSnapshot{
+			ActiveClient: detector.ProxyClientInfo{DedicatedPort: 27892, Name: "内置内核", ProxyURL: "http://127.0.0.1:27890"},
+			AppConfig:    configstore.LoadConfig(),
+			Targets:      []detector.AppTargetInfo{{ID: "cursor", ExePath: "cursor.exe"}},
+		}
+	}
+	launchWithProxy = func(id, exe, proxy string, _ bool) error {
+		calls++
+		gotProxy = proxy
+		if id != "cursor" || exe != "cursor.exe" {
+			t.Errorf("launch %s %s", id, exe)
+		}
+		return nil
+	}
+	if err := quickSyncAndLaunch("cursor", false); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 || gotProxy != "http://127.0.0.1:27892" {
+		t.Fatalf("calls %d proxy %s", calls, gotProxy)
+	}
+	if !bytes.Equal(mustRead(t, cursorSettings(t)), cursorBody) {
+		t.Fatal("disabled launch wrote settings")
+	}
+	enableApp(t, "cursor", true)
+	if err := quickSyncAndLaunch("cursor", true); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 {
+		t.Fatalf("calls %d", calls)
+	}
+	if !bytes.Contains(mustRead(t, cursorSettings(t)), []byte("http://127.0.0.1:27892")) {
+		t.Fatal("enabled launch did not write settings")
 	}
 }
 
