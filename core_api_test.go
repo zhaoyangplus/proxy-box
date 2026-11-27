@@ -97,6 +97,10 @@ func TestPublicErrIsChinese(t *testing.T) {
 		errors.New("import note.txt: want .exe or .zip"),
 		errors.New("download failed"),
 		errors.New("download stalled after 30s"),
+		core.ErrGeoHTML,
+		core.ErrGeoTooSmall,
+		core.ErrGeoPreflight,
+		errors.New("geo download: timeout"),
 		errors.New("127.0.0.1:7897: unreachable"),
 	}
 	for _, err := range cases {

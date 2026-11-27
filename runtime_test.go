@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -10,16 +11,23 @@ import (
 )
 
 type fakeCore struct {
-	log     *[]string
-	running bool
-	mode    string
-	ports   core.Ports
-	version string
-	reloads int
-	modes   []string
+	log         *[]string
+	running     bool
+	mode        string
+	ports       core.Ports
+	version     string
+	binary      string
+	reloads     int
+	failReloads int
+	modes       []string
+	started     core.ConfigParams
+	last        core.ConfigParams
+	seen        []core.ConfigParams
+	onReload    func()
 }
 
-func (f *fakeCore) Start(context.Context, string, core.ConfigParams, []core.ProviderSpec) (core.Status, error) {
+func (f *fakeCore) Start(_ context.Context, _ string, params core.ConfigParams, _ []core.ProviderSpec) (core.Status, error) {
+	f.started = params
 	f.running = true
 	if f.mode == "" {
 		f.mode = core.ModeRule
@@ -35,9 +43,19 @@ func (f *fakeCore) Stop() error {
 	return nil
 }
 
-func (f *fakeCore) Reload(context.Context, core.ConfigParams, []core.ProviderSpec) error {
+func (f *fakeCore) Reload(_ context.Context, params core.ConfigParams, _ []core.ProviderSpec) error {
 	f.reloads++
-	return nil
+	f.last = params
+	f.seen = append(f.seen, params)
+	var err error
+	if f.failReloads > 0 {
+		f.failReloads--
+		err = errors.New("reload refused")
+	}
+	if f.onReload != nil {
+		f.onReload()
+	}
+	return err
 }
 
 func (f *fakeCore) SwitchMode(_ context.Context, mode string) error {
@@ -48,10 +66,11 @@ func (f *fakeCore) SwitchMode(_ context.Context, mode string) error {
 
 func (f *fakeCore) Status() core.Status {
 	return core.Status{
-		Running: f.running,
-		Mode:    f.mode,
-		Ports:   f.ports,
-		Version: f.version,
+		Running:    f.running,
+		Mode:       f.mode,
+		Ports:      f.ports,
+		Version:    f.version,
+		BinaryPath: f.binary,
 	}
 }
 
