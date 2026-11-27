@@ -757,7 +757,9 @@ func (a *appRuntime) selectClientGroup(client detector.ProxyClientInfo, group, n
 	}
 	if group == core.ProxyGroupName && a.coreMode() == core.ModeGlobal {
 		if err := mc.SelectGroupNode("GLOBAL", node); err != nil {
-			return nil, err
+			if err2 := mc.SelectGroupNode("GLOBAL", core.ProxyGroupName); err2 != nil {
+				return nil, err
+			}
 		}
 	}
 	live := mc.GetLiveStatus()

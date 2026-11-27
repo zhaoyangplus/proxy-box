@@ -342,6 +342,37 @@ func TestGlobalFollowsProxySelection(t *testing.T) {
 	}
 }
 
+func TestGlobalFallsBackToProxyGroupForProviderNode(t *testing.T) {
+	useTempConfig(t)
+	var hits []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits = append(hits, r.Method+" "+r.URL.Path)
+		if r.Method == http.MethodPut {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		if r.URL.Path == "/providers/proxies" {
+			_, _ = io.WriteString(w, `{"providers":{"sub":{"proxies":[{"name":"hk-1","type":"Shadowsocks","provider-name":"sub"}]}}}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"proxies":{
+			"PROXY": {"name":"PROXY","type":"Selector","now":"DIRECT","all":["hk-1","DIRECT"]},
+			"GLOBAL": {"name":"GLOBAL","type":"Selector","now":"DIRECT","all":["PROXY","DIRECT"]},
+			"DIRECT": {"name":"DIRECT","type":"Direct"}
+		}}`)
+	}))
+	defer srv.Close()
+
+	client := detector.ProxyClientInfo{ID: "builtin", Name: "内置内核", ExternalController: strings.TrimPrefix(srv.URL, "http://")}
+	rt := &appRuntime{core: &fakeCore{mode: core.ModeGlobal, ports: core.Ports{Controller: mustPort(t, srv.URL)}}}
+	if _, err := rt.selectClientGroup(client, "PROXY", "hk-1"); err != nil {
+		t.Fatal(err)
+	}
+	if !containsStr(hits, "PUT /proxies/PROXY") || !containsStr(hits, "PUT /proxies/GLOBAL") {
+		t.Fatalf("hits = %v", hits)
+	}
+}
+
 func postJSON(h http.HandlerFunc, body string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodPost, "/", bytes.NewBufferString(body))
 	rec := httptest.NewRecorder()
