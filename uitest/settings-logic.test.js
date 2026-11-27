@@ -1,0 +1,80 @@
+"use strict";
+
+const test = require("node:test");
+const assert = require("node:assert/strict");
+const S = require("../ui/settings-logic.js");
+
+const HOSTILE = "<img src=x onerror=alert(1)>";
+
+test("settings diff posts only changed fields", function () {
+  const saved = {
+    delayTestURL: "http://www.gstatic.com/generate_204",
+    speedTestURL: "",
+    speedTestMaxMB: 0,
+    autoOptimizeNode: null,
+    autoSyncOnChange: true,
+    syncUserEnv: false,
+    minimizeToTray: true,
+    customCursorExe: "C:\\Cursor.exe",
+    managedApps: { cursor: true, codex: false }
+  };
+  assert.deepEqual(S.changedFields(saved, S.draftFrom(saved)), {});
+  const edited = S.draftFrom(saved);
+  edited.speedTestURL = " https://speed.cloudflare.com/__down?bytes=10485760 ";
+  edited.customCursorExe = "D:\\Cursor.exe";
+  edited.managedApps = { cursor: false };
+  assert.deepEqual(S.changedFields(saved, edited), {
+    speedTestURL: "https://speed.cloudflare.com/__down?bytes=10485760",
+    customCursorExe: "D:\\Cursor.exe"
+  });
+  const flags = S.draftFrom(saved);
+  flags.autoOptimizeNode = false;
+  flags.minimizeToTray = false;
+  assert.deepEqual(S.changedFields(saved, flags), {
+    autoOptimizeNode: false,
+    minimizeToTray: false
+  });
+  assert.equal(Object.prototype.hasOwnProperty.call(S.changedFields(saved, edited), "managedApps"), false);
+});
+
+test("settings validation accepts only http(s) URLs and 5, 10, or 25 MB", function () {
+  const ok = S.validate({
+    delayTestURL: "",
+    speedTestURL: "https://speed.cloudflare.com/__down?bytes=10485760",
+    speedTestMaxMB: 0
+  });
+  assert.equal(ok.ok, true);
+  assert.equal(ok.draft.speedTestMaxMB, 10);
+  for (const size of [5, 10, 25, "25"]) {
+    assert.equal(S.validate({ speedTestMaxMB: size }).ok, true, String(size));
+  }
+  const bad = S.validate({
+    delayTestURL: "javascript:alert(1)",
+    speedTestURL: HOSTILE,
+    speedTestMaxMB: 7
+  });
+  assert.equal(bad.ok, false);
+  assert.equal(bad.errors.delayTestURL, S.URL_ERROR);
+  assert.equal(bad.errors.speedTestURL, S.URL_ERROR);
+  assert.equal(bad.errors.speedTestMaxMB, S.MB_ERROR);
+  assert.equal(S.validate({ delayTestURL: "ftp://files.example/a" }).ok, false);
+  assert.equal(S.validate({ speedTestURL: "http://example.com/a" }).ok, true);
+});
+
+test("port numbers prefer the live status and fall back to the fixed defaults", function () {
+  assert.deepEqual(S.portsFrom({
+    mixedPort: 27990,
+    settings: { mixedPort: 1, controllerPort: 27991, aiDedicatedPort: 27992, speedTestPort: 27993 }
+  }), {
+    mixed: 27990,
+    controller: 27991,
+    ai: 27992,
+    speed: 27993
+  });
+  assert.deepEqual(S.portsFrom(null), {
+    mixed: 27890,
+    controller: 27891,
+    ai: 27892,
+    speed: 27893
+  });
+});
