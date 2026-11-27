@@ -149,6 +149,9 @@ func TestBuiltinRunningFollowsOurPathOnly(t *testing.T) {
 	if stopped.ID != "builtin" || stopped.RuleSupportMode != "builtin" {
 		t.Fatalf("identity = %+v", stopped)
 	}
+	if stopped.ActiveProfileName != "" || stopped.ActiveProfileUID != "" {
+		t.Fatalf("stopped profile name %q uid %q", stopped.ActiveProfileName, stopped.ActiveProfileUID)
+	}
 	if stopped.MainPort != 27890 || stopped.DedicatedPort != 27892 {
 		t.Fatalf("ports main=%d dedicated=%d", stopped.MainPort, stopped.DedicatedPort)
 	}
@@ -177,6 +180,9 @@ func TestBuiltinRunningFollowsOurPathOnly(t *testing.T) {
 	}
 	if running.ProxyURL != "http://127.0.0.1:27892" {
 		t.Fatalf("proxy url = %s", running.ProxyURL)
+	}
+	if running.ActiveProfileName != "内置订阅配置" || running.ActiveProfileUID != "" {
+		t.Fatalf("profile name %q uid %q", running.ActiveProfileName, running.ActiveProfileUID)
 	}
 	raw, err := json.Marshal(running)
 	if err != nil {
