@@ -1372,6 +1372,7 @@
     .form-grid-2 { grid-template-columns: 1fr; }
   }
 </style>
+<link rel="stylesheet" href="core.css">
 </head>
 <body onclick="closeAllPopovers(event)">
 
@@ -1392,6 +1393,7 @@
         <button class="nav-link active" id="navWorkbench" onclick="switchNav('navWorkbench', 'top')">工作台</button>
         <button class="nav-link" id="navTools" onclick="switchNav('navTools', 'secTools')">开发工具</button>
         <button class="nav-link" id="navDiag" onclick="switchNav('navDiag', 'secDiag')">连接诊断</button>
+        <button class="nav-link" id="navCore" onclick="switchNav('navCore', 'secCore')">内置内核</button>
       </nav>
     </div>
 
@@ -1589,6 +1591,8 @@
         </svg>
       </div>
     </section>
+
+    <section id="secCore"></section>
 
     <!-- Dev Tools Section -->
     <section id="secTools">
@@ -1918,6 +1922,7 @@
 
   <div class="toast" id="toast"></div>
 
+<script src="core.js"></script>
 <script>
   let currentSnap = null;
   let currentDiag = null;
@@ -3081,6 +3086,7 @@
       es.onmessage = (ev) => {
         try {
           const msg = JSON.parse(ev.data);
+          try { if (window.ProxyBoxCore && ProxyBoxCore.onSSE) ProxyBoxCore.onSSE(msg); } catch (_) {}
           if (msg.type === 'update' && msg.update) {
             renderUpdateProgress(msg.update);
             return;
@@ -3110,6 +3116,7 @@
 
   // Initial load: fetch snapshot immediately, subscribe to live SSE updates & run initial diagnostics
   (async function init() {
+    if (window.ProxyBoxCore) ProxyBoxCore.init();
     loadAppVersion();
     await refreshSnapshot();
     connectLiveEvents();
