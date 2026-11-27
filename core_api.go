@@ -50,6 +50,17 @@ type subsResponse struct {
 	Subscriptions []configstore.Subscription `json:"subscriptions"`
 }
 
+type subUpdateItem struct {
+	ID    string `json:"id"`
+	OK    bool   `json:"ok"`
+	Error string `json:"error,omitempty"`
+}
+
+type subsUpdateResponse struct {
+	Subscriptions []configstore.Subscription `json:"subscriptions"`
+	Results       []subUpdateItem            `json:"results"`
+}
+
 type subResponse struct {
 	OK           bool                     `json:"ok"`
 	Subscription configstore.Subscription `json:"subscription"`
@@ -581,13 +592,21 @@ func (a *appRuntime) handleSubsUpdate(rw http.ResponseWriter, r *http.Request) {
 	dir := filepath.Join(a.coreDir, "providers")
 	proxies := a.candidateProxies()
 	updated := make([]configstore.Subscription, 0, len(targets))
+	results := make([]subUpdateItem, 0, len(targets))
 	for _, sub := range targets {
 		res, upErr := subscription.Update(r.Context(), sub, proxies, dir)
 		if upErr != nil {
 			sub.LastError = publicErr(upErr)
-			_ = a.saveSub(sub)
-			writeUserErr(rw, upErr)
-			return
+			if err := a.saveSub(sub); err != nil {
+				writeUserErr(rw, err)
+				return
+			}
+			if id != "" {
+				writeUserErr(rw, upErr)
+				return
+			}
+			results = append(results, subUpdateItem{ID: sub.ID, OK: false, Error: sub.LastError})
+			continue
 		}
 		sub.NodeCount = res.NodeCount
 		sub.Usage = res.Usage
@@ -598,6 +617,7 @@ func (a *appRuntime) handleSubsUpdate(rw http.ResponseWriter, r *http.Request) {
 			return
 		}
 		updated = append(updated, sub)
+		results = append(results, subUpdateItem{ID: sub.ID, OK: true})
 	}
 	a.opMu.Lock()
 	subs, err = configstore.LoadSubscriptions()
@@ -622,8 +642,10 @@ func (a *appRuntime) handleSubsUpdate(rw http.ResponseWriter, r *http.Request) {
 			writeJSON(rw, http.StatusOK, subResponse{OK: true, Subscription: subs[idx]})
 			return
 		}
+		writeJSON(rw, http.StatusOK, subsResponse{Subscriptions: updated})
+		return
 	}
-	writeJSON(rw, http.StatusOK, subsResponse{Subscriptions: updated})
+	writeJSON(rw, http.StatusOK, subsUpdateResponse{Subscriptions: subs, Results: results})
 }
 
 func (a *appRuntime) saveSub(sub configstore.Subscription) error {

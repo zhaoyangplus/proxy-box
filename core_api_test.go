@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -53,6 +55,10 @@ func TestResponsesOmitSecret(t *testing.T) {
 		importResponse{OK: true, Path: `D:\core\mihomo.exe`},
 		browseResponse{},
 		nodeDelayResponse{OK: true, NodeName: "US01", DelayMs: 42, Tested: true},
+		subsUpdateResponse{
+			Subscriptions: []configstore.Subscription{sub},
+			Results:       []subUpdateItem{{ID: "abc", OK: false, Error: "订阅下载失败"}},
+		},
 		snap,
 		sseEvent{Type: "sync", Snapshot: &snap, Core: &coreEvent{Phase: "running", Message: "内核已启动"}},
 	}
@@ -266,6 +272,102 @@ func TestSubsRoundTripAndCoreNodeCount(t *testing.T) {
 	}
 	if len(stored) != 1 || stored[0].Name != "renamed" || stored[0].Filter != "keep-me" || stored[0].URL != subSrv.URL {
 		t.Fatalf("stored = %+v", stored[0])
+	}
+}
+
+func TestBatchSubUpdateContinuesAfterFailure(t *testing.T) {
+	useTempConfig(t)
+	t.Setenv("LOCALAPPDATA", t.TempDir())
+	good := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "proxies:\n  - {name: alpha, type: http, server: 127.0.0.1, port: 1}\n")
+	}))
+	defer good.Close()
+	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "nope", http.StatusInternalServerError)
+	}))
+	defer bad.Close()
+
+	subs := []configstore.Subscription{
+		{ID: "one", Name: "one", URL: good.URL, Enabled: true},
+		{ID: "two", Name: "two", URL: bad.URL, Enabled: true},
+		{ID: "three", Name: "three", URL: good.URL, Enabled: true},
+	}
+	if err := configstore.SaveSubscriptions(subs); err != nil {
+		t.Fatal(err)
+	}
+
+	controller := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"providers":{"one":{"proxies":[{},{},{},{}]},"three":{"proxies":[{},{},{},{},{}]}}}`)
+	}))
+	defer controller.Close()
+
+	coreFake := &fakeCore{
+		running: true,
+		mode:    core.ModeRule,
+		ports:   core.Ports{Controller: mustPort(t, controller.URL)},
+	}
+	rt := newAppRuntime(nil)
+	rt.core = coreFake
+	rt.proxyURLs = func() []string { return nil }
+
+	rec := postJSON(rt.handleSubsUpdate, `{}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("batch %s", rec.Body.String())
+	}
+	var body subsUpdateResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Subscriptions) != 3 || len(body.Results) != 3 {
+		t.Fatalf("subs %d results %d", len(body.Subscriptions), len(body.Results))
+	}
+	byID := map[string]configstore.Subscription{}
+	for _, sub := range body.Subscriptions {
+		byID[sub.ID] = sub
+	}
+	if byID["one"].NodeCount != 4 || byID["one"].LastError != "" || byID["one"].UpdatedAt.IsZero() {
+		t.Fatalf("one = %+v", byID["one"])
+	}
+	if byID["three"].NodeCount != 5 || byID["three"].LastError != "" || byID["three"].UpdatedAt.IsZero() {
+		t.Fatalf("three = %+v", byID["three"])
+	}
+	if byID["two"].NodeCount != 0 || byID["two"].LastError != "订阅下载失败，服务器返回错误" || !byID["two"].UpdatedAt.IsZero() {
+		t.Fatalf("two = %+v", byID["two"])
+	}
+	want := []subUpdateItem{
+		{ID: "one", OK: true},
+		{ID: "two", OK: false, Error: "订阅下载失败，服务器返回错误"},
+		{ID: "three", OK: true},
+	}
+	for i, item := range want {
+		got := body.Results[i]
+		if got.ID != item.ID || got.OK != item.OK || got.Error != item.Error {
+			t.Fatalf("result[%d] = %+v", i, got)
+		}
+	}
+	if coreFake.reloads != 1 {
+		t.Fatalf("reloads %d", coreFake.reloads)
+	}
+	stored, err := configstore.LoadSubscriptions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stored) != 3 || stored[0].LastError != "" || stored[1].LastError != "订阅下载失败，服务器返回错误" || stored[2].LastError != "" {
+		t.Fatalf("stored errors = %q %q %q", stored[0].LastError, stored[1].LastError, stored[2].LastError)
+	}
+	dir := filepath.Join(rt.coreDir, "providers")
+	for _, id := range []string{"one", "three"} {
+		raw, err := os.ReadFile(filepath.Join(dir, id+".txt"))
+		if err != nil || !strings.Contains(string(raw), "alpha") {
+			t.Fatalf("%s provider file: %v %s", id, err, raw)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, "two.txt")); !os.IsNotExist(err) {
+		t.Fatalf("failed subscription wrote a provider file: %v", err)
+	}
+	if strings.Contains(rec.Body.String(), configstoreSecret(t)) || strings.Contains(rec.Body.String(), `"secret"`) {
+		t.Fatalf("secret in batch response %s", rec.Body.String())
 	}
 }
 
