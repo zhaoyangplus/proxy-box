@@ -52,6 +52,7 @@ func TestResponsesOmitSecret(t *testing.T) {
 		sysproxyResponse{OK: true, SystemProxy: false},
 		importResponse{OK: true, Path: `D:\core\mihomo.exe`},
 		browseResponse{},
+		nodeDelayResponse{OK: true, NodeName: "US01", DelayMs: 42, Tested: true},
 		snap,
 		sseEvent{Type: "sync", Snapshot: &snap, Core: &coreEvent{Phase: "running", Message: "内核已启动"}},
 	}
@@ -481,6 +482,82 @@ func assertListedNode(t *testing.T, rec *httptest.ResponseRecorder, now string) 
 	}
 	if res.CurrentSelect != now {
 		t.Fatalf("current = %s body %s", res.CurrentSelect, rec.Body.String())
+	}
+}
+
+func TestNodeDelayUsesProviderHealthcheck(t *testing.T) {
+	useTempConfig(t)
+	var hits []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits = append(hits, r.URL.Path)
+		switch {
+		case r.URL.Path == "/proxies":
+			_, _ = io.WriteString(w, `{"proxies":{}}`)
+		case r.URL.Path == "/providers/proxies":
+			_, _ = io.WriteString(w, `{"providers":{"sub":{"proxies":[{"name":"US01","type":"Vless","provider-name":"sub"}]}}}`)
+		case r.URL.Path == "/proxies/US01/delay":
+			w.WriteHeader(http.StatusNotFound)
+		case r.URL.Path == "/providers/proxies/sub/US01/healthcheck":
+			if r.URL.Query().Get("url") != mihomo.TestURL || r.URL.Query().Get("timeout") == "" || r.URL.Query().Get("timeout") == "0" {
+				t.Errorf("healthcheck query = %s", r.URL.RawQuery)
+			}
+			_, _ = io.WriteString(w, `{"delay":42}`)
+		case r.URL.Path == "/proxies/dead/delay":
+			w.WriteHeader(http.StatusGatewayTimeout)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	builtin := detector.ProxyClientInfo{
+		ID:                 "builtin",
+		Name:               "内置内核",
+		Running:            true,
+		ExternalController: strings.TrimPrefix(srv.URL, "http://"),
+		Secret:             "delay-secret-marker",
+	}
+	rt := &appRuntime{detect: func() detector.SystemSnapshot {
+		return detector.SystemSnapshot{
+			ActiveClient: detector.ProxyClientInfo{ID: "clash_verge", Name: "Clash Verge", Running: true, ExternalController: "127.0.0.1:1"},
+			Clients:      []detector.ProxyClientInfo{builtin},
+		}
+	}}
+
+	rec := postJSON(rt.handleNodesTest, `{"client":"builtin","nodeName":" US01 "}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("test %s", rec.Body.String())
+	}
+	var body nodeDelayResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if !body.OK || !body.Tested || body.NodeName != "US01" || body.DelayMs != 42 {
+		t.Fatalf("delay = %+v", body)
+	}
+	if !containsStr(hits, "/proxies/US01/delay") || !containsStr(hits, "/providers/proxies/sub/US01/healthcheck") {
+		t.Fatalf("hits = %v", hits)
+	}
+	if strings.Contains(rec.Body.String(), "delay-secret-marker") || strings.Contains(rec.Body.String(), `"secret"`) {
+		t.Fatalf("secret in delay response %s", rec.Body.String())
+	}
+
+	hits = nil
+	rec = postJSON(rt.handleNodesTest, `{"client":"builtin","nodeName":"dead"}`)
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if rec.Code != http.StatusOK || !body.Tested || body.DelayMs != 0 || body.NodeName != "dead" {
+		t.Fatalf("timeout = %d %+v", rec.Code, body)
+	}
+	if containsStr(hits, "/providers/proxies/dead/healthcheck") || containsStr(hits, "/providers/proxies/sub/dead/healthcheck") {
+		t.Fatalf("timeout took a healthcheck: %v", hits)
+	}
+
+	builtin.Running = false
+	rec = postJSON(rt.handleNodesTest, `{"client":"builtin","nodeName":"US01"}`)
+	if rec.Code == http.StatusOK || !strings.Contains(rec.Body.String(), "内置内核未运行") {
+		t.Fatalf("stopped %s", rec.Body.String())
 	}
 }
 

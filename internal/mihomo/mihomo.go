@@ -378,6 +378,18 @@ func (c *Client) testGroupDelay(ctx context.Context, groupName string, timeoutMs
 	return delays, nil
 }
 
+// TestNodeDelay measures one node. Zero means the probe timed out or failed.
+func (c *Client) TestNodeDelay(nodeName string) int {
+	if c == nil || !c.Available() {
+		return 0
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	// Provider names are learned from the controller. The 404 fallback needs them.
+	_, _ = c.getProxies(ctx)
+	return c.testSingleNodeDelay(ctx, strings.TrimSpace(nodeName), 5000)
+}
+
 func (c *Client) testSingleNodeDelay(ctx context.Context, nodeName string, timeoutMs int) int {
 	q := fmt.Sprintf("/proxies/%s/delay?url=%s&timeout=%d", url.PathEscape(nodeName), url.QueryEscape(TestURL), timeoutMs)
 	data, status, err := c.doRequest(ctx, http.MethodGet, q, nil)

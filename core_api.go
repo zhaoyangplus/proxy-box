@@ -75,6 +75,13 @@ type browseResponse struct {
 	Path string `json:"path"`
 }
 
+type nodeDelayResponse struct {
+	OK       bool   `json:"ok"`
+	NodeName string `json:"nodeName"`
+	DelayMs  int    `json:"delayMs"`
+	Tested   bool   `json:"tested"`
+}
+
 func viewSettings(s configstore.CoreSettings) coreSettingsView {
 	return coreSettingsView{
 		Enabled:         s.Enabled,
@@ -99,6 +106,7 @@ func (a *appRuntime) register(mux *http.ServeMux) {
 	mux.HandleFunc("/api/sysproxy/set", a.handleSysproxySet)
 	mux.HandleFunc("/api/nodes/list", a.handleNodesList)
 	mux.HandleFunc("/api/nodes/select", a.handleNodesSelect)
+	mux.HandleFunc("/api/nodes/test", a.handleNodesTest)
 }
 
 func (a *appRuntime) coreStatusResponse() (coreStatusResponse, error) {
@@ -686,6 +694,42 @@ func (a *appRuntime) handleNodesList(rw http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(rw, http.StatusOK, res)
+}
+
+func (a *appRuntime) handleNodesTest(rw http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeUserErr(rw, errors.New("请使用 POST"))
+		return
+	}
+	var req struct {
+		Client   string `json:"client"`
+		NodeName string `json:"nodeName"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+		writeUserErr(rw, err)
+		return
+	}
+	name := strings.TrimSpace(req.NodeName)
+	if name == "" {
+		writeUserErr(rw, errors.New("请指定节点"))
+		return
+	}
+	client, err := nodeClient(a.snapshot(), req.Client)
+	if err != nil {
+		writeUserErr(rw, err)
+		return
+	}
+	mc, err := groupClient(client)
+	if err != nil {
+		writeUserErr(rw, err)
+		return
+	}
+	writeJSON(rw, http.StatusOK, nodeDelayResponse{
+		OK:       true,
+		NodeName: name,
+		DelayMs:  mc.TestNodeDelay(name),
+		Tested:   true,
+	})
 }
 
 func (a *appRuntime) handleNodesSelect(rw http.ResponseWriter, r *http.Request) {
