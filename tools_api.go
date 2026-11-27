@@ -61,12 +61,24 @@ func (a *appRuntime) handleToolsToggle(rw http.ResponseWriter, r *http.Request) 
 	})
 }
 
-func (a *appRuntime) toggleApp(ctx context.Context, id string, enabled bool) (string, detector.SystemSnapshot, error) {
+func (a *appRuntime) toggleApp(ctx context.Context, id string, enabled bool) (msg string, snap detector.SystemSnapshot, err error) {
 	cfg := configstore.LoadConfig()
 	cfg.ManagedApps[id] = enabled
 	if err := configstore.SaveConfig(cfg); err != nil {
 		return "", detector.SystemSnapshot{}, err
 	}
+	// A failed switch must leave the flag where the app files really are.
+	defer func() {
+		if err == nil {
+			return
+		}
+		if enabled {
+			_, _ = configurator.RestoreTarget(id)
+		}
+		back := configstore.LoadConfig()
+		back.ManagedApps[id] = !enabled
+		_ = configstore.SaveConfig(back)
+	}()
 	running := a != nil && a.core != nil && a.core.Status().Running
 	if enabled {
 		if !running {

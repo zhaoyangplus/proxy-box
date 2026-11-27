@@ -508,20 +508,6 @@ func startLocalAPIServer(hub *sseHub, rt *appRuntime, appUpdater *updater.Update
 		})
 	})
 
-	mux.HandleFunc("/api/apply", func(rw http.ResponseWriter, r *http.Request) {
-		var opts configurator.ApplyOptions
-		if err := json.NewDecoder(r.Body).Decode(&opts); err != nil {
-			writeErr(rw, err)
-			return
-		}
-		summary, err := configurator.ApplyAll(opts)
-		if err != nil {
-			writeErr(rw, err)
-			return
-		}
-		writeJSON(rw, http.StatusOK, map[string]any{"ok": true, "summary": summary})
-	})
-
 	mux.HandleFunc("/api/launch", func(rw http.ResponseWriter, r *http.Request) {
 		var req struct {
 			TargetID         string `json:"targetId"`

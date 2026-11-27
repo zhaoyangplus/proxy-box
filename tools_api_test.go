@@ -169,6 +169,28 @@ func TestToggleOnAndOffReloadsEnabledApps(t *testing.T) {
 	}
 }
 
+func TestToggleOnFailureLeavesFlagOff(t *testing.T) {
+	useTempHome(t)
+	writeRaw(t, cursorSettings(t), []byte("{not json"))
+	fc := &fakeCore{running: true, ports: core.Ports{Mixed: 27890, AIDedicated: 27892}}
+	rt := &appRuntime{
+		core: fc,
+		detect: func() detector.SystemSnapshot {
+			return detector.SystemSnapshot{AppConfig: configstore.LoadConfig()}
+		},
+	}
+	rec := postJSON(rt.handleToolsToggle, `{"targetId":"cursor","enabled":true}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("code %d body %s", rec.Code, rec.Body.String())
+	}
+	if configstore.LoadConfig().IsAppEnabled("cursor") {
+		t.Fatal("flag stayed on after a failed apply")
+	}
+	if fc.reloads != 0 {
+		t.Fatalf("reloads %d", fc.reloads)
+	}
+}
+
 func TestToggleRejectsUnknownApp(t *testing.T) {
 	useTempHome(t)
 	enableApp(t, "cursor", true)
