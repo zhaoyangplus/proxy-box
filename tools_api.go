@@ -62,9 +62,10 @@ func (a *appRuntime) handleToolsToggle(rw http.ResponseWriter, r *http.Request) 
 }
 
 func (a *appRuntime) toggleApp(ctx context.Context, id string, enabled bool) (msg string, snap detector.SystemSnapshot, err error) {
-	cfg := configstore.LoadConfig()
-	cfg.ManagedApps[id] = enabled
-	if err := configstore.SaveConfig(cfg); err != nil {
+	if err := configstore.UpdateConfig(func(cfg *configstore.AppConfig) error {
+		cfg.ManagedApps[id] = enabled
+		return nil
+	}); err != nil {
 		return "", detector.SystemSnapshot{}, err
 	}
 	// A failed switch must leave the flag where the app files really are.
@@ -75,9 +76,10 @@ func (a *appRuntime) toggleApp(ctx context.Context, id string, enabled bool) (ms
 		if enabled {
 			_, _ = configurator.RestoreTarget(id)
 		}
-		back := configstore.LoadConfig()
-		back.ManagedApps[id] = !enabled
-		_ = configstore.SaveConfig(back)
+		_ = configstore.UpdateConfig(func(cfg *configstore.AppConfig) error {
+			cfg.ManagedApps[id] = !enabled
+			return nil
+		})
 	}()
 	running := a != nil && a.core != nil && a.core.Status().Running
 	if enabled {
@@ -133,7 +135,7 @@ func (a *appRuntime) applyEnabledTargetsLocked(port int) error {
 	if port <= 0 {
 		return nil
 	}
-	cfg := configstore.LoadConfig()
+	cfg, _ := configstore.LoadConfig()
 	proxyURL := fmt.Sprintf("http://127.0.0.1:%d", port)
 	for _, id := range cfg.EnabledAppIDs() {
 		if _, err := configurator.ApplyTarget(id, proxyURL); err != nil {
@@ -150,14 +152,18 @@ func (a *appRuntime) handleOneClick(rw http.ResponseWriter, r *http.Request) {
 	if r.Body != nil {
 		_ = json.NewDecoder(r.Body).Decode(&req)
 	}
-	cfg := configstore.LoadConfig()
+	cfg, err := configstore.LoadConfig()
+	if err != nil {
+		writeUserErr(rw, err)
+		return
+	}
 	if len(cfg.EnabledAppIDs()) == 0 {
 		writeUserErr(rw, errors.New(errNeedManagedApp))
 		return
 	}
 	port := a.aiDedicatedPort()
 	a.opMu.Lock()
-	_, err := configurator.ApplyAll(managedApplyOptions(cfg, port, req.SyncUserEnv))
+	_, err = configurator.ApplyAll(managedApplyOptions(cfg, port, req.SyncUserEnv))
 	a.opMu.Unlock()
 	if err != nil {
 		writeUserErr(rw, err)
@@ -190,11 +196,12 @@ func (a *appRuntime) restoreAllManaged(ctx context.Context) (string, error) {
 	if _, err := configurator.RestoreAll(); err != nil {
 		return "", err
 	}
-	cfg := configstore.LoadConfig()
-	for id := range cfg.ManagedApps {
-		cfg.ManagedApps[id] = false
-	}
-	if err := configstore.SaveConfig(cfg); err != nil {
+	if err := configstore.UpdateConfig(func(cfg *configstore.AppConfig) error {
+		for id := range cfg.ManagedApps {
+			cfg.ManagedApps[id] = false
+		}
+		return nil
+	}); err != nil {
 		return "", err
 	}
 	if err := a.reloadCoreLocked(ctx); err != nil {
@@ -207,14 +214,18 @@ func (a *appRuntime) applyEnabledFromTray(balloon func(title, info string)) {
 	if balloon == nil {
 		return
 	}
-	cfg := configstore.LoadConfig()
+	cfg, err := configstore.LoadConfig()
+	if err != nil {
+		balloon("读取设置失败", err.Error())
+		return
+	}
 	if len(cfg.EnabledAppIDs()) == 0 {
 		balloon(errNeedManagedApp, errNeedManagedApp)
 		return
 	}
 	port := a.aiDedicatedPort()
 	a.opMu.Lock()
-	_, err := configurator.ApplyAll(managedApplyOptions(cfg, port, cfg.SyncUserEnv))
+	_, err = configurator.ApplyAll(managedApplyOptions(cfg, port, cfg.SyncUserEnv))
 	a.opMu.Unlock()
 	if err != nil {
 		balloon("配置失败", err.Error())

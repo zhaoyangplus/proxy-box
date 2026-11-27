@@ -15,7 +15,8 @@ func handleSaveConfig(rw http.ResponseWriter, r *http.Request) {
 		writeErr(rw, err)
 		return
 	}
-	merged, err := mergeAppConfig(configstore.LoadConfig(), body)
+	current, _ := configstore.LoadConfig()
+	merged, err := mergeAppConfig(current, body)
 	if err != nil {
 		writeErr(rw, err)
 		return

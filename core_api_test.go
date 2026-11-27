@@ -28,6 +28,15 @@ func useTempConfig(t *testing.T) {
 	t.Cleanup(func() { configstore.SetBaseDir("") })
 }
 
+func mustAppConfig(t *testing.T) configstore.AppConfig {
+	t.Helper()
+	cfg, err := configstore.LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cfg
+}
+
 func TestResponsesOmitSecret(t *testing.T) {
 	useTempConfig(t)
 	settings, err := configstore.LoadCoreSettings()

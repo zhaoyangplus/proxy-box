@@ -53,7 +53,7 @@ func codexEnv(t *testing.T) string {
 
 func enableApp(t *testing.T, id string, on bool) {
 	t.Helper()
-	cfg := configstore.LoadConfig()
+	cfg := mustAppConfig(t)
 	cfg.ManagedApps[id] = on
 	if err := configstore.SaveConfig(cfg); err != nil {
 		t.Fatal(err)
@@ -73,7 +73,7 @@ func TestToggleOnCoreStoppedDoesNotWriteAppFiles(t *testing.T) {
 		core: fc,
 		hub:  hub,
 		detect: func() detector.SystemSnapshot {
-			return detector.SystemSnapshot{AppConfig: configstore.LoadConfig()}
+			return detector.SystemSnapshot{AppConfig: mustAppConfig(t)}
 		},
 	}
 	rec := postJSON(rt.handleToolsToggle, `{"targetId":"cursor","enabled":true}`)
@@ -103,7 +103,7 @@ func TestToggleOnCoreStoppedDoesNotWriteAppFiles(t *testing.T) {
 	if got := mustRead(t, codexEnv(t)); !bytes.Equal(got, other) {
 		t.Fatalf("codex file = %s", got)
 	}
-	if !configstore.LoadConfig().IsAppEnabled("cursor") {
+	if !mustAppConfig(t).IsAppEnabled("cursor") {
 		t.Fatal("flag not saved")
 	}
 	select {
@@ -126,7 +126,7 @@ func TestToggleOnAndOffReloadsEnabledApps(t *testing.T) {
 	rt := &appRuntime{
 		core: fc,
 		detect: func() detector.SystemSnapshot {
-			return detector.SystemSnapshot{AppConfig: configstore.LoadConfig()}
+			return detector.SystemSnapshot{AppConfig: mustAppConfig(t)}
 		},
 	}
 	rec := postJSON(rt.handleToolsToggle, `{"targetId":"cursor","enabled":true}`)
@@ -164,7 +164,7 @@ func TestToggleOnAndOffReloadsEnabledApps(t *testing.T) {
 	if restored := mustRead(t, cursorSettings(t)); !bytes.Equal(restored, original) {
 		t.Fatalf("restored = %s", restored)
 	}
-	if configstore.LoadConfig().IsAppEnabled("cursor") {
+	if mustAppConfig(t).IsAppEnabled("cursor") {
 		t.Fatal("cursor still enabled")
 	}
 }
@@ -176,14 +176,14 @@ func TestToggleOnFailureLeavesFlagOff(t *testing.T) {
 	rt := &appRuntime{
 		core: fc,
 		detect: func() detector.SystemSnapshot {
-			return detector.SystemSnapshot{AppConfig: configstore.LoadConfig()}
+			return detector.SystemSnapshot{AppConfig: mustAppConfig(t)}
 		},
 	}
 	rec := postJSON(rt.handleToolsToggle, `{"targetId":"cursor","enabled":true}`)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("code %d body %s", rec.Code, rec.Body.String())
 	}
-	if configstore.LoadConfig().IsAppEnabled("cursor") {
+	if mustAppConfig(t).IsAppEnabled("cursor") {
 		t.Fatal("flag stayed on after a failed apply")
 	}
 	if fc.reloads != 0 {
@@ -202,7 +202,7 @@ func TestToggleRejectsUnknownApp(t *testing.T) {
 	if !bytes.Contains(rec.Body.Bytes(), []byte("未知的应用标识")) {
 		t.Fatalf("body %s", rec.Body.String())
 	}
-	if !configstore.LoadConfig().IsAppEnabled("cursor") {
+	if !mustAppConfig(t).IsAppEnabled("cursor") {
 		t.Fatal("cursor flag changed")
 	}
 }
@@ -214,7 +214,7 @@ func TestToggleSerializesDoubleClicks(t *testing.T) {
 	rt := &appRuntime{
 		core: fc,
 		detect: func() detector.SystemSnapshot {
-			return detector.SystemSnapshot{AppConfig: configstore.LoadConfig()}
+			return detector.SystemSnapshot{AppConfig: mustAppConfig(t)}
 		},
 	}
 	var wg sync.WaitGroup
@@ -233,7 +233,7 @@ func TestToggleSerializesDoubleClicks(t *testing.T) {
 		}(i%2 == 0)
 	}
 	wg.Wait()
-	cfg := configstore.LoadConfig()
+	cfg := mustAppConfig(t)
 	if _, ok := cfg.ManagedApps["cursor"]; !ok {
 		t.Fatalf("apps %+v", cfg.ManagedApps)
 	}
@@ -312,7 +312,7 @@ func TestOneClickWritesOnlyEnabledApps(t *testing.T) {
 	rt := &appRuntime{
 		core: fc,
 		detect: func() detector.SystemSnapshot {
-			return detector.SystemSnapshot{AppConfig: configstore.LoadConfig()}
+			return detector.SystemSnapshot{AppConfig: mustAppConfig(t)}
 		},
 	}
 	rec := postJSON(rt.handleOneClick, `{"syncUserEnv":false}`)
@@ -355,7 +355,7 @@ func TestRestoreAllClearsFlags(t *testing.T) {
 	if !body.OK || !bytes.Contains([]byte(body.Message), []byte("关闭")) {
 		t.Fatalf("body %s", rec.Body.String())
 	}
-	cfg := configstore.LoadConfig()
+	cfg := mustAppConfig(t)
 	if cfg.IsAppEnabled("cursor") || cfg.IsAppEnabled("codex") || len(cfg.EnabledAppIDs()) != 0 {
 		t.Fatalf("flags %+v", cfg.ManagedApps)
 	}
@@ -374,7 +374,7 @@ func TestSyncSkipsDisabledAppsAndUnusableCore(t *testing.T) {
 	writeRaw(t, cursorSettings(t), cursorBody)
 	writeRaw(t, codexEnv(t), codexBody)
 	enableApp(t, "cursor", true)
-	cfg := configstore.LoadConfig()
+	cfg := mustAppConfig(t)
 	if cfg.SyncUserEnv {
 		t.Fatal("sync user env defaulted on")
 	}
@@ -409,7 +409,7 @@ func TestSyncSkipsDisabledAppsAndUnusableCore(t *testing.T) {
 		t.Fatal("sync rewrote a file after the core became unusable")
 	}
 
-	off := configstore.LoadConfig()
+	off := mustAppConfig(t)
 	off.ManagedApps["cursor"] = false
 	applied, _, err = syncEnabledApps(off, client, subs, nil)
 	if err != nil || applied {
@@ -444,7 +444,7 @@ func TestQuickSyncWritesOnlyEnabledApp(t *testing.T) {
 	detectSnapshot = func() detector.SystemSnapshot {
 		return detector.SystemSnapshot{
 			ActiveClient: detector.ProxyClientInfo{DedicatedPort: 27892, Name: "内置内核", ProxyURL: "http://127.0.0.1:27890"},
-			AppConfig:    configstore.LoadConfig(),
+			AppConfig:    mustAppConfig(t),
 			Targets:      []detector.AppTargetInfo{{ID: "cursor", ExePath: "cursor.exe"}},
 		}
 	}

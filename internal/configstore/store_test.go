@@ -3,6 +3,7 @@ package configstore
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -84,6 +85,15 @@ func useDir(t *testing.T) string {
 	dir := t.TempDir()
 	SetBaseDir(dir)
 	return dir
+}
+
+func mustConfig(t *testing.T) AppConfig {
+	t.Helper()
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cfg
 }
 
 func TestLoadCoreSettingsCreatesStableSecret(t *testing.T) {
@@ -401,7 +411,7 @@ func TestAppConfigStillUsesConfigJSON(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg := LoadConfig()
+	cfg := mustConfig(t)
 	if !cfg.MinimizeToTray || !cfg.IsAutoOptimizeEnabled() || !cfg.IsAutoSyncEnabled() {
 		t.Fatalf("defaults = %+v", cfg)
 	}
@@ -413,7 +423,7 @@ func TestAppConfigStillUsesConfigJSON(t *testing.T) {
 	if err := SaveConfig(cfg); err != nil {
 		t.Fatal(err)
 	}
-	loaded := LoadConfig()
+	loaded := mustConfig(t)
 	if loaded.CustomCursorExe != cfg.CustomCursorExe || loaded.DelayTestURL != cfg.DelayTestURL {
 		t.Fatalf("loaded = %+v", loaded)
 	}
@@ -459,7 +469,7 @@ func TestManagedAppsMigrateFromState(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(`{"syncUserEnv":true,"preferredClient":"clash_verge","customClashDir":"D:\\Clash","excludeRegionsRegex":"HK"}`), 0644); err != nil {
 		t.Fatal(err)
 	}
-	cfg := LoadConfig()
+	cfg := mustConfig(t)
 	if !cfg.SyncUserEnv || !cfg.IsAppEnabled("cursor") || cfg.IsAppEnabled("codex") || cfg.IsAppEnabled("antigravity") || cfg.IsAppEnabled("claude_code") || cfg.IsAppEnabled("other") {
 		t.Fatalf("migrated = %+v", cfg.ManagedApps)
 	}
@@ -476,7 +486,7 @@ func TestManagedAppsMigrateFromState(t *testing.T) {
 			t.Fatalf("rewrote %s in %s", gone, text)
 		}
 	}
-	second := LoadConfig()
+	second := mustConfig(t)
 	if !second.IsAppEnabled("cursor") || second.IsAppEnabled("codex") {
 		t.Fatalf("second load = %+v", second.ManagedApps)
 	}
@@ -484,7 +494,7 @@ func TestManagedAppsMigrateFromState(t *testing.T) {
 
 func TestFreshConfigDisablesEveryApp(t *testing.T) {
 	dir := useDir(t)
-	cfg := LoadConfig()
+	cfg := mustConfig(t)
 	for _, id := range []string{"cursor", "antigravity", "claude_code", "codex"} {
 		if cfg.IsAppEnabled(id) {
 			t.Fatalf("%s enabled", id)
@@ -614,5 +624,123 @@ func TestConcurrentSavesKeepBothFiles(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "core.json")); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestCorruptConfigIsNotOverwritten(t *testing.T) {
+	dir := useDir(t)
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte("{"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadConfig(); !errors.Is(err, ErrConfigCorrupt) {
+		t.Fatalf("load err = %v", err)
+	}
+	if err := UpdateConfig(func(cfg *AppConfig) error {
+		cfg.CustomCursorExe = "nope"
+		return nil
+	}); !errors.Is(err, ErrConfigCorrupt) {
+		t.Fatalf("update err = %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != "{" {
+		t.Fatalf("config.json = %s", raw)
+	}
+	if err := SaveConfig(AppConfig{CustomCursorExe: `C:\ok.exe`}); err != nil {
+		t.Fatal(err)
+	}
+	bak, err := os.ReadFile(path + ".bak")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(bak) != "{" {
+		t.Fatalf("bak = %s", bak)
+	}
+	cfg := mustConfig(t)
+	if cfg.CustomCursorExe != `C:\ok.exe` {
+		t.Fatalf("saved = %+v", cfg)
+	}
+}
+
+func TestLockedConfigKeepsLastGoodAndRefusesUpdate(t *testing.T) {
+	dir := useDir(t)
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"customCursorExe":"keep","minimizeToTray":true}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if cfg := mustConfig(t); cfg.CustomCursorExe != "keep" {
+		t.Fatalf("prime = %+v", cfg)
+	}
+	original, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prev := readConfigBytes
+	readConfigBytes = func(string) ([]byte, error) {
+		return nil, errors.New("locked")
+	}
+	t.Cleanup(func() { readConfigBytes = prev })
+	cfg, err := LoadConfig()
+	if !errors.Is(err, ErrConfigUnreadable) {
+		t.Fatalf("load err = %v", err)
+	}
+	if cfg.CustomCursorExe != "keep" {
+		t.Fatalf("last good = %+v", cfg)
+	}
+	if err := UpdateConfig(func(c *AppConfig) error {
+		c.CustomCursorExe = "nope"
+		return nil
+	}); !errors.Is(err, ErrConfigUnreadable) {
+		t.Fatalf("update err = %v", err)
+	}
+	if err := SaveConfig(AppConfig{CustomCursorExe: "nope"}); !errors.Is(err, ErrConfigUnreadable) {
+		t.Fatalf("save err = %v", err)
+	}
+	readConfigBytes = prev
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != string(original) {
+		t.Fatalf("config.json = %s", raw)
+	}
+}
+
+func TestUpdateConfigConcurrentFieldsBothStick(t *testing.T) {
+	useDir(t)
+	var wg sync.WaitGroup
+	errCh := make(chan error, 64)
+	for i := 0; i < 30; i++ {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			if err := UpdateConfig(func(c *AppConfig) error {
+				c.CustomCursorExe = "cursor"
+				return nil
+			}); err != nil {
+				errCh <- err
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			if err := UpdateConfig(func(c *AppConfig) error {
+				c.DelayTestURL = "http://127.0.0.1/g"
+				return nil
+			}); err != nil {
+				errCh <- err
+			}
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		t.Fatal(err)
+	}
+	cfg := mustConfig(t)
+	if cfg.CustomCursorExe != "cursor" || cfg.DelayTestURL != "http://127.0.0.1/g" {
+		t.Fatalf("cfg = %+v", cfg)
 	}
 }

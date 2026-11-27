@@ -306,7 +306,8 @@ func (a *appRuntime) followGlobal() (string, error) {
 	}
 	st := a.core.Status()
 	mc := mihomo.NewClient(fmt.Sprintf("127.0.0.1:%d", st.Ports.Controller), settings.Secret)
-	mc.SetDelayTestURL(configstore.LoadConfig().DelayTestURL)
+	delayCfg, _ := configstore.LoadConfig()
+	mc.SetDelayTestURL(delayCfg.DelayTestURL)
 	if !mc.Available() {
 		return "", errors.New("未能连接到内置内核")
 	}
@@ -860,15 +861,18 @@ func (a *appRuntime) selectRequestedNode(clientID, group, node string) (string, 
 	}
 	trimmed := strings.TrimSpace(group)
 	if trimmed == "" || trimmed == mihomo.AIGroupName {
-		cfg := configstore.LoadConfig()
-		if node == clashscript.AIAutoName {
-			cfg.NodeSelectionMode = "auto"
-			cfg.ManualNodeName = ""
-		} else {
+		if err := configstore.UpdateConfig(func(cfg *configstore.AppConfig) error {
+			if node == clashscript.AIAutoName {
+				cfg.NodeSelectionMode = "auto"
+				cfg.ManualNodeName = ""
+				return nil
+			}
 			cfg.NodeSelectionMode = "manual"
 			cfg.ManualNodeName = node
+			return nil
+		}); err != nil {
+			return "", live, detector.SystemSnapshot{}, err
 		}
-		_ = configstore.SaveConfig(cfg)
 	}
 	fresh := a.snapshot()
 	msg := nodeSelectMessage(trimmed, node, live)
@@ -933,7 +937,8 @@ func (a *appRuntime) selectClientGroup(client detector.ProxyClientInfo, group, n
 
 func groupClient(client detector.ProxyClientInfo) (*mihomo.Client, error) {
 	mc := mihomo.NewClient(client.ExternalController, client.Secret)
-	mc.SetDelayTestURL(configstore.LoadConfig().DelayTestURL)
+	delayCfg, _ := configstore.LoadConfig()
+	mc.SetDelayTestURL(delayCfg.DelayTestURL)
 	if !mc.Available() {
 		return nil, fmt.Errorf("未能连接到 %s 内核控制接口", client.Name)
 	}

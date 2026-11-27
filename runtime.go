@@ -262,6 +262,7 @@ func (a *appRuntime) coreParams(settings configstore.CoreSettings) core.ConfigPa
 	if a != nil {
 		dir = a.coreDir
 	}
+	cfg, _ := configstore.LoadConfig()
 	return core.ConfigParams{
 		MixedPort:       settings.MixedPort,
 		ControllerPort:  settings.ControllerPort,
@@ -271,7 +272,7 @@ func (a *appRuntime) coreParams(settings configstore.CoreSettings) core.ConfigPa
 		Mode:            settings.Mode,
 		BypassCN:        settings.BypassCN,
 		GeoReady:        core.GeoFilesReady(dir),
-		EnabledAIApps:   configstore.LoadConfig().EnabledAppIDs(),
+		EnabledAIApps:   cfg.EnabledAppIDs(),
 	}
 }
 

@@ -186,7 +186,7 @@ func TestSpeedStartOneNamedNode(t *testing.T) {
 
 func TestSpeedStartRejectsBadMax(t *testing.T) {
 	fx := newSpeedFixture(t, "mixed", nil, nil)
-	cfg := configstore.LoadConfig()
+	cfg := mustAppConfig(t)
 	cfg.SpeedTestURL = "http://download.invalid/payload"
 	cfg.SpeedTestMaxMB = 7
 	if err := configstore.SaveConfig(cfg); err != nil {
@@ -292,7 +292,7 @@ func TestEmptySpeedURLTriesBuiltinHosts(t *testing.T) {
 		}
 		_, _ = w.Write(bytes.Repeat([]byte("p"), 48<<10))
 	})
-	cfg := configstore.LoadConfig()
+	cfg := mustAppConfig(t)
 	cfg.SpeedTestURL = ""
 	cfg.SpeedTestMaxMB = 10
 	if err := configstore.SaveConfig(cfg); err != nil {
@@ -498,7 +498,7 @@ func newSpeedFixture(t *testing.T, mode string, delay map[string]int, download h
 
 func (f *speedFixture) saveURL(t *testing.T) {
 	t.Helper()
-	cfg := configstore.LoadConfig()
+	cfg := mustAppConfig(t)
 	cfg.SpeedTestURL = "http://download.invalid/payload"
 	cfg.SpeedTestMaxMB = 10
 	if err := configstore.SaveConfig(cfg); err != nil {

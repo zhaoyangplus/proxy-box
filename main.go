@@ -265,7 +265,8 @@ func main() {
 			}
 		}
 	}, func() bool {
-		return configstore.LoadConfig().MinimizeToTray
+		cfg, _ := configstore.LoadConfig()
+		return cfg.MinimizeToTray
 	})
 
 	trayMgr.SetMenu(func() []tray.MenuItem {
@@ -304,7 +305,7 @@ func main() {
 }
 
 func startLiveWatcher(hub *sseHub, trayMgr *tray.Manager, rt *appRuntime) {
-	cfg := configstore.LoadConfig()
+	cfg, _ := configstore.LoadConfig()
 	prevStamp := detector.FastConfigStamp()
 	prevSnap := detector.DetectAll()
 	lastOptimizeAt := time.Time{}
@@ -344,7 +345,7 @@ func startLiveWatcher(hub *sseHub, trayMgr *tray.Manager, rt *appRuntime) {
 
 	for range ticker.C {
 		tickCount++
-		cfg = configstore.LoadConfig()
+		cfg, _ = configstore.LoadConfig()
 		currStamp := detector.FastConfigStamp()
 		stampChanged := currStamp != prevStamp
 
@@ -503,10 +504,14 @@ func startLocalAPIServer(hub *sseHub, rt *appRuntime, appUpdater *updater.Update
 			writeErr(rw, err)
 			return
 		}
-		cfg := configstore.LoadConfig()
-		cfg.NodeSelectionMode = "auto"
-		cfg.ManualNodeName = ""
-		_ = configstore.SaveConfig(cfg)
+		if err := configstore.UpdateConfig(func(cfg *configstore.AppConfig) error {
+			cfg.NodeSelectionMode = "auto"
+			cfg.ManualNodeName = ""
+			return nil
+		}); err != nil {
+			writeErr(rw, err)
+			return
+		}
 
 		fresh := detector.DetectAll()
 		hub.broadcast(sseEvent{

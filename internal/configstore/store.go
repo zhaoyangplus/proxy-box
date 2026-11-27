@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -14,6 +15,13 @@ import (
 	"proxy-box/internal/clashscript"
 
 	"golang.org/x/sys/windows"
+)
+
+var (
+	// ErrConfigUnreadable means config.json exists but could not be read.
+	ErrConfigUnreadable = errors.New("设置文件无法读取")
+	// ErrConfigCorrupt means config.json is not valid JSON for AppConfig.
+	ErrConfigCorrupt = errors.New("设置文件已损坏")
 )
 
 // AppConfig stores user preferences for the builtin core and the four AI apps.
@@ -112,11 +120,14 @@ type StateManifest struct {
 var (
 	mu              sync.Mutex
 	baseDirOverride atomic.Value // string, tests only
+	lastGood        atomic.Pointer[AppConfig]
+	readConfigBytes = os.ReadFile
 )
 
 // SetBaseDir sends config reads and writes to dir.
 // Tests set it so they do not touch ~/.proxy-box. An empty dir uses the home directory.
 func SetBaseDir(dir string) {
+	lastGood.Store(nil)
 	baseDirOverride.Store(dir)
 }
 
@@ -152,52 +163,163 @@ func BackupsDir() (string, error) {
 	return filepath.Join(base, "backups"), nil
 }
 
-func LoadConfig() AppConfig {
+// LoadConfig reads config.json.
+// A missing file returns defaults and a nil error, and is created from state.json when that file has managed apps.
+// An unreadable or corrupt file returns ErrConfigUnreadable or ErrConfigCorrupt and the last good config, or defaults when nothing has loaded yet.
+// The returned config is safe to read. It is not safe to write back over a corrupt file. Use UpdateConfig for read-modify-write, or SaveConfig for an explicit save.
+func LoadConfig() (AppConfig, error) {
 	mu.Lock()
 	defer mu.Unlock()
+	return loadConfigLocked()
+}
 
-	cfg := defaultAppConfig()
+// UpdateConfig reads and writes config.json inside one lock.
+// It does not write when the current file is missing its directory, unreadable, or corrupt.
+func UpdateConfig(fn func(*AppConfig) error) error {
+	if fn == nil {
+		return nil
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	cfg, err := loadConfigLocked()
+	if err != nil {
+		return err
+	}
+	if err := fn(&cfg); err != nil {
+		return err
+	}
+	return storeConfigLocked(cfg)
+}
+
+// SaveConfig writes cfg. When the current file is unreadable or corrupt, that file is copied to config.json.bak first.
+// A failed backup leaves the current file in place.
+func SaveConfig(cfg AppConfig) error {
+	mu.Lock()
+	defer mu.Unlock()
 	base, err := BaseDir()
 	if err != nil {
-		cfg.ManagedApps = allManagedApps(false)
-		return cfg
+		return err
+	}
+	if err := backupUnreadableConfig(base); err != nil {
+		return err
+	}
+	cfg = normalizeConfig(cfg)
+	if err := writeConfigFile(base, cfg); err != nil {
+		return err
+	}
+	rememberConfig(cfg)
+	return nil
+}
+
+func loadConfigLocked() (AppConfig, error) {
+	base, err := BaseDir()
+	if err != nil {
+		return readFallback(), fmt.Errorf("%w: %s", ErrConfigUnreadable, err.Error())
 	}
 	path := filepath.Join(base, "config.json")
-	data, err := os.ReadFile(path)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		cfg.ManagedApps = allManagedApps(false)
-		return cfg
-	}
-	if err == nil {
-		if json.Unmarshal(data, &cfg) != nil {
-			cfg = defaultAppConfig()
-			cfg.ManagedApps = allManagedApps(false)
-			return cfg
+	data, err := readConfigBytes(path)
+	if errors.Is(err, os.ErrNotExist) {
+		cfg := normalizeConfig(defaultAppConfig())
+		cfg.ManagedApps = managedAppsFromState(base)
+		cfg = normalizeConfig(cfg)
+		if err := writeConfigFile(base, cfg); err != nil {
+			return cfg, err
 		}
+		return rememberConfig(cfg), nil
+	}
+	if err != nil {
+		return readFallback(), fmt.Errorf("%w: %s", ErrConfigUnreadable, err.Error())
+	}
+	cfg := defaultAppConfig()
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return readFallback(), fmt.Errorf("%w: %s", ErrConfigCorrupt, err.Error())
 	}
 	fillAppDefaults(&cfg)
 	if cfg.ManagedApps == nil {
 		cfg.ManagedApps = managedAppsFromState(base)
-		_ = writeConfigFile(base, cfg)
+		cfg = normalizeConfig(cfg)
+		if err := writeConfigFile(base, cfg); err != nil {
+			return cfg, err
+		}
+		return rememberConfig(cfg), nil
 	}
+	return rememberConfig(normalizeConfig(cfg)), nil
+}
+
+func storeConfigLocked(cfg AppConfig) error {
+	base, err := BaseDir()
+	if err != nil {
+		return err
+	}
+	cfg = normalizeConfig(cfg)
+	if err := writeConfigFile(base, cfg); err != nil {
+		return err
+	}
+	rememberConfig(cfg)
+	return nil
+}
+
+func backupUnreadableConfig(base string) error {
+	path := filepath.Join(base, "config.json")
+	data, err := readConfigBytes(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("%w: %s", ErrConfigUnreadable, err.Error())
+	}
+	var cfg AppConfig
+	if json.Unmarshal(data, &cfg) == nil {
+		return nil
+	}
+	if err := os.WriteFile(path+".bak", data, 0644); err != nil {
+		return err
+	}
+	return nil
+}
+
+func readFallback() AppConfig {
+	if cfg := lastGood.Load(); cfg != nil {
+		return cloneConfig(*cfg)
+	}
+	cfg := normalizeConfig(defaultAppConfig())
+	cfg.ManagedApps = allManagedApps(false)
 	return cfg
 }
 
-func SaveConfig(cfg AppConfig) error {
-	mu.Lock()
-	defer mu.Unlock()
+func rememberConfig(cfg AppConfig) AppConfig {
+	cloned := cloneConfig(cfg)
+	lastGood.Store(&cloned)
+	return cloneConfig(cloned)
+}
 
+func cloneConfig(cfg AppConfig) AppConfig {
+	out := cfg
+	if cfg.ManagedApps != nil {
+		out.ManagedApps = make(map[string]bool, len(cfg.ManagedApps))
+		for id, on := range cfg.ManagedApps {
+			out.ManagedApps[id] = on
+		}
+	}
+	if cfg.AutoOptimizeNode != nil {
+		v := *cfg.AutoOptimizeNode
+		out.AutoOptimizeNode = &v
+	}
+	if cfg.AutoSyncOnChange != nil {
+		v := *cfg.AutoSyncOnChange
+		out.AutoSyncOnChange = &v
+	}
+	return out
+}
+
+func normalizeConfig(cfg AppConfig) AppConfig {
 	fillAppDefaults(&cfg)
 	if cfg.ManagedApps == nil {
 		cfg.ManagedApps = allManagedApps(false)
 	} else {
 		cfg.ManagedApps = normalizeManagedApps(cfg.ManagedApps)
 	}
-	base, err := BaseDir()
-	if err != nil {
-		return err
-	}
-	return writeConfigFile(base, cfg)
+	return cfg
 }
 
 func defaultAppConfig() AppConfig {
