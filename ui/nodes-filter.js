@@ -7,17 +7,17 @@
 
   var REGION_ORDER = ["hk", "tw", "jp", "sg", "us", "kr", "uk", "de", "eu", "other"];
 
-  var REGION_LABEL = {
-    hk: "🇭🇰 香港",
-    tw: "🇹🇼 台湾",
-    jp: "🇯🇵 日本",
-    sg: "🇸🇬 新加坡",
-    us: "🇺🇸 美国",
-    kr: "🇰🇷 韩国",
-    uk: "🇬🇧 英国",
-    de: "🇩🇪 德国",
-    eu: "🇪🇺 欧洲其他",
-    other: "🌐 其他地区",
+  var REGION_META = {
+    hk: { code: "HK", name: "香港", color: "#e5484d" },
+    tw: { code: "TW", name: "台湾", color: "#3e63dd" },
+    jp: { code: "JP", name: "日本", color: "#d6409f" },
+    sg: { code: "SG", name: "新加坡", color: "#ef5f00" },
+    us: { code: "US", name: "美国", color: "#6e56cf" },
+    kr: { code: "KR", name: "韩国", color: "#0090ff" },
+    uk: { code: "GB", name: "英国", color: "#3358d4" },
+    de: { code: "DE", name: "德国", color: "#a07800" },
+    eu: { code: "EU", name: "欧洲", color: "#0d74ce" },
+    other: { code: "··", name: "其他", color: "#8b8d98" },
   };
 
   var REGION_SRC = [
@@ -186,8 +186,53 @@
     return "other";
   }
 
+  function parseRate(name) {
+    var raw = name == null ? "" : String(name);
+    if (!raw) return null;
+    var re = /(\d+(?:\.\d+)?)\s*[x×]|[x×]\s*(\d+(?:\.\d+)?)|(\d+(?:\.\d+)?)\s*倍/gi;
+    var found = null;
+    var match;
+    while ((match = re.exec(raw))) {
+      var num = match[1] || match[2] || match[3];
+      var start = match.index;
+      var end = start + match[0].length;
+      var prev = start > 0 ? raw.charAt(start - 1) : "";
+      var next = end < raw.length ? raw.charAt(end) : "";
+      if (!match[3]) {
+        if (match[1] && /[a-z]/i.test(next)) continue;
+        if (match[2] && (/[a-z]/i.test(prev) || /[a-z]/i.test(next))) continue;
+      }
+      var value = Number(num);
+      if (value > 0 && isFinite(value)) found = value;
+    }
+    return found;
+  }
+
+  function formatRate(value) {
+    var n = Number(value);
+    if (!(n > 0) || !isFinite(n)) return "";
+    var rounded = Math.round(n * 100) / 100;
+    if (Math.abs(rounded - Math.round(rounded)) < 1e-9) return String(Math.round(rounded));
+    return String(rounded);
+  }
+
+  function regionMeta(key) {
+    return REGION_META[key] || null;
+  }
+
   function regionLabel(key) {
-    return REGION_LABEL[key] || "";
+    var meta = regionMeta(key);
+    return meta ? meta.name : "";
+  }
+
+  function regionCode(key) {
+    var meta = regionMeta(key);
+    return meta ? meta.code : "";
+  }
+
+  function regionColor(key) {
+    var meta = regionMeta(key);
+    return meta ? meta.color : "";
   }
 
   function regionCounts(nodes) {
@@ -195,7 +240,7 @@
     var list = Array.isArray(nodes) ? nodes : [];
     for (var i = 0; i < list.length; i++) {
       var key = list[i] && list[i].region;
-      if (!key || !REGION_LABEL[key]) continue;
+      if (!key || !REGION_META[key]) continue;
       counts[key] = (counts[key] || 0) + 1;
     }
     return counts;
@@ -244,7 +289,7 @@
   }
 
   function hitQuery(node, q) {
-    var fields = [node.name, node.type, node.typeLabel, node.provider, node.subName, node.region, node.regionLabel];
+    var fields = [node.name, node.type, node.typeLabel, node.provider, node.subName, node.region, node.regionLabel, node.regionCode];
     for (var i = 0; i < fields.length; i++) {
       if (fields[i] == null || fields[i] === "") continue;
       if (String(fields[i]).toLowerCase().indexOf(q) >= 0) return true;
@@ -394,7 +439,7 @@
     return "没有同时满足当前筛选条件的节点";
   }
 
-  function speedTestNames(nodes, filter) {
+  function scopeTargets(nodes, filter) {
     if (!isFilterActive(filter)) return null;
     var rows = applyFilters(nodes, filter);
     var names = [];
@@ -403,6 +448,210 @@
       names.push(rows[i].name);
     }
     return names;
+  }
+
+  function speedTestNames(nodes, filter) {
+    return scopeTargets(nodes, filter);
+  }
+
+  function trimNum(n) {
+    var rounded = Math.round(Number(n) * 100) / 100;
+    if (!isFinite(rounded)) return "0";
+    if (Math.abs(rounded - Math.round(rounded)) < 1e-9) return String(Math.round(rounded));
+    return String(rounded);
+  }
+
+  function delayLabel(filter) {
+    var f = sanitizeFilter(filter);
+    if (f.delayPreset === "alive") return "仅可用";
+    if (f.delayPreset === "custom") return "≤ " + trimNum(f.maxDelayMs) + " ms";
+    if (f.delayPreset === "100" || f.delayPreset === "200" || f.delayPreset === "300" || f.delayPreset === "500") {
+      return "≤ " + f.delayPreset + " ms";
+    }
+    return "不限";
+  }
+
+  function speedLabel(filter) {
+    var f = sanitizeFilter(filter);
+    if (f.speedPreset === "tested") return "已测速";
+    if (f.speedPreset === "custom") return "≥ " + trimNum(f.minSpeedMBps) + " MB/s";
+    if (f.speedPreset === "1" || f.speedPreset === "5" || f.speedPreset === "10" || f.speedPreset === "20") {
+      return "≥ " + f.speedPreset + " MB/s";
+    }
+    return "不限";
+  }
+
+  function subLabel(filter, subName) {
+    var id = sanitizeFilter(filter).sub;
+    if (typeof subName === "function") return String(subName(id) || id);
+    if (subName && typeof subName === "object" && subName[id] != null) return String(subName[id]);
+    return id;
+  }
+
+  function emptyChips(filter, subName) {
+    var f = sanitizeFilter(filter);
+    var chips = [];
+    var query = String(f.query || "").trim();
+    if (query) chips.push({ key: "query", label: "搜索“" + query + "”" });
+    if (f.sub !== "all") chips.push({ key: "sub", label: "订阅：" + subLabel(f, subName) });
+    if (f.region !== "all") chips.push({ key: "region", label: "地区：" + (regionLabel(f.region) || f.region) });
+    if (f.delayPreset !== "all") chips.push({ key: "delay", label: "延迟 " + delayLabel(f) });
+    if (f.speedPreset !== "all") chips.push({ key: "speed", label: "网速 " + speedLabel(f) });
+    return chips;
+  }
+
+  function clearChip(filter, key) {
+    var f = sanitizeFilter(filter);
+    if (key === "query") f.query = "";
+    else if (key === "sub") f.sub = "all";
+    else if (key === "region") f.region = "all";
+    else if (key === "delay") {
+      f.delayPreset = "all";
+      f.maxDelayMs = 0;
+    } else if (key === "speed") {
+      f.speedPreset = "all";
+      f.minSpeedMBps = 0;
+    }
+    return f;
+  }
+
+  function delayBadge(node, opt) {
+    if (opt && opt.delayBusy) return { text: "测试中", cls: "metric testing" };
+    if (!node || node.untested) return { text: "未测速", cls: "metric none" };
+    var ms = Number(node.delayMs);
+    if (!(ms > 0)) return { text: "超时", cls: "metric d-bad", dot: true };
+    var rounded = Math.round(ms);
+    var cls = "metric d-bad";
+    if (rounded <= 200) cls = "metric d-good";
+    else if (rounded <= 500) cls = "metric d-mid";
+    return { text: String(rounded), unit: "ms", cls: cls, dot: true };
+  }
+
+  function speedBadge(node, opt) {
+    var phase = opt && opt.speedPhase;
+    if (phase === "current") return { text: "测速中", cls: "metric testing spd-pulse" };
+    if (phase === "queued") return { text: "排队中…", cls: "metric none" };
+    if (node && node.speedError) return { text: "失败", cls: "metric spd-bad", title: String(node.speedError) };
+    if (!node || !node.speedTested) return { text: "未测速", cls: "metric none" };
+    var n = Number(node.speedMBps);
+    if (!isFinite(n)) n = 0;
+    var cls = "metric speed spd-low";
+    if (n >= 5) cls = "metric speed spd-good";
+    else if (n >= 1) cls = "metric speed spd-mid";
+    return { text: n.toFixed(2), unit: "MB/s", cls: cls, icon: "gauge" };
+  }
+
+  function esc(value) {
+    return String(value == null ? "" : value).replace(/[&<>"']/g, function (ch) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch];
+    });
+  }
+
+  function icon(name) {
+    return '<svg class="i" aria-hidden="true"><use href="#i-' + name + '"/></svg>';
+  }
+
+  function metricHTML(badge) {
+    if (!badge) return "";
+    var title = badge.title ? ' title="' + esc(badge.title) + '"' : "";
+    var body = "";
+    if (badge.icon) body += icon(badge.icon);
+    if (badge.dot) body += '<i class="dot"></i>';
+    body += esc(badge.text == null ? "" : badge.text);
+    if (badge.unit) body += "<small>" + esc(badge.unit) + "</small>";
+    return '<span class="' + esc(badge.cls || "metric") + '"' + title + ">" + body + "</span>";
+  }
+
+  function flagHTML(node) {
+    if (!node || node.isAuto || !node.region) return "";
+    var code = regionCode(node.region);
+    if (!code) return "";
+    return '<span class="flag" style="--fc:' + esc(regionColor(node.region)) + '" title="' + esc(regionLabel(node.region)) + '">' + esc(code) + "</span>";
+  }
+
+  function rateHTML(name, utility) {
+    if (utility) return "";
+    var rate = parseRate(name);
+    if (rate == null) return "";
+    var cls = rate > 1 ? " mul-hi" : rate < 1 ? " mul-lo" : "";
+    return '<span class="tag' + cls + '">' + esc(formatRate(rate)) + "× 倍率</span>";
+  }
+
+  function actsHTML(node, opt, keepSlot) {
+    if (isUtilityNode(node)) return keepSlot ? '<div class="nd-acts"></div>' : "";
+    opt = opt || {};
+    var run = opt.core !== false;
+    var delayDis = !run || opt.delayBusy ? " disabled" : "";
+    var speedDis = !run || opt.speedBusy ? " disabled" : "";
+    var speedTitle = opt.speedBusy ? "测速通道占用中" : "测网速";
+    return '<div class="nd-acts"><button type="button" class="ibtn" data-act="delay" title="测延迟" aria-label="测延迟"' + delayDis + ">" + icon("bolt") +
+      '</button><button type="button" class="ibtn" data-act="speed" title="' + esc(speedTitle) + '" aria-label="测网速"' + speedDis + ">" + icon("gauge") + "</button></div>";
+  }
+
+  function nodeView(node, opt) {
+    node = node || {};
+    opt = opt || {};
+    var name = node.name == null ? "" : String(node.name);
+    return {
+      node: node,
+      opt: opt,
+      name: name,
+      selected: opt.selected != null ? !!opt.selected : !!node.selected,
+      utility: isUtilityNode(node),
+    };
+  }
+
+  function tagsHTML(view) {
+    var node = view.node;
+    var proto = node.typeLabel || node.type || (view.utility ? "" : "—");
+    var html = "";
+    if (proto) html += '<span class="tag">' + esc(proto) + "</span>";
+    if (node.isAuto && node.resolvedTo) html += '<span class="tag via">当前 → ' + esc(node.resolvedTo) + "</span>";
+    if (!view.utility) {
+      var sub = node.subName || node.provider || "";
+      if (sub) html += '<span class="tag">' + esc(sub) + "</span>";
+      html += rateHTML(view.name, false);
+    }
+    return html;
+  }
+
+  function nodeCardHTML(node, opt) {
+    var view = nodeView(node, opt);
+    var sel = view.selected ? " is-sel" : "";
+    var check = view.selected ? '<span class="nd-check" title="当前使用">' + icon("check") + "</span>" : "";
+    var auto = view.node.isAuto ? '<span class="tag">自动</span>' : "";
+    var speed = view.utility ? "" : metricHTML(speedBadge(view.node, view.opt));
+    return '<article class="nd-card' + sel + '" data-id="' + esc(view.name) + '" tabindex="0" role="button" aria-pressed="' + (view.selected ? "true" : "false") + '">' +
+      '<div class="nd-top">' + flagHTML(view.node) + auto + '<div class="nd-name" title="' + esc(view.name) + '">' + esc(view.name) + "</div>" + check + "</div>" +
+      '<div class="nd-tags">' + tagsHTML(view) + "</div>" +
+      '<div class="nd-foot">' + metricHTML(delayBadge(view.node, view.opt)) + speed + actsHTML(view.node, view.opt) + "</div></article>";
+  }
+
+  function nodeRowHTML(node, opt) {
+    var view = nodeView(node, opt);
+    var sel = view.selected ? " is-sel" : "";
+    var check = view.selected ? '<span class="nd-check sm" title="当前使用">' + icon("check") + "</span>" : "";
+    var auto = view.node.isAuto ? '<span class="tag">自动</span>' : "";
+    var via = view.node.isAuto && view.node.resolvedTo ? '<span class="caption"> → ' + esc(view.node.resolvedTo) + "</span>" : "";
+    var sub = view.utility ? "—" : (view.node.subName || view.node.provider || "—");
+    var proto = view.node.typeLabel || view.node.type || "—";
+    var speed = view.utility ? '<span class="metric none">—</span>' : metricHTML(speedBadge(view.node, view.opt));
+    return '<div class="nd-tr' + sel + '" data-id="' + esc(view.name) + '" tabindex="0" role="button" aria-pressed="' + (view.selected ? "true" : "false") + '">' +
+      '<div class="c-name">' + flagHTML(view.node) + auto + '<span class="ellipsis" title="' + esc(view.name) + '">' + esc(view.name) + via + "</span>" + rateHTML(view.name, view.utility) + check + "</div>" +
+      '<div class="c-proto">' + esc(proto) + "</div>" +
+      '<div class="c-sub">' + esc(sub) + "</div>" +
+      "<div>" + metricHTML(delayBadge(view.node, view.opt)) + "</div>" +
+      "<div>" + speed + "</div>" +
+      actsHTML(view.node, view.opt, true) + "</div>";
+  }
+
+  function emptyChipsHTML(filter, subName) {
+    var chips = emptyChips(filter, subName);
+    var html = "";
+    for (var i = 0; i < chips.length; i++) {
+      html += '<button type="button" class="chip on" data-rm="' + esc(chips[i].key) + '">' + esc(chips[i].label) + icon("x") + "</button>";
+    }
+    return html;
   }
 
   function buildNodeName(el, name) {
@@ -422,7 +671,11 @@
     saveFilters: saveFilters,
     detectRegion: detectRegion,
     regionLabel: regionLabel,
+    regionCode: regionCode,
+    regionColor: regionColor,
     regionCounts: regionCounts,
+    parseRate: parseRate,
+    formatRate: formatRate,
     activeFilterCount: activeFilterCount,
     isFilterActive: isFilterActive,
     isUtilityNode: isUtilityNode,
@@ -431,7 +684,17 @@
     applyFilters: applyFilters,
     sortNodes: sortNodes,
     emptyReason: emptyReason,
+    scopeTargets: scopeTargets,
     speedTestNames: speedTestNames,
+    delayLabel: delayLabel,
+    speedLabel: speedLabel,
+    delayBadge: delayBadge,
+    speedBadge: speedBadge,
+    emptyChips: emptyChips,
+    emptyChipsHTML: emptyChipsHTML,
+    clearChip: clearChip,
+    nodeCardHTML: nodeCardHTML,
+    nodeRowHTML: nodeRowHTML,
     buildNodeName: buildNodeName,
   };
 
