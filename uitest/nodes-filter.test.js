@@ -103,9 +103,18 @@ test("detectRegion keeps in-word fragments and unknown places in the right bucke
   assert.equal(F.detectRegion("加拿大 01"), "other");
   assert.equal(F.detectRegion("Sydney-1"), "other");
   assert.equal(F.detectRegion("土耳其 01"), "other");
-  assert.equal(F.regionLabel("other"), "🌐 其他地区");
-  assert.equal(F.regionLabel("hk"), "🇭🇰 香港");
+  assert.equal(F.regionLabel("other"), "其他");
+  assert.equal(F.regionLabel("hk"), "香港");
+  assert.equal(F.regionCode("hk"), "HK");
+  assert.equal(F.regionCode("uk"), "GB");
+  assert.equal(F.regionCode("other"), "··");
   assert.equal(F.regionLabel("nope"), "");
+  assert.equal(F.regionCode("nope"), "");
+  F.REGION_ORDER.forEach(function (key) {
+    var shown = F.regionLabel(key) + F.regionCode(key);
+    assert.equal(/\uD83C[\uDDE6-\uDDFF]/.test(shown), false, key);
+    assert.ok(F.regionCode(key).length >= 2, key);
+  });
 });
 
 test("detectRegion gives DIRECT, REJECT, and auto groups no region", function () {
@@ -402,4 +411,168 @@ test("a hostile node name stays text through the filter and the DOM builder", fu
   assert.equal(built.childNodes[0].nodeType, 3);
   assert.equal(built.childNodes[0].textContent, hostile);
   assert.equal(built.textContent, hostile);
+});
+
+test("region codes stay two letters and nearby words do not steal a region", function () {
+  const samples = {
+    hk: "HK-1",
+    tw: "TW-1",
+    jp: "JP-1",
+    sg: "SG-1",
+    us: "US-1",
+    kr: "KR-1",
+    uk: "GB-1",
+    de: "DE-1",
+    eu: "FR-1",
+  };
+  Object.keys(samples).forEach(function (key) {
+    assert.equal(F.detectRegion(samples[key]), key, samples[key]);
+    assert.equal(F.regionCode(key).length, 2);
+  });
+  assert.equal(F.detectRegion("ARGB-1"), "other");
+  assert.equal(F.detectRegion("think"), "other");
+  assert.equal(F.detectRegion("chunk"), "other");
+  assert.equal(F.detectRegion("myhknet"), "other");
+  assert.equal(F.detectRegion("reconnect"), "other");
+  assert.equal(F.regionCode("other"), "··");
+});
+
+test("an old pb.nodeFilters.v1 payload migrates into both channels and then splits", function () {
+  const store = memStorage();
+  store.setItem(F.STORAGE_KEY, JSON.stringify({
+    query: "legacy",
+    region: "uk",
+    sub: "alpha",
+    delayPreset: "300",
+    maxDelayMs: 300,
+    speedPreset: "10",
+    minSpeedMBps: 10,
+    sortKey: "name",
+    sortDir: -1,
+  }));
+  const loaded = F.loadFilters(store);
+  assert.equal(loaded[F.GROUP_PROXY].query, "legacy");
+  assert.equal(loaded[F.GROUP_PROXY].region, "uk");
+  assert.equal(loaded[F.GROUP_PROXY].delayPreset, "300");
+  assert.equal(loaded[F.GROUP_AI].region, "uk");
+  assert.equal(loaded[F.GROUP_AI].sortDir, -1);
+  loaded[F.GROUP_PROXY].query = "only-daily";
+  loaded[F.GROUP_PROXY].region = "jp";
+  F.saveFilters(store, loaded);
+  const again = F.loadFilters(store);
+  assert.equal(again[F.GROUP_PROXY].query, "only-daily");
+  assert.equal(again[F.GROUP_PROXY].region, "jp");
+  assert.equal(again[F.GROUP_AI].query, "legacy");
+  assert.equal(again[F.GROUP_AI].region, "uk");
+  assert.equal(again[F.GROUP_AI].speedPreset, "10");
+});
+
+test("rate multipliers parse the same marks the node names use", function () {
+  const cases = [
+    ["香港-01-VR-4x", 4],
+    ["新加坡-A-01-AT-0.5x", 0.5],
+    ["节点×4", 4],
+    ["x0.5 香港", 0.5],
+    ["4倍专线", 4],
+    ["0.5×", 0.5],
+    ["美国-NL-02-VR-2x", 2],
+    ["X4", 4],
+    ["倍率 x0.5", 0.5],
+    ["1倍", 1],
+    ["1x", 1],
+    ["普通节点", null],
+    ["4xbox", null],
+    ["max4", null],
+    ["think", null],
+  ];
+  cases.forEach(function (pair) {
+    assert.equal(F.parseRate(pair[0]), pair[1], pair[0]);
+  });
+  assert.equal(F.formatRate(4), "4");
+  assert.equal(F.formatRate(0.5), "0.5");
+});
+
+test("delay and speed badges use the tier boundaries", function () {
+  assert.equal(F.delayBadge({ untested: false, delayMs: 200 }).cls, "metric d-good");
+  assert.equal(F.delayBadge({ untested: false, delayMs: 201 }).cls, "metric d-mid");
+  assert.equal(F.delayBadge({ untested: false, delayMs: 500 }).cls, "metric d-mid");
+  assert.equal(F.delayBadge({ untested: false, delayMs: 501 }).cls, "metric d-bad");
+  assert.equal(F.delayBadge({ untested: false, delayMs: 0 }).text, "超时");
+  assert.equal(F.delayBadge({ untested: false, delayMs: 0 }).cls, "metric d-bad");
+  assert.equal(F.delayBadge({ untested: true, delayMs: 20 }).text, "未测速");
+
+  assert.equal(F.speedBadge({ speedTested: true, speedMBps: 0.99, speedError: "" }).cls, "metric speed spd-low");
+  assert.equal(F.speedBadge({ speedTested: true, speedMBps: 1, speedError: "" }).cls, "metric speed spd-mid");
+  assert.equal(F.speedBadge({ speedTested: true, speedMBps: 4.99, speedError: "" }).cls, "metric speed spd-mid");
+  assert.equal(F.speedBadge({ speedTested: true, speedMBps: 5, speedError: "" }).cls, "metric speed spd-good");
+  assert.equal(F.speedBadge({ speedTested: true, speedMBps: 20, speedError: "boom" }).text, "失败");
+  assert.equal(F.speedBadge({ speedTested: false, speedMBps: 0, speedError: "" }).text, "未测速");
+  assert.equal(F.speedBadge({ speedTested: false }, { speedPhase: "current" }).text, "测速中");
+});
+
+test("scope targets are the filtered real nodes and null when the filter is idle", function () {
+  const rows = [
+    { name: "⚡ AUTO", isAuto: true, region: "", delayMs: 10, untested: false },
+    { name: "DIRECT", type: "direct", region: "", delayMs: 10, untested: false },
+    { name: "REJECT", type: "reject", region: "" },
+    node({ name: "HK 1", delayMs: 50, speedMBps: 8 }),
+    node({ name: "SG 1", region: "sg", delayMs: 50, speedMBps: 8 }),
+  ];
+  assert.equal(F.scopeTargets(rows, F.defaultGroupFilter()), null);
+  const region = F.defaultGroupFilter();
+  region.region = "hk";
+  assert.deepEqual(F.scopeTargets(rows, region), ["HK 1"]);
+  assert.deepEqual(F.speedTestNames(rows, region), ["HK 1"]);
+  const miss = F.defaultGroupFilter();
+  miss.region = "de";
+  assert.deepEqual(F.scopeTargets(rows, miss), []);
+});
+
+test("empty-state chips list each active condition and one chip can be removed", function () {
+  const filter = F.defaultGroupFilter();
+  filter.query = "机场";
+  filter.sub = "alpha";
+  filter.region = "hk";
+  filter.delayPreset = "200";
+  filter.maxDelayMs = 200;
+  filter.speedPreset = "custom";
+  filter.minSpeedMBps = 1.5;
+  const chips = F.emptyChips(filter, function (id) { return id === "alpha" ? "机场甲" : id; });
+  assert.deepEqual(chips.map(function (chip) { return chip.key; }), ["query", "sub", "region", "delay", "speed"]);
+  assert.equal(chips[1].label, "订阅：机场甲");
+  assert.equal(chips[2].label, "地区：香港");
+  assert.equal(chips[3].label, "延迟 ≤ 200 ms");
+  assert.equal(chips[4].label, "网速 ≥ 1.5 MB/s");
+  const next = F.clearChip(filter, "delay");
+  assert.equal(next.delayPreset, "all");
+  assert.equal(filter.delayPreset, "200");
+  assert.equal(next.region, "hk");
+  assert.deepEqual(F.emptyChips(next).map(function (chip) { return chip.key; }), ["query", "sub", "region", "speed"]);
+});
+
+test("html builders escape a hostile name in cards, rows, and empty chips", function () {
+  const hostile = "<img src=x onerror=alert(1)>";
+  const broke = '"><img src=x onerror=alert(1)>';
+  const row = node({
+    name: hostile,
+    type: hostile,
+    provider: hostile,
+    subName: hostile,
+    region: "other",
+    speedError: hostile,
+    speedTested: true,
+    speedMBps: 3,
+    delayMs: 10,
+    untested: false,
+  });
+  [F.nodeCardHTML(row), F.nodeRowHTML(row), F.nodeCardHTML(node({ name: broke }))].forEach(function (html) {
+    assert.equal(html.indexOf("<img"), -1, html);
+    assert.ok(html.indexOf("&lt;img src=x onerror=alert(1)&gt;") >= 0, html);
+  });
+  const filter = F.defaultGroupFilter();
+  filter.query = hostile;
+  const chips = F.emptyChipsHTML(filter);
+  assert.equal(chips.indexOf("<img"), -1);
+  assert.ok(chips.indexOf("&lt;img src=x onerror=alert(1)&gt;") >= 0);
+  assert.ok(chips.indexOf('data-rm="query"') >= 0);
 });

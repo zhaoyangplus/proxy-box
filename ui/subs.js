@@ -1,601 +1,281 @@
-"use strict";
-
 (function () {
-  const state = {
-    mounted: false,
-    subs: [],
-    loading: false,
-    error: "",
-    busyAll: false,
-    busyId: "",
-    confirmId: "",
-    editingId: "",
-    baseline: null,
-    formError: "",
-    queuedShow: false,
-  };
+  "use strict";
+  var L = window.PBSubs;
+  if (!L) throw new Error("ui/subs-logic.js must load before ui/subs.js");
 
-  const dom = {};
-  const locks = new Set();
-  let loadGen = 0;
-  let subTimer = 0;
+  var list = [];
+  var loaded = false;
+  var busy = Object.create(null);
+  var allBusy = false;
+  var rootEl = null;
 
-  function num(v) {
-    const n = Number(v);
-    return Number.isFinite(n) ? n : 0;
+  function paintBadge() {
+    var n = L.errorCount(list);
+    PB.setBadge("subs", n ? String(n) : "", n ? "err" : "");
   }
 
-  function locked(key, fn) {
-    if (locks.has(key)) return Promise.resolve();
-    locks.add(key);
-    return Promise.resolve().then(fn).finally(function () {
-      locks.delete(key);
+  function show() {
+    paintBadge();
+    if (!rootEl || PB.current() !== "subs") return;
+    rootEl.innerHTML = L.pageHTML(list, { now: Date.now(), busy: busy, loaded: loaded });
+  }
+
+  function remember(data) {
+    var next = data && data.subscriptions;
+    list = Array.isArray(next) ? next.filter(function (sub) { return sub && typeof sub === "object"; }) : [];
+    loaded = true;
+    show();
+  }
+
+  function load() {
+    return PB.api("GET", "/api/subs").then(remember).catch(function (err) {
+      loaded = true;
+      show();
+      PB.toast((err && err.message) || "读取订阅失败", { tone: "err" });
     });
   }
 
-  function normalizeSub(raw) {
-    const s = raw || {};
-    let usage = null;
-    if (s.usage && typeof s.usage === "object") {
-      usage = {
-        upload: num(s.usage.upload),
-        download: num(s.usage.download),
-        total: num(s.usage.total),
-        expire: num(s.usage.expire),
-      };
-    }
-    return {
-      id: String(s.id || ""),
-      name: String(s.name || ""),
-      url: String(s.url || ""),
-      filter: String(s.filter || ""),
-      userAgent: String(s.userAgent || ""),
-      updateIntervalMin: Math.max(0, Math.round(num(s.updateIntervalMin))),
-      enabled: !!s.enabled,
-      updatedAt: s.updatedAt || "",
-      lastError: String(s.lastError || ""),
-      nodeCount: num(s.nodeCount),
-      usage: usage,
-    };
-  }
-
-  function maskURL(raw) {
-    const text = String(raw || "");
-    let shown = "";
-    try {
-      const u = new URL(text);
-      const parts = u.pathname.split("/").filter(Boolean);
-      let path = "";
-      if (parts.length > 1) path = "/" + parts[0] + "/…";
-      else if (parts.length === 1) path = "/…";
-      shown = u.host + path;
-    } catch (err) {
-      const cut = text.split("?")[0].split("#")[0];
-      const scheme = cut.indexOf("://");
-      const rest = scheme >= 0 ? cut.slice(scheme + 3) : cut;
-      shown = rest.split("/")[0] || "订阅地址";
-    }
-    if (shown.length > 72) shown = shown.slice(0, 69) + "…";
-    return shown;
-  }
-
-  function validURL(raw) {
-    const text = String(raw || "").trim();
-    if (!text) return false;
-    try {
-      const u = new URL(text);
-      return (u.protocol === "http:" || u.protocol === "https:") && !!u.host;
-    } catch (err) {
-      return false;
-    }
-  }
-
-  function intervalValue(raw) {
-    if (String(raw).trim() === "") return 0;
-    const n = Math.round(Number(raw));
-    if (!Number.isFinite(n) || n < 0) return 0;
-    return n;
-  }
-
-  function fmtBytes(n) {
-    if (PB.fmt && typeof PB.fmt.bytes === "function") return PB.fmt.bytes(n);
-    return String(Math.round(num(n))) + " B";
-  }
-
-  function fmtWhen(value) {
-    if (!value) return "尚未更新";
-    const d = new Date(value);
-    if (Number.isNaN(d.getTime()) || d.getFullYear() < 2000) return "尚未更新";
-    if (PB.fmt && typeof PB.fmt.date === "function") {
-      try {
-        const text = PB.fmt.date(value);
-        if (text) return String(text);
-      } catch (err) {
-        return "尚未更新";
-      }
-    }
-    return "尚未更新";
-  }
-
-  function fmtExpire(sec) {
-    const n = num(sec);
-    if (!n) return "";
-    const d = new Date(n * 1000);
-    if (Number.isNaN(d.getTime()) || d.getFullYear() < 2000) return "";
-    if (PB.fmt && typeof PB.fmt.date === "function") {
-      try {
-        const text = PB.fmt.date(n);
-        if (text) return "到期 " + String(text);
-      } catch (err) {
-        return "";
-      }
-    }
-    return "";
-  }
-
-  function intervalText(min) {
-    return min > 0 ? "每 " + min + " 分钟" : "仅手动";
-  }
-
-  function findSub(id) {
-    for (let i = 0; i < state.subs.length; i++) {
-      if (state.subs[i].id === id) return state.subs[i];
+  function subById(id) {
+    for (var i = 0; i < list.length; i++) {
+      if (list[i] && String(list[i].id) === String(id)) return list[i];
     }
     return null;
   }
 
-  function upsert(raw) {
-    const sub = normalizeSub(raw);
-    const idx = state.subs.findIndex(function (item) { return item.id === sub.id; });
-    if (idx < 0) state.subs.push(sub);
-    else state.subs[idx] = sub;
+  function markInvalid(card, input, errEl, message) {
+    if (input) input.classList.add("invalid");
+    if (errEl) errEl.textContent = message;
+    if (input && input.focus) input.focus();
+    card.classList.remove("shake");
+    void card.offsetWidth;
+    card.classList.add("shake");
   }
 
-  function absorb(data) {
-    if (!data) return false;
-    if (Array.isArray(data.subscriptions)) {
-      state.subs = data.subscriptions.map(normalizeSub);
-      return true;
-    }
-    if (data.subscription) {
-      upsert(data.subscription);
-      return true;
-    }
-    return false;
-  }
-
-  function resultErrors(data) {
-    const results = data && Array.isArray(data.results) ? data.results : [];
-    const msgs = [];
-    for (let i = 0; i < results.length; i++) {
-      const item = results[i];
-      if (item && item.ok === false) msgs.push(item.error || "更新失败");
-    }
-    return msgs.join("；");
-  }
-
-  function field(form, label, id, type) {
-    const input = document.createElement("input");
-    input.type = type || "text";
-    input.id = id;
-    input.autocomplete = "off";
-    input.spellcheck = false;
-    const lab = PB.el("span", { text: label });
-    const wrap = PB.el("label", { class: "pbs-field" }, lab, input);
-    form.appendChild(wrap);
-    return input;
-  }
-
-  function mount(root) {
-    if (state.mounted) return;
-    root.classList.add("pbs");
-    dom.count = PB.el("span", { class: "pb-badge pb-badge-ok pbs-count", attrs: { id: "pbsCount" }, text: "共 0 个订阅" });
-    dom.updateAllBtn = PB.el("button", {
-      class: "pb-btn pb-btn-sm",
-      text: "全部更新",
-      attrs: { type: "button", id: "pbsUpdateAll" },
-      on: { click: function () { updateAll(); } },
-    });
-    dom.addBtn = PB.el("button", {
-      class: "pb-btn pb-btn-primary pb-btn-sm",
-      text: "添加订阅",
-      attrs: { type: "button", id: "pbsAdd" },
-      on: { click: openCreate },
-    });
-    const bar = PB.el("div", { class: "pbs-bar" },
-      dom.count,
-      PB.el("div", { class: "pbs-bar-actions" }, dom.updateAllBtn, dom.addBtn));
-    dom.error = PB.el("div", { class: "pbs-error", hidden: true });
-    dom.loading = PB.el("div", { class: "pbs-loading", text: "正在读取订阅…", hidden: true });
-    dom.empty = PB.el("div", { class: "pbs-empty", text: "还没有订阅。添加一个订阅地址即可。", hidden: true });
-    dom.list = PB.el("div", { class: "pbs-list", attrs: { id: "pbsList" } });
-    const body = PB.el("div", { class: "pbs-body" }, dom.error, dom.loading, dom.empty, dom.list);
-    root.appendChild(bar);
-    root.appendChild(body);
-    buildModal();
-    state.mounted = true;
-    PB.on("subs", scheduleLoad);
-    document.addEventListener("keydown", onKey);
-    if (state.queuedShow) {
-      state.queuedShow = false;
-      show();
-    } else {
-      paint();
-    }
-  }
-
-  function buildModal() {
-    dom.formTitle = PB.el("span", { class: "pbs-dialog-title", text: "添加订阅" });
-    const close = PB.el("button", {
-      class: "pb-btn pb-btn-ghost pb-btn-sm",
-      text: "关闭",
-      attrs: { type: "button" },
-      on: { click: closeForm },
-    });
-    const head = PB.el("div", { class: "pbs-dialog-head" }, dom.formTitle, close);
-    const form = PB.el("form", {
-      class: "pbs-form",
-      on: { submit: function (ev) { ev.preventDefault(); saveSub(); } },
-    });
-    dom.fName = field(form, "名称", "pbsName", "text");
-    dom.fURL = field(form, "URL", "pbsURL", "text");
-    dom.fFilter = field(form, "Filter 正则", "pbsFilter", "text");
-    dom.fUA = field(form, "自定义 User-Agent", "pbsUA", "text");
-    dom.fUA.placeholder = "留空则使用 clash.meta";
-    dom.fInterval = field(form, "更新间隔（分钟）", "pbsInterval", "number");
-    dom.fInterval.min = "0";
-    dom.fInterval.step = "1";
-    dom.fInterval.value = "0";
-    form.appendChild(PB.el("div", { class: "pbs-hint", text: "0 表示仅手动更新" }));
-    dom.formError = PB.el("div", { class: "pbs-error", hidden: true });
-    form.appendChild(dom.formError);
-    const cancel = PB.el("button", {
-      class: "pb-btn pb-btn-ghost pb-btn-sm",
-      text: "取消",
-      attrs: { type: "button" },
-      on: { click: closeForm },
-    });
-    dom.saveBtn = PB.el("button", {
-      class: "pb-btn pb-btn-primary pb-btn-sm",
-      text: "保存",
-      attrs: { type: "submit", id: "pbsSave" },
-    });
-    form.appendChild(PB.el("div", { class: "pbs-form-actions" }, cancel, dom.saveBtn));
-    const dialog = PB.el("div", { class: "pbs-dialog", attrs: { role: "dialog", "aria-modal": "true" } }, head, form);
-    dialog.addEventListener("click", function (ev) { ev.stopPropagation(); });
-    dom.modal = PB.el("div", {
-      class: "pbs-modal",
-      attrs: { id: "pbsModal" },
-      hidden: true,
-      on: { click: closeForm },
-    }, dialog);
-    document.body.appendChild(dom.modal);
-  }
-
-  function show() {
-    if (!state.mounted) {
-      state.queuedShow = true;
-      return;
-    }
-    loadSubs();
-  }
-
-  function hide() {}
-
-  function onKey(ev) {
-    if (ev.key === "Escape" && dom.modal && !dom.modal.hidden) closeForm();
-  }
-
-  function scheduleLoad() {
-    clearTimeout(subTimer);
-    subTimer = setTimeout(function () { loadSubs(); }, 300);
-  }
-
-  function loadSubs() {
-    const gen = ++loadGen;
-    const first = state.subs.length === 0;
-    state.loading = first;
-    if (first) state.error = "";
-    paint();
-    return PB.api("GET", "/api/subs").then(function (data) {
-      if (gen !== loadGen) return;
-      state.subs = data && Array.isArray(data.subscriptions) ? data.subscriptions.map(normalizeSub) : [];
-      state.error = "";
-    }).catch(function (err) {
-      if (gen !== loadGen) return;
-      state.error = (err && err.message) || "读取订阅失败";
-    }).then(function () {
-      if (gen !== loadGen) return;
-      state.loading = false;
-      paint();
-    });
-  }
-
-  function reloadQuiet() {
-    return PB.api("GET", "/api/subs").then(function (data) {
-      if (data && Array.isArray(data.subscriptions)) state.subs = data.subscriptions.map(normalizeSub);
-    }).catch(function () {});
-  }
-
-  function paint() {
-    if (!state.mounted) return;
-    dom.count.textContent = "共 " + state.subs.length + " 个订阅";
-    dom.error.hidden = !state.error;
-    dom.error.textContent = state.error || "";
-    dom.loading.hidden = !state.loading;
-    const showEmpty = !state.loading && state.subs.length === 0;
-    dom.empty.hidden = !showEmpty;
-    dom.updateAllBtn.disabled = state.busyAll || state.subs.length === 0;
-    dom.updateAllBtn.textContent = state.busyAll ? "更新中" : "全部更新";
-    const frag = document.createDocumentFragment();
-    for (let i = 0; i < state.subs.length; i++) frag.appendChild(subCard(state.subs[i]));
-    dom.list.replaceChildren(frag);
-    paintFormError();
-  }
-
-  function subCard(sub) {
-    const sw = PB.el("button", {
-      class: "pb-switch",
-      attrs: {
-        type: "button",
-        role: "switch",
-        "aria-checked": sub.enabled ? "true" : "false",
-        "aria-label": "启用 " + (sub.name || "订阅"),
-      },
-      disabled: state.busyAll || state.busyId === sub.id,
-      on: { click: function () { toggleSub(sub); } },
-    });
-    const top = PB.el("div", { class: "pbs-top" },
-      PB.el("div", { class: "pbs-name", text: sub.name || "订阅" }),
-      sw);
-    const card = PB.el("article", { class: "pbs-card" }, top);
-    card.appendChild(PB.el("div", { class: "pbs-url", text: maskURL(sub.url), title: maskURL(sub.url) }));
-    card.appendChild(PB.el("div", { class: "pbs-meta-row" },
-      PB.el("span", { class: "pb-badge pb-badge-ok", text: "节点 " + sub.nodeCount }),
-      PB.el("span", { class: "pb-badge pb-badge-muted", text: fmtWhen(sub.updatedAt) }),
-      PB.el("span", { class: "pb-badge pb-badge-muted", text: intervalText(sub.updateIntervalMin) })));
-    appendUsage(card, sub.usage);
-    if (sub.lastError) card.appendChild(PB.el("div", { class: "pbs-card-error", text: sub.lastError }));
-    card.appendChild(actionsFor(sub));
-    return card;
-  }
-
-  function appendUsage(card, usage) {
-    if (!usage) return;
-    const showBar = usage.total > 0;
-    const expire = fmtExpire(usage.expire);
-    if (!showBar && !expire) return;
-    if (showBar) {
-      const used = usage.upload + usage.download;
-      const pct = Math.max(0, Math.min(100, (used / usage.total) * 100));
-      const bar = PB.el("span");
-      bar.style.width = pct.toFixed(1) + "%";
-      if (pct >= 90) bar.className = "is-full";
-      else if (pct >= 75) bar.className = "is-high";
-      card.appendChild(PB.el("div", { class: "pbs-usage" }, bar));
-      card.appendChild(PB.el("div", { class: "pbs-meta", text: fmtBytes(used) + " / " + fmtBytes(usage.total) }));
-    }
-    if (expire) card.appendChild(PB.el("div", { class: "pbs-meta", text: expire }));
-  }
-
-  function actionsFor(sub) {
-    const row = PB.el("div", { class: "pbs-actions" });
-    if (state.confirmId === sub.id) {
-      row.appendChild(PB.el("span", { class: "pbs-confirm", text: "确认删除「" + (sub.name || "订阅") + "」？" }));
-      row.appendChild(PB.el("button", {
-        class: "pb-btn pb-btn-danger pb-btn-sm",
-        text: "删除",
-        attrs: { type: "button" },
-        on: { click: function () { deleteSub(sub.id); } },
-      }));
-      row.appendChild(PB.el("button", {
-        class: "pb-btn pb-btn-ghost pb-btn-sm",
-        text: "取消",
-        attrs: { type: "button" },
-        on: { click: function () { state.confirmId = ""; paint(); } },
-      }));
-      return row;
-    }
-    row.appendChild(PB.el("button", {
-      class: "pb-btn pb-btn-sm",
-      text: state.busyId === sub.id ? "更新中" : "更新",
-      attrs: { type: "button" },
-      disabled: state.busyAll || state.busyId === sub.id,
-      on: { click: function () { updateSub(sub.id); } },
-    }));
-    row.appendChild(PB.el("button", {
-      class: "pb-btn pb-btn-sm",
-      text: "编辑",
-      attrs: { type: "button" },
-      on: { click: function () { openEdit(sub); } },
-    }));
-    row.appendChild(PB.el("button", {
-      class: "pb-btn pb-btn-ghost pb-btn-sm pbs-btn-quiet",
-      text: "删除",
-      attrs: { type: "button" },
-      on: { click: function () { state.confirmId = sub.id; paint(); } },
-    }));
-    return row;
-  }
-
-  function paintFormError() {
-    if (!dom.formError) return;
-    dom.formError.hidden = !state.formError;
-    dom.formError.textContent = state.formError || "";
-  }
-
-  function openCreate() {
-    state.editingId = "";
-    state.baseline = null;
-    state.formError = "";
-    dom.formTitle.textContent = "添加订阅";
-    dom.fName.value = "";
-    dom.fURL.value = "";
-    dom.fFilter.value = "";
-    dom.fUA.value = "";
-    dom.fInterval.value = "0";
-    paintFormError();
-    dom.modal.hidden = false;
-    dom.fName.focus();
-  }
-
-  function openEdit(sub) {
-    state.editingId = sub.id;
-    state.baseline = {
-      id: sub.id,
-      name: sub.name,
-      url: sub.url,
-      filter: sub.filter,
-      userAgent: sub.userAgent,
-      updateIntervalMin: sub.updateIntervalMin,
-    };
-    state.formError = "";
-    dom.formTitle.textContent = "编辑订阅";
-    dom.fName.value = sub.name;
-    dom.fURL.value = sub.url;
-    dom.fFilter.value = sub.filter;
-    dom.fUA.value = sub.userAgent;
-    dom.fInterval.value = String(sub.updateIntervalMin || 0);
-    paintFormError();
-    dom.modal.hidden = false;
-    dom.fName.focus();
-  }
-
-  function closeForm() {
-    if (dom.modal) dom.modal.hidden = true;
-    state.formError = "";
-  }
-
-  function readForm() {
+  function readForm(card, prev) {
+    var name = card.querySelector("#fName").value.trim();
+    var url = card.querySelector("#fUrl").value.trim();
+    var filterEl = card.querySelector("#fFilter");
+    var uaEl = card.querySelector("#fUa");
+    var active = card.querySelector("#fInt .seg-btn.is-active");
+    var interval = prev ? L.intervalMinutes(prev.updateIntervalMin) : 360;
+    if (active) interval = L.intervalMinutes(active.getAttribute("data-v"));
     return {
-      name: dom.fName.value.trim(),
-      url: dom.fURL.value.trim(),
-      filter: dom.fFilter.value,
-      userAgent: dom.fUA.value.trim(),
-      updateIntervalMin: intervalValue(dom.fInterval.value),
+      name: name,
+      url: url,
+      filter: filterEl ? filterEl.value : "",
+      userAgent: uaEl ? uaEl.value.trim() : "",
+      updateIntervalMin: interval
     };
   }
 
-  function diffBody(orig, form) {
-    const body = { id: orig.id };
-    let changed = false;
-    if (form.name !== orig.name) { body.name = form.name; changed = true; }
-    if (form.url !== orig.url) { body.url = form.url; changed = true; }
-    if (form.filter !== orig.filter) { body.filter = form.filter; changed = true; }
-    if (form.userAgent !== orig.userAgent) { body.userAgent = form.userAgent; changed = true; }
-    if (form.updateIntervalMin !== orig.updateIntervalMin) {
-      body.updateIntervalMin = form.updateIntervalMin;
-      changed = true;
-    }
-    return changed ? body : null;
-  }
-
-  function saveSub() {
-    const form = readForm();
-    if (!validURL(form.url)) {
-      state.formError = "订阅地址无效，需要 http 或 https 链接";
-      paintFormError();
-      return;
-    }
-    return locked("saveSub", function () {
-      dom.saveBtn.disabled = true;
-      let req;
-      if (!state.editingId) {
-        req = PB.api("POST", "/api/subs", form);
-      } else {
-        const body = diffBody(state.baseline, form);
-        if (!body) {
-          closeForm();
-          dom.saveBtn.disabled = false;
-          return;
+  function openEditor(sub) {
+    var editing = !!sub;
+    PB.openSheet({
+      title: editing ? "编辑订阅" : "添加订阅",
+      sub: editing ? (sub.name || "") : "支持 Clash / Mihomo YAML 与通用 Base64 订阅",
+      icon: '<span class="sheet-ic">' + PB.ic(editing ? "pencil" : "link") + "</span>",
+      body: L.formHTML(editing ? sub : null),
+      onMount: function (card) {
+        var seg = card.querySelector("#fInt");
+        PB.mountSeg(seg);
+        var url = card.querySelector("#fUrl");
+        if (url) {
+          url.addEventListener("input", function () {
+            url.classList.remove("invalid");
+            var err = card.querySelector("#eUrl");
+            if (err) err.textContent = "";
+          });
         }
-        req = PB.api("PUT", "/api/subs", body);
-      }
-      return req.then(function (data) {
-        if (!absorb(data)) return loadSubs();
-      }).then(function () {
-        state.error = "";
-        state.formError = "";
-        closeForm();
-        paint();
-      }).catch(function (err) {
-        state.formError = (err && err.message) || "保存失败";
-        paintFormError();
-      }).then(function () {
-        if (dom.saveBtn) dom.saveBtn.disabled = false;
-      });
+      },
+      actions: [
+        { label: "取消", kind: "plain" },
+        {
+          label: editing ? "保存" : "添加并更新",
+          kind: "prominent",
+          fn: function (btn, card) {
+            var current = editing ? (subById(sub.id) || sub) : null;
+            var draft = readForm(card, current);
+            if (!L.validSubURL(draft.url)) {
+              markInvalid(card, card.querySelector("#fUrl"), card.querySelector("#eUrl"), "请输入以 http:// 或 https:// 开头的有效链接");
+              return false;
+            }
+            if (editing && !draft.name) {
+              markInvalid(card, card.querySelector("#fName"), card.querySelector("#eName"), "请填写名称");
+              return false;
+            }
+            if (!editing && !draft.name) draft.name = L.defaultName(draft.url);
+            if (editing) {
+              var body = L.diffSub(current, draft);
+              if (!body) {
+                PB.toast("没有需要保存的更改", { tone: "info" });
+                return;
+              }
+              return PB.api("PUT", "/api/subs", body).then(function () {
+                PB.toast("订阅已保存");
+                return load();
+              });
+            }
+            return PB.api("POST", "/api/subs", {
+              name: draft.name,
+              url: draft.url,
+              userAgent: draft.userAgent,
+              filter: draft.filter,
+              updateIntervalMin: L.intervalMinutes(draft.updateIntervalMin),
+              enabled: true
+            }).then(function (created) {
+              var id = created && created.subscription && created.subscription.id;
+              if (!id) return { updated: false, error: "订阅已保存，但没有返回标识" };
+              return PB.api("POST", "/api/subs/update", { id: id }).then(function () {
+                return { updated: true };
+              }, function (err) {
+                return { updated: false, error: (err && err.message) || "更新失败" };
+              });
+            }).then(function (result) {
+              return load().then(function () {
+                if (result && result.updated) PB.toast("已添加并更新订阅");
+                else PB.toast("已添加订阅，更新失败：" + ((result && result.error) || "更新失败"), { tone: "warn" });
+              });
+            });
+          }
+        }
+      ]
     });
   }
 
-  function toggleSub(sub) {
-    return locked("en:" + sub.id, function () {
-      const next = !sub.enabled;
-      sub.enabled = next;
-      paint();
-      return PB.api("PUT", "/api/subs", { id: sub.id, enabled: next }).then(function (data) {
-        if (data && data.subscription) upsert(data.subscription);
-        state.error = "";
-      }).catch(function (err) {
-        const cur = findSub(sub.id);
-        if (cur) cur.enabled = !next;
-        state.error = (err && err.message) || "切换失败";
-      }).then(function () {
-        paint();
-      });
+  function toggle(sub) {
+    if (!sub || marked(sub.id)) return;
+    var next = !sub.enabled;
+    busy[sub.id] = true;
+    sub.enabled = next;
+    show();
+    PB.api("PUT", "/api/subs", L.enabledPatch(sub.id, next)).then(function () {
+      PB.toast((next ? "已启用「" : "已停用「") + (sub.name || "订阅") + "」", { tone: next ? "ok" : "info" });
+    }).catch(function (err) {
+      sub.enabled = !next;
+      PB.toast((err && err.message) || "保存失败", { tone: "err" });
+    }).then(function () {
+      delete busy[sub.id];
+      show();
     });
   }
 
-  function deleteSub(id) {
-    return locked("del:" + id, function () {
-      return PB.api("DELETE", "/api/subs", { id: id }).then(function () {
-        state.subs = state.subs.filter(function (sub) { return sub.id !== id; });
-        state.confirmId = "";
-        state.error = "";
-      }).catch(function (err) {
-        state.error = (err && err.message) || "删除失败";
-      }).then(function () {
-        paint();
-      });
-    });
+  function marked(id) {
+    return Object.prototype.hasOwnProperty.call(busy, id) && !!busy[id];
   }
 
-  function updateSub(id) {
-    return locked("up:" + id, function () {
-      state.busyId = id;
-      paint();
-      return PB.api("POST", "/api/subs/update", { id: id }).then(function (data) {
-        absorb(data);
-        state.error = "";
-      }).catch(function (err) {
-        state.error = (err && err.message) || "更新失败";
-        return reloadQuiet();
-      }).then(function () {
-        state.busyId = "";
-        paint();
-      });
+  function updateOne(sub) {
+    if (!sub || marked(sub.id)) return;
+    busy[sub.id] = true;
+    show();
+    PB.api("POST", "/api/subs/update", { id: sub.id }).then(function () {
+      PB.toast("「" + (sub.name || "订阅") + "」已更新");
+      return load();
+    }).catch(function (err) {
+      PB.toast((err && err.message) || "更新失败", { tone: "err" });
+      return load();
+    }).then(function () {
+      delete busy[sub.id];
+      show();
     });
   }
 
   function updateAll() {
-    return locked("upAll", function () {
-      state.busyAll = true;
-      paint();
-      return PB.api("POST", "/api/subs/update", {}).then(function (data) {
-        absorb(data);
-        state.error = resultErrors(data);
-      }).catch(function (err) {
-        state.error = (err && err.message) || "更新失败";
-        return reloadQuiet();
-      }).then(function () {
-        state.busyAll = false;
-        paint();
-      });
+    if (allBusy) return;
+    allBusy = true;
+    var btn = document.getElementById("subAll");
+    if (btn) {
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spin xs"></span><span class="lbl">更新中</span>';
+    }
+    list.forEach(function (sub) {
+      if (sub && sub.enabled && sub.id != null) busy[sub.id] = true;
+    });
+    show();
+    PB.api("POST", "/api/subs/update", {}).then(function (data) {
+      var summary = L.updateSummary(data && data.results);
+      if (data && Array.isArray(data.subscriptions)) remember(data);
+      else return load().then(function () { return summary; });
+      return summary;
+    }).then(function (summary) {
+      if (summary) PB.toast(summary.text, { tone: summary.tone });
+    }).catch(function (err) {
+      PB.toast((err && err.message) || "更新失败", { tone: "err" });
+      return load();
+    }).then(function () {
+      Object.keys(busy).forEach(function (id) { delete busy[id]; });
+      allBusy = false;
+      show();
+      var again = document.getElementById("subAll");
+      if (again) {
+        again.disabled = false;
+        again.innerHTML = PB.ic("refresh") + '<span class="lbl">全部更新</span>';
+      }
     });
   }
 
+  function remove(sub) {
+    if (!sub) return;
+    var nodes = Number(sub.nodeCount);
+    if (!isFinite(nodes) || nodes < 0) nodes = 0;
+    PB.confirmSheet({
+      title: "删除「" + (sub.name || "订阅") + "」？",
+      danger: true,
+      okLabel: "删除订阅",
+      body: "将删除该订阅及其 <b>" + Math.round(nodes) + "</b> 个节点。删除后不能撤销。",
+      onOk: function () {
+        return PB.api("DELETE", "/api/subs?id=" + encodeURIComponent(sub.id)).then(function () {
+          PB.toast("已删除「" + (sub.name || "订阅") + "」", { tone: "info" });
+          return load();
+        });
+      }
+    });
+  }
+
+  function onClick(event) {
+    var actEl = event.target && event.target.closest ? event.target.closest("[data-act]") : null;
+    if (!actEl || actEl.disabled) return;
+    var act = actEl.getAttribute("data-act");
+    if (act === "add") {
+      openEditor(null);
+      return;
+    }
+    var card = event.target.closest("[data-sid]");
+    if (!card) return;
+    var sub = subById(card.getAttribute("data-sid"));
+    if (!sub) return;
+    if (act === "toggle") toggle(sub);
+    else if (act === "update") updateOne(sub);
+    else if (act === "edit") openEditor(sub);
+    else if (act === "del") remove(sub);
+    else if (act === "copy") PB.copyText(sub.url || "", "订阅链接已复制");
+  }
+
+  function bindTop() {
+    var bar = document.getElementById("tbActions");
+    if (!bar) return;
+    bar.onclick = function (event) {
+      var target = event.target && event.target.closest ? event.target : null;
+      if (!target || !target.closest) return;
+      if (target.closest("#subAll")) updateAll();
+      else if (target.closest("#subAdd")) openEditor(null);
+    };
+  }
+
   PB.registerTab("subs", {
-    mount: mount,
-    show: show,
-    hide: hide,
+    enter: function (root) {
+      rootEl = root;
+      PB.topbar({ actions: L.topbarHTML() });
+      bindTop();
+      root.onclick = onClick;
+      show();
+      load();
+    },
+    onSSE: function (msg) {
+      if (msg && msg.type === "subs") load();
+    }
+  });
+
+  document.addEventListener("DOMContentLoaded", function () {
+    if (!loaded) load();
   });
 })();

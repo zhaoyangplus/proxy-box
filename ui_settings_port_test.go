@@ -17,7 +17,7 @@ func TestSettingsSpeedPortStaysSeparateFromDownloadURL(t *testing.T) {
 	if err := os.WriteFile(script, []byte(settingsPortCheckJS), 0644); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command("node", script, filepath.Join("ui", "tab-settings.js"))
+	cmd := exec.Command("node", script, "ui")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("settings port check: %v\n%s", err, out)
@@ -29,7 +29,12 @@ func TestSettingsSpeedPortStaysSeparateFromDownloadURL(t *testing.T) {
 
 const settingsPortCheckJS = `
 const fs = require("fs");
-const path = process.argv[2];
+const path = require("path");
+const ui = process.argv[2];
+
+function hasClass(node, name) {
+  return String(node.className || "").split(/\s+/).indexOf(name) >= 0;
+}
 
 function el(tag, props) {
   const node = {
@@ -41,9 +46,11 @@ function el(tag, props) {
     parent: null,
     value: "",
     hidden: false,
+    disabled: false,
     setAttribute(key, value) { this.attrs[key] = String(value); },
     getAttribute(key) { return this.attrs[key]; },
     appendChild(child) {
+      if (!child) return child;
       if (child.parent) {
         child.parent.children = child.parent.children.filter((item) => item !== child);
       }
@@ -74,27 +81,34 @@ function el(tag, props) {
 
 const PB = {
   el: el,
-  state: { core: { mixedPort: 27890, controllerPort: 27891, aiDedicatedPort: 27892, speedTestPort: 27893 }, snapshot: { activeClient: {}, appConfig: {} } },
-  ports() {
-    const core = this.state.core || {};
-    return {
-      mixed: core.mixedPort || 27890,
-      controller: core.controllerPort || 27891,
-      ai: core.aiDedicatedPort || 27892,
-      speed: core.speedTestPort || 27893
-    };
+  state: {
+    core: { mixedPort: 27890, controllerPort: 27891, aiDedicatedPort: 27892, speedTestPort: 27893, settings: {} },
+    snapshot: {
+      activeClient: {},
+      appConfig: {
+        speedTestURL: "https://speed.cloudflare.com/__down?bytes=10485760",
+        delayTestURL: "http://www.gstatic.com/generate_204",
+        speedTestMaxMB: 10
+      }
+    },
+    version: "v1.4.0",
+    releasesUrl: "https://example.invalid/releases",
+    update: null,
+    phase: "stopped"
   },
-  addTab(id, tab) { this.tab = tab; },
+  theme: { get() { return "auto"; }, set() {} },
+  registerTab(id, tab) { this.tab = tab; },
+  goTab() {},
   api() { return Promise.resolve({}); },
   toast() {},
-  setSnapshot() {},
-  importCore() {},
-  openHome() {}
+  topbar() {},
+  setChannel() {}
 };
 global.PB = PB;
-eval(fs.readFileSync(path, "utf8"));
+eval(fs.readFileSync(path.join(ui, "settings-logic.js"), "utf8"));
+eval(fs.readFileSync(path.join(ui, "tab-settings.js"), "utf8"));
 const root = el("div");
-PB.tab.mount(root);
+PB.tab.enter(root);
 
 function walk(node, out) {
   out.push(node);
@@ -102,23 +116,23 @@ function walk(node, out) {
   return out;
 }
 const all = walk(root, []);
-const port = all.find((node) => node.className === "pb-port" && node.children[0] && node.children[0].text === "测速端口");
-if (!port || !port.children[1]) {
+const port = all.find((node) => hasClass(node, "pb-port"));
+if (!port) {
   console.log("missing speed port");
   process.exit(1);
 }
-const label = port.children[1];
+const label = walk(port, []).find((node) => hasClass(node, "pb-num"));
 const url = all.find((node) => node.tag === "INPUT" && node.attrs["aria-label"] === "下载测速 URL");
-if (!url) {
-  console.log("missing download url");
+if (!label || !url) {
+  console.log("missing port number or download url");
   process.exit(1);
 }
-if (label === url || label.tag === "INPUT") {
+if (label === url || label.tag === "INPUT" || url.tag !== "INPUT") {
   console.log("speed port is the download field");
   process.exit(1);
 }
-if (!String(label.text).includes("27893")) {
-  console.log("initial port " + label.text);
+if (!String(label.textContent).includes("27893")) {
+  console.log("initial port " + label.textContent);
   process.exit(1);
 }
 if (url.value.indexOf("speed.cloudflare.com") < 0) {
@@ -126,9 +140,9 @@ if (url.value.indexOf("speed.cloudflare.com") < 0) {
   process.exit(1);
 }
 PB.state.core.speedTestPort = 27999;
-PB.tab.onCoreChange();
-if (!String(label.text).includes("27999")) {
-  console.log("updated port " + label.text);
+PB.tab.onCore(PB.state.core);
+if (!String(label.textContent).includes("27999")) {
+  console.log("updated port " + label.textContent);
   process.exit(1);
 }
 if (url.value.indexOf("speed.cloudflare.com") < 0) {

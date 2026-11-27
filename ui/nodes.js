@@ -1,27 +1,10 @@
-"use strict";
-
 (function () {
-  const GROUP_PROXY = "PROXY";
-  const GROUP_AI = "🤖 AI-IDE";
-  const DELAY_PRESETS = [
-    ["all", "全部"],
-    ["alive", "可用"],
-    ["100", "≤100"],
-    ["200", "≤200"],
-    ["300", "≤300"],
-    ["500", "≤500"],
-    ["custom", "自定义"],
-  ];
-  const SPEED_PRESETS = [
-    ["all", "全部"],
-    ["tested", "已测"],
-    ["1", "≥1"],
-    ["5", "≥5"],
-    ["10", "≥10"],
-    ["20", "≥20"],
-    ["custom", "自定义"],
-  ];
-  const TYPE_LABELS = {
+  "use strict";
+
+  var F = window.PBNodeFilter;
+  if (!F) throw new Error("ui/nodes-filter.js must load before nodes.js");
+
+  var TYPE_LABELS = {
     ss: "Shadowsocks",
     shadowsocks: "Shadowsocks",
     ssr: "ShadowsocksR",
@@ -50,1397 +33,1184 @@
     loadbalance: "LoadBalance",
     "load-balance": "LoadBalance",
     selector: "Selector",
-    relay: "Relay",
+    relay: "Relay"
   };
 
-  const state = {
-    mounted: false,
-    visible: false,
-    forced: false,
-    phase: "stopped",
-    group: GROUP_PROXY,
-    view: "cards",
-    filters: PBNodeFilter.loadFilters(browserStorage()),
-    nodes: [],
-    painted: [],
-    totalCount: 0,
-    aliveCount: 0,
-    providerNames: Object.create(null),
-    speedMem: Object.create(null),
-    loading: false,
-    refreshing: false,
-    delayAll: false,
-    testingDelay: "",
-    error: "",
-    gen: 0,
-    scrollTop: 0,
-    queued: null,
-    speed: { phase: "idle", done: 0, total: 0, current: "", taskId: "" },
-    speedTicket: 0,
-  };
+  var OWNER_KEY = "pb.speedOwner.v1";
+  var view = "card";
+  var filters = F.loadFilters(storage());
+  var pools = { daily: [], ai: [] };
+  var subMap = {};
+  var speedMem = {};
+  var delayMem = {};
+  var picked = { daily: null, ai: null };
+  var speed = idleSpeed();
+  var delayJob = { daily: null, ai: null };
+  var delayBusy = { daily: {}, ai: {} };
+  var active = false;
+  var sawCore = null;
+  var loadGen = { daily: 0, ai: 0 };
+  var loading = { daily: false, ai: false };
+  var listEl = null;
+  var unbindQ = null;
+  var regionSeen = "";
 
-  const dom = {};
-  const locks = new Set();
+  function storage() {
+    try { return window.localStorage; } catch (err) { return null; }
+  }
 
-  function browserStorage() {
+  function sessionStore() {
+    try { return window.sessionStorage; } catch (err) { return null; }
+  }
+
+  function channel() {
+    return PB.state && PB.state.nodeGroup === "ai" ? "ai" : "daily";
+  }
+
+  function useChannel(ch) {
+    ch = ch === "ai" ? "ai" : "daily";
+    if (!PB.state) return ch;
+    PB.state.nodeGroup = ch;
+    PB.setChannel(ch);
+    return ch;
+  }
+
+  function groupOf(ch) {
+    return ch === "ai" ? F.GROUP_AI : F.GROUP_PROXY;
+  }
+
+  function channelWord(ch) {
+    return ch === "ai" ? "AI 专属" : "日常代理";
+  }
+
+  function otherChannel(ch) {
+    return ch === "ai" ? "daily" : "ai";
+  }
+
+  function currentFilter() {
+    return filters[groupOf(channel())];
+  }
+
+  function persist() {
+    F.saveFilters(storage(), filters);
+  }
+
+  function coreOn() {
+    var core = PB.state && PB.state.core;
+    if (core && typeof core.running === "boolean") return !!core.running;
+    return !!(PB.state && PB.state.phase === "running");
+  }
+
+  function pretty(type) {
+    var raw = String(type || "");
+    if (!raw) return "";
+    return TYPE_LABELS[raw.toLowerCase()] || raw;
+  }
+
+  function subName(id) {
+    if (!id) return "";
+    var row = subMap[id];
+    return row && row.name ? row.name : String(id);
+  }
+
+  function idleSpeed() {
+    return {
+      running: false,
+      stopping: false,
+      channel: "",
+      taskId: "",
+      done: 0,
+      total: 0,
+      current: "",
+      pending: null
+    };
+  }
+
+  function normalize(raw) {
+    var src = raw || {};
+    var node = {
+      name: src.name != null ? String(src.name) : "",
+      type: src.type != null ? String(src.type) : "",
+      provider: src.provider != null ? String(src.provider) : "",
+      delayMs: Number(src.delayMs),
+      untested: !!src.untested,
+      alive: !!src.alive,
+      isAuto: !!src.isAuto,
+      selected: !!src.selected,
+      resolvedTo: src.resolvedTo != null ? String(src.resolvedTo) : "",
+      speedMBps: Number(src.speedMBps),
+      speedTested: !!src.speedTested,
+      speedError: src.speedError != null ? String(src.speedError) : ""
+    };
+    if (!isFinite(node.delayMs)) node.delayMs = 0;
+    if (!isFinite(node.speedMBps)) node.speedMBps = 0;
+    node.typeLabel = pretty(node.type);
+    node.subName = subName(node.provider);
+    if (!F.isUtilityNode(node)) {
+      node.region = F.detectRegion(node.name);
+      node.regionLabel = F.regionLabel(node.region);
+      node.regionCode = F.regionCode(node.region);
+    } else {
+      node.region = "";
+      node.regionLabel = "";
+      node.regionCode = "";
+    }
+    return node;
+  }
+
+  function normalizeList(raw) {
+    var list = Array.isArray(raw) ? raw : [];
+    var out = new Array(list.length);
+    for (var i = 0; i < list.length; i++) out[i] = normalize(list[i]);
+    return out;
+  }
+
+  function applySpeedTo(list) {
+    for (var i = 0; i < list.length; i++) {
+      var node = list[i];
+      if (node.speedTested) {
+        speedMem[node.name] = { speedMBps: node.speedMBps, speedTested: true, speedError: node.speedError };
+      } else if (speedMem[node.name]) {
+        node.speedMBps = speedMem[node.name].speedMBps;
+        node.speedTested = true;
+        node.speedError = speedMem[node.name].speedError;
+      }
+    }
+  }
+
+  function takeList(ch, raw, started, trustDelay) {
+    var list = normalizeList(raw);
+    var choice = picked[ch];
+    for (var i = 0; i < list.length; i++) {
+      var mem = delayMem[list[i].name];
+      if (!trustDelay && mem && mem.at > started) {
+        list[i].delayMs = mem.delayMs;
+        list[i].untested = false;
+        list[i].alive = mem.alive;
+      }
+      if (choice && choice.at > started) list[i].selected = list[i].name === choice.name;
+    }
+    if (trustDelay) {
+      var now = Date.now();
+      for (var j = 0; j < list.length; j++) {
+        if (list[j].untested) continue;
+        delayMem[list[j].name] = { delayMs: list[j].delayMs, alive: list[j].delayMs > 0, at: now };
+      }
+    }
+    applySpeedTo(list);
+    pools[ch] = list;
+  }
+
+  function countReal(pool) {
+    var total = 0;
+    var alive = 0;
+    var list = pool || [];
+    for (var i = 0; i < list.length; i++) {
+      if (F.isUtilityNode(list[i])) continue;
+      total++;
+      if (!list[i].untested && list[i].delayMs > 0) alive++;
+    }
+    return { total: total, alive: alive };
+  }
+
+  function findIn(ch, name) {
+    var list = pools[ch] || [];
+    for (var i = 0; i < list.length; i++) if (list[i].name === name) return list[i];
+    return null;
+  }
+
+  function findNode(name) {
+    return findIn(channel(), name);
+  }
+
+  function findEl(name) {
+    if (!listEl) return null;
+    var nodes = listEl.querySelectorAll("[data-id]");
+    for (var i = 0; i < nodes.length; i++) {
+      if (nodes[i].getAttribute("data-id") === name) return nodes[i];
+    }
+    return null;
+  }
+
+  function cardOpt(node) {
+    var ch = channel();
+    var phase = "";
+    if (speed.running && speed.channel === ch) {
+      if (speed.current && node.name === speed.current) phase = "current";
+      else if (speed.pending && speed.pending[node.name]) phase = "queued";
+    }
+    return {
+      selected: !!node.selected,
+      delayBusy: !!(delayBusy[ch] && delayBusy[ch][node.name]),
+      speedPhase: phase,
+      speedBusy: !!speed.running,
+      core: coreOn()
+    };
+  }
+
+  function emptyBox(icon, title, caption, extra) {
+    return '<div class="empty"><div class="empty-ic">' + PB.ic(icon) + '</div><div class="empty-t">' + PB.esc(title) + "</div>" +
+      (caption ? '<p class="caption">' + PB.esc(caption) + "</p>" : "") + (extra || "") + "</div>";
+  }
+
+  function paintCount(filtering, rows, stat) {
+    var el = document.getElementById("ndCount");
+    if (!el) return;
+    if (!coreOn()) {
+      el.textContent = "";
+      return;
+    }
+    var hit = filtering ? rows.length : stat.alive;
+    el.innerHTML = (filtering ? "命中 " : "可用 ") + "<b>" + hit + "</b> / " + stat.total;
+  }
+
+  function paintList() {
+    if (!listEl) return;
+    if (!coreOn()) {
+      listEl.innerHTML = emptyBox("warn", "内核未运行", "启动内核后即可查看节点、测延迟和测网速。",
+        '<button type="button" class="btn sm prominent" data-go="overview">' + PB.ic("play") + "前往总览</button>");
+      paintCount(false, [], { total: 0, alive: 0 });
+      return;
+    }
+    var pool = pools[channel()] || [];
+    var f = currentFilter();
+    var filtering = F.isFilterActive(f);
+    var rows = F.sortNodes(F.applyFilters(pool, f), f);
+    var stat = countReal(pool);
+    paintCount(filtering, rows, stat);
+    if (!stat.total) {
+      if (loading[channel()]) {
+        listEl.innerHTML = emptyBox("globe", "正在读取节点", "", "");
+        return;
+      }
+      listEl.innerHTML = emptyBox("layers", "此通道暂无节点", "请先在订阅管理中添加或启用订阅。",
+        '<button type="button" class="btn sm prominent" data-go="subs">' + PB.ic("layers") + "前往订阅管理</button>");
+      return;
+    }
+    if (filtering && !rows.length) {
+      var reason = F.emptyReason(pool, f);
+      listEl.innerHTML = emptyBox("search", "没有符合条件的节点", reason || "点击下面的条件可以单独移除。",
+        '<div class="empty-chips">' + F.emptyChipsHTML(f, subName) + '</div><button type="button" class="btn sm prominent" data-clear-all>清除筛选</button>');
+      return;
+    }
+    var parts = new Array(rows.length);
+    var asList = view === "list";
+    for (var i = 0; i < rows.length; i++) {
+      var opt = cardOpt(rows[i]);
+      parts[i] = asList ? F.nodeRowHTML(rows[i], opt) : F.nodeCardHTML(rows[i], opt);
+    }
+    listEl.innerHTML = asList
+      ? '<div class="nd-table">' + listHead() + parts.join("") + "</div>"
+      : '<div class="nd-grid">' + parts.join("") + "</div>";
+  }
+
+  function listHead() {
+    var f = currentFilter();
+    function th(key, label) {
+      var on = f.sortKey === key;
+      var mark = on ? PB.ic(f.sortDir === 1 ? "up" : "down", "xs") : "";
+      return '<button type="button" data-sort="' + key + '" class="' + (on ? "on" : "") + '">' + label + mark + "</button>";
+    }
+    return '<div class="nd-th"><div>' + th("name", "节点") + '</div><div class="c-proto">协议</div><div class="c-sub">订阅</div><div>' +
+      th("delay", "延迟") + "</div><div>" + th("speed", "网速") + "</div><div></div></div>";
+  }
+
+  function paintSort() {
+    var label = document.getElementById("ndSortLbl");
+    var f = currentFilter();
+    var text = f.sortKey === "speed" ? "按网速" : f.sortKey === "name" ? "按名称" : "按延迟";
+    if (label) label.textContent = text;
+    var btn = document.getElementById("ndSort");
+    if (btn) btn.title = text + (f.sortDir === 1 ? "，升序" : "，降序");
+  }
+
+  function paintFades(el) {
+    if (!el) return;
+    el.classList.toggle("fade-l", el.scrollLeft > 2);
+    el.classList.toggle("fade-r", el.scrollLeft + el.clientWidth < el.scrollWidth - 2);
+  }
+
+  function bindRegions(el) {
+    paintFades(el);
+    el.addEventListener("scroll", function () { paintFades(el); }, { passive: true });
+    el.addEventListener("wheel", function (event) {
+      if (Math.abs(event.deltaY) > Math.abs(event.deltaX) && el.scrollWidth > el.clientWidth) {
+        el.scrollLeft += event.deltaY;
+        event.preventDefault();
+      }
+    }, { passive: false });
+  }
+
+  function paintFilters() {
+    var host = document.getElementById("ndFilters");
+    if (!host) return;
+    var pool = pools[channel()] || [];
+    var f = currentFilter();
+    var prev = document.getElementById("ndRegions");
+    var left = prev ? prev.scrollLeft : 0;
+    var changed = regionSeen !== f.region;
+    regionSeen = f.region;
+    var probe = F.sanitizeFilter(f);
+    probe.region = "all";
+    var counts = F.regionCounts(F.applyFilters(pool, probe));
+    var total = 0;
+    var chips = "";
+    for (var i = 0; i < F.REGION_ORDER.length; i++) {
+      var key = F.REGION_ORDER[i];
+      var n = counts[key] || 0;
+      if (n <= 0) continue;
+      total += n;
+      var on = f.region === key;
+      chips += '<button type="button" class="rchip' + (on ? " on" : "") + '" data-region="' + PB.esc(key) + '" aria-pressed="' + (on ? "true" : "false") + '">' +
+        '<span class="flag" style="--fc:' + PB.esc(F.regionColor(key)) + '" title="' + PB.esc(F.regionLabel(key)) + '">' + PB.esc(F.regionCode(key)) + "</span>" +
+        PB.esc(F.regionLabel(key)) + '<span class="n">' + n + "</span></button>";
+    }
+    var activeN = F.activeFilterCount(f);
+    host.innerHTML =
+      '<button type="button" class="chip' + (f.sub !== "all" ? " on" : "") + '" data-menu="sub" aria-haspopup="menu" aria-expanded="false"><span class="k">订阅</span>' + PB.esc(f.sub === "all" ? "全部" : subName(f.sub)) + PB.ic("chev-down") + "</button>" +
+      '<button type="button" class="chip' + (f.delayPreset !== "all" ? " on" : "") + '" data-menu="delay" aria-haspopup="menu" aria-expanded="false"><span class="k">延迟</span>' + PB.esc(F.delayLabel(f)) + PB.ic("chev-down") + "</button>" +
+      '<button type="button" class="chip' + (f.speedPreset !== "all" ? " on" : "") + '" data-menu="speed" aria-haspopup="menu" aria-expanded="false"><span class="k">网速</span>' + PB.esc(F.speedLabel(f)) + PB.ic("chev-down") + "</button>" +
+      '<span class="vsep"></span>' +
+      '<div class="regions" id="ndRegions" role="group" aria-label="地区">' +
+      '<button type="button" class="rchip all' + (f.region === "all" ? " on" : "") + '" data-region="all">全部地区<span class="n">' + total + "</span></button>" +
+      chips + "</div>" +
+      (activeN ? '<button type="button" class="chip clear" id="ndClear">' + PB.ic("x") + "清除 " + activeN + "</button>" : "");
+    var rg = document.getElementById("ndRegions");
+    if (!rg) return;
+    if (!changed) rg.scrollLeft = left;
+    bindRegions(rg);
+    if (changed) {
+      var chip = rg.querySelector(".rchip.on:not(.all)");
+      if (chip) {
+        var edge = chip.offsetLeft + chip.offsetWidth;
+        if (chip.offsetLeft < rg.scrollLeft || edge > rg.scrollLeft + rg.clientWidth) rg.scrollLeft = Math.max(0, chip.offsetLeft - 16);
+        paintFades(rg);
+      }
+    }
+  }
+
+  function paintActions() {
+    var delayBtn = document.getElementById("ndDelay");
+    var speedBtn = document.getElementById("ndSpeed");
+    if (!delayBtn || !speedBtn) return;
+    var ch = channel();
+    var pool = pools[ch] || [];
+    var names = F.scopeTargets(pool, currentFilter());
+    var scoped = names !== null;
+    var n = scoped ? names.length : countReal(pool).total;
+    var run = coreOn();
+    var job = delayJob[ch];
+    if (job) {
+      delayBtn.disabled = true;
+      delayBtn.innerHTML = '<span class="spin xs"></span><span class="lbl">' + (job.batch ? "测延迟…" : "测延迟 " + job.done + "/" + job.total) + "</span>";
+    } else {
+      delayBtn.disabled = !run || !n;
+      delayBtn.innerHTML = PB.ic("bolt") + '<span class="lbl">' + (scoped ? "测延迟 (" + n + ")" : "全部测延迟") + "</span>";
+      delayBtn.title = scoped ? "测试当前筛选出的节点" : "测试本通道全部节点";
+    }
+    speedBtn.classList.remove("danger", "has-progress");
+    speedBtn.style.removeProperty("--p");
+    speedBtn.disabled = false;
+    if (speed.running) {
+      var pct = speed.total > 0 ? (speed.done / speed.total * 100) : 0;
+      speedBtn.classList.add("has-progress");
+      speedBtn.style.setProperty("--p", pct.toFixed(1) + "%");
+      if (speed.stopping) {
+        speedBtn.disabled = true;
+        speedBtn.innerHTML = '<span class="spin xs"></span><span class="lbl">正在停止…</span>';
+        speedBtn.title = "正在停止测速";
+      } else if (speed.channel && speed.channel !== ch) {
+        speedBtn.classList.add("danger");
+        speedBtn.innerHTML = PB.ic("stop") + '<span class="lbl">' + channelWord(speed.channel) + "占用</span>";
+        speedBtn.title = channelWord(speed.channel) + "的测速正在占用引擎";
+      } else {
+        speedBtn.classList.add("danger");
+        speedBtn.innerHTML = PB.ic("stop") + '<span class="lbl">停止 ' + speed.done + "/" + speed.total + "</span>";
+        speedBtn.title = "停止测速";
+      }
+      return;
+    }
+    speedBtn.disabled = !run || !n;
+    speedBtn.innerHTML = PB.ic("gauge") + '<span class="lbl">' + (scoped ? "测网速 (" + n + ")" : "全部测网速") + "</span>";
+    speedBtn.title = scoped ? "对当前筛选结果测网速" : "对本通道全部节点测网速";
+  }
+
+  function paintBadges() {
+    var groups = ["daily", "ai"];
+    for (var i = 0; i < groups.length; i++) {
+      var ch = groups[i];
+      var badge = document.querySelector('#ndGroup [data-badge="' + ch + '"]');
+      if (!badge) continue;
+      var n = F.activeFilterCount(filters[groupOf(ch)]);
+      var busy = speed.running && speed.channel === ch;
+      if (busy) {
+        badge.hidden = false;
+        badge.innerHTML = '<span class="spin xxs"></span>';
+        badge.title = "测速进行中";
+      } else if (n) {
+        badge.hidden = false;
+        badge.textContent = String(n);
+        badge.title = "已启用 " + n + " 个筛选条件";
+      } else {
+        badge.hidden = true;
+        badge.textContent = "";
+        badge.title = "";
+      }
+    }
+  }
+
+  function refreshView() {
+    paintSort();
+    paintFilters();
+    paintActions();
+    paintBadges();
+    paintList();
+  }
+
+  function patchNode(name) {
+    if (!listEl || !name || !coreOn()) return;
+    var node = findNode(name);
+    if (!node) return;
+    if (F.isFilterActive(currentFilter()) && !F.applyFilters([node], currentFilter()).length) {
+      paintList();
+      paintActions();
+      return;
+    }
+    var el = findEl(name);
+    if (!el) {
+      paintList();
+      return;
+    }
+    var html = view === "list" ? F.nodeRowHTML(node, cardOpt(node)) : F.nodeCardHTML(node, cardOpt(node));
+    var focus = el.contains(document.activeElement);
+    el.outerHTML = html;
+    if (focus) {
+      var next = findEl(name);
+      if (next) {
+        try { next.focus({ preventScroll: true }); } catch (err) { next.focus(); }
+      }
+    }
+    var pool = pools[channel()] || [];
+    var f = currentFilter();
+    paintCount(F.isFilterActive(f), F.isFilterActive(f) ? F.applyFilters(pool, f) : [], countReal(pool));
+  }
+
+  function rememberOwner() {
+    var store = sessionStore();
+    if (!store) return;
     try {
-      return window.localStorage;
+      store.setItem(OWNER_KEY, JSON.stringify({ taskId: speed.taskId || "", channel: speed.channel || "" }));
+    } catch (err) {}
+  }
+
+  function readOwner() {
+    var store = sessionStore();
+    if (!store) return null;
+    try {
+      var data = JSON.parse(store.getItem(OWNER_KEY) || "null");
+      if (!data || typeof data !== "object") return null;
+      return data;
     } catch (err) {
       return null;
     }
   }
 
-  function currentFilter() {
-    return state.filters[state.group] || state.filters[GROUP_PROXY];
+  function clearOwner() {
+    var store = sessionStore();
+    if (!store) return;
+    try { store.removeItem(OWNER_KEY); } catch (err) {}
   }
 
-  function saveFilters() {
-    PBNodeFilter.saveFilters(browserStorage(), state.filters);
-  }
-
-  function num(v) {
-    const n = Number(v);
-    return Number.isFinite(n) ? n : 0;
-  }
-
-  function readPositive(raw) {
-    const text = String(raw == null ? "" : raw).trim();
-    if (!text) return 0;
-    const n = Number(text);
-    if (!Number.isFinite(n) || n <= 0) return 0;
-    return n;
-  }
-
-  function locked(key, fn) {
-    if (locks.has(key)) return Promise.resolve();
-    locks.add(key);
-    return Promise.resolve().then(fn).finally(function () {
-      locks.delete(key);
-    });
-  }
-
-  function toast(message, kind) {
-    if (window.PB && typeof PB.toast === "function") PB.toast(message, kind);
-  }
-
-  function fmtMs(ms) {
-    if (PB.fmt && typeof PB.fmt.ms === "function") return PB.fmt.ms(ms);
-    return Math.round(ms) + " ms";
-  }
-
-  function fmtMbps(n) {
-    if (PB.fmt && typeof PB.fmt.mbps === "function") return PB.fmt.mbps(n);
-    const v = Number(n);
-    return (Number.isFinite(v) ? v.toFixed(2) : "0.00") + " MB/s";
-  }
-
-  function coreRunning() {
-    return state.phase === "running";
-  }
-
-  function readPhase() {
-    const core = PB.state && PB.state.core;
-    if (core && typeof core.running === "boolean") return core.running ? "running" : "stopped";
-    return "stopped";
-  }
-
-  function normalizeNode(raw) {
-    const n = raw || {};
-    let speed = Number(n.speedMBps);
-    if (!Number.isFinite(speed)) speed = 0;
-    const node = {
-      name: n.name != null ? String(n.name) : "",
-      type: n.type != null ? String(n.type) : "",
-      provider: n.provider != null ? String(n.provider) : "",
-      delayMs: num(n.delayMs),
-      untested: !!n.untested,
-      alive: !!n.alive,
-      isAuto: !!n.isAuto,
-      selected: !!n.selected,
-      speedMBps: speed,
-      speedTested: !!n.speedTested,
-      speedError: n.speedError != null ? String(n.speedError) : "",
-      subName: "",
-      typeLabel: "",
-      region: "",
-      regionLabel: "",
-    };
-    node.typeLabel = prettyType(node.type);
-    if (!PBNodeFilter.isUtilityNode(node)) {
-      node.region = PBNodeFilter.detectRegion(node.name);
-      node.regionLabel = node.region ? PBNodeFilter.regionLabel(node.region) : "";
-    }
-    return node;
-  }
-
-  function normalizeNodes(list) {
-    const raw = Array.isArray(list) ? list : [];
-    const out = new Array(raw.length);
-    for (let i = 0; i < raw.length; i++) out[i] = normalizeNode(raw[i]);
-    return out;
-  }
-
-  function canTest(node) {
-    return !!node && !PBNodeFilter.isUtilityNode(node);
-  }
-
-  function countsFrom(nodes) {
-    let total = 0;
-    let alive = 0;
-    for (let i = 0; i < nodes.length; i++) {
-      const node = nodes[i];
-      if (PBNodeFilter.isUtilityNode(node)) continue;
-      total++;
-      if (!node.untested && node.delayMs > 0) alive++;
-    }
-    return { total: total, alive: alive };
-  }
-
-  function stampSubNames() {
-    const map = state.providerNames;
-    const nodes = state.nodes;
-    for (let i = 0; i < nodes.length; i++) {
-      const id = nodes[i].provider;
-      nodes[i].subName = id && map[id] ? map[id] : "";
+  function applyResult(result) {
+    if (!result || !result.nodeName) return;
+    var name = String(result.nodeName);
+    var err = result.error ? String(result.error) : "";
+    var mbps = Number(result.speedMBps);
+    if (!isFinite(mbps)) mbps = 0;
+    speedMem[name] = { speedMBps: mbps, speedTested: true, speedError: err };
+    if (speed.pending) delete speed.pending[name];
+    var groups = ["daily", "ai"];
+    for (var g = 0; g < groups.length; g++) {
+      var node = findIn(groups[g], name);
+      if (!node) continue;
+      node.speedMBps = mbps;
+      node.speedTested = true;
+      node.speedError = err;
     }
   }
 
-  function visibleNodes() {
-    stampSubNames();
-    const filter = currentFilter();
-    return PBNodeFilter.sortNodes(PBNodeFilter.applyFilters(state.nodes, filter), filter);
-  }
-
-  function prettyType(type) {
-    const raw = String(type || "");
-    if (!raw) return "—";
-    return TYPE_LABELS[raw.toLowerCase()] || raw;
-  }
-
-  function providerLabel(node) {
-    if (!node.provider) return "—";
-    return state.providerNames[node.provider] || node.provider;
-  }
-
-  function delayView(node) {
-    if (state.testingDelay && state.testingDelay === node.name) {
-      return { text: "测延迟…", cls: "pbn-delay-wait", title: "正在测延迟" };
-    }
-    if (node.untested) return { text: "未测速", cls: "pbn-delay-none", title: "" };
-    if (!(node.delayMs > 0)) return { text: "超时", cls: "pbn-delay-dead", title: "超时" };
-    const ms = Math.round(node.delayMs);
-    let cls = "pbn-delay-slow";
-    if (ms <= 200) cls = "pbn-delay-good";
-    else if (ms <= 500) cls = "pbn-delay-mid";
-    return { text: fmtMs(ms), cls: cls, title: fmtMs(ms) };
-  }
-
-  function speedView(node) {
-    const phase = state.speed && state.speed.phase;
-    const current = phase === "running" || phase === "starting" ? state.speed.current : "";
-    if (current && node.name === current) return { text: "测速中", cls: "pbn-speed-pulse", title: "正在测网速" };
-    if (node.speedError) return { text: "失败", cls: "pbn-speed-bad", title: node.speedError };
-    if (!node.speedTested) return { text: "未测网速", cls: "pbn-speed-none", title: "" };
-    const n = node.speedMBps;
-    let cls = "pbn-speed-low";
-    if (n >= 5) cls = "pbn-speed-good";
-    else if (n >= 1) cls = "pbn-speed-mid";
-    const text = fmtMbps(n);
-    return { text: text, cls: cls, title: text };
-  }
-
-  function applySpeedMem(nodes) {
-    for (let i = 0; i < nodes.length; i++) {
-      const node = nodes[i];
-      const mem = state.speedMem[node.name];
-      if (node.speedTested) {
-        state.speedMem[node.name] = {
-          speedMBps: node.speedMBps,
-          speedTested: true,
-          speedError: node.speedError,
-        };
-      } else if (mem) {
-        node.speedMBps = mem.speedMBps;
-        node.speedTested = true;
-        node.speedError = mem.speedError;
-      }
-    }
-  }
-
-  function applyList(data) {
-    const payload = data || {};
-    const nodes = normalizeNodes(payload.nodes);
-    applySpeedMem(nodes);
-    state.nodes = nodes;
-    if (payload.totalCount != null) state.totalCount = num(payload.totalCount);
-    else state.totalCount = countsFrom(nodes).total;
-    if (payload.aliveCount != null) state.aliveCount = num(payload.aliveCount);
-    else state.aliveCount = countsFrom(nodes).alive;
-  }
-
-  function svgEl(name, attrs) {
-    const node = document.createElementNS("http://www.w3.org/2000/svg", name);
-    const keys = Object.keys(attrs);
-    for (let i = 0; i < keys.length; i++) node.setAttribute(keys[i], attrs[keys[i]]);
-    return node;
-  }
-
-  function svgIcon(kind) {
-    const svg = svgEl("svg", {
-      viewBox: "0 0 24 24",
-      width: kind === "delay" || kind === "speed" ? "16" : "14",
-      height: kind === "delay" || kind === "speed" ? "16" : "14",
-      fill: "none",
-      "aria-hidden": "true",
-    });
-    if (kind === "cards") {
-      const spots = [["3", "3"], ["13.5", "3"], ["3", "13.5"], ["13.5", "13.5"]];
-      for (let i = 0; i < spots.length; i++) {
-        svg.appendChild(svgEl("rect", {
-          x: spots[i][0],
-          y: spots[i][1],
-          width: "7.2",
-          height: "7.2",
-          rx: "1.6",
-          fill: "currentColor",
-          stroke: "none",
-        }));
-      }
-      return svg;
-    }
-    svg.setAttribute("stroke", "currentColor");
-    svg.setAttribute("stroke-width", "2");
-    svg.setAttribute("stroke-linecap", "round");
-    svg.setAttribute("stroke-linejoin", "round");
-    if (kind === "delay") {
-      svg.appendChild(svgEl("path", { d: "M3 12h2.2l2.1-6.2L11 18.2l2.5-6.2H21" }));
-    } else if (kind === "speed") {
-      svg.appendChild(svgEl("path", { d: "M5 16.5a7.5 7.5 0 1 1 14 0" }));
-      svg.appendChild(svgEl("path", { d: "M12 15.2 16.4 8.4" }));
-      svg.appendChild(svgEl("circle", { cx: "12", cy: "15.2", r: "1.35", fill: "currentColor", stroke: "none" }));
-    } else if (kind === "list") {
-      svg.appendChild(svgEl("path", { d: "M5 7h14M5 12h14M5 17h14" }));
-    } else {
-      svg.appendChild(svgEl("circle", { cx: "11", cy: "11", r: "6.5" }));
-      svg.appendChild(svgEl("path", { d: "M16.2 16.2 20.5 20.5" }));
-    }
-    return svg;
-  }
-
-  function iconBtn(act, label, kind) {
-    const button = PB.el("button", {
-      class: "pbn-icon" + (kind === "speed" ? " is-speed" : ""),
-      attrs: { type: "button", "data-act": act, "aria-label": label, title: label },
-    });
-    button.appendChild(svgIcon(kind));
-    return button;
-  }
-
-  function mountSegs() {
-    if (!window.PB || typeof PB.seg !== "function") return;
-    if (dom.groups) PB.seg(dom.groups);
-    if (dom.views) PB.seg(dom.views);
-  }
-
-  function syncSegs() {
-    if (!window.PB || !PB.seg || typeof PB.seg.sync !== "function") return;
-    if (dom.groups) PB.seg.sync(dom.groups);
-    if (dom.views) PB.seg.sync(dom.views);
-  }
-
-  function cardTemplate() {
-    const auto = PB.el("span", { class: "pbn-auto", text: "自动", hidden: true });
-    const name = PBNodeFilter.buildNodeName(PB.el, "");
-    const check = PB.el("span", { class: "pbn-check", text: "✓", hidden: true, attrs: { "aria-hidden": "true" } });
-    const row1 = PB.el("div", { class: "pbn-line" }, auto, name, check);
-    const region = PB.el("span", { class: "pbn-region", hidden: true });
-    const proto = PB.el("span", { class: "pbn-proto" });
-    const sub = PB.el("span", { class: "pbn-sub" });
-    const row2 = PB.el("div", { class: "pbn-line" }, region, proto, sub);
-    const delay = PB.el("span", { class: "pbn-delay" });
-    const speed = PB.el("span", { class: "pbn-speed" });
-    const actions = PB.el("span", { class: "pbn-actions" }, iconBtn("delay", "测延迟", "delay"), iconBtn("speed", "测网速", "speed"));
-    const row3 = PB.el("div", { class: "pbn-line" }, delay, speed, actions);
-    return PB.el("article", { class: "pbn-card" }, row1, row2, row3);
-  }
-
-  function rowTemplate() {
-    const auto = PB.el("span", { class: "pbn-auto", text: "自动", hidden: true });
-    const name = PBNodeFilter.buildNodeName(PB.el, "");
-    const check = PB.el("span", { class: "pbn-check", text: "✓", hidden: true, attrs: { "aria-hidden": "true" } });
-    const region = PB.el("span", { class: "pbn-region", hidden: true });
-    const nameCell = PB.el("div", { class: "pbn-cell" }, PB.el("div", { class: "pbn-namecell" }, auto, name, check, region));
-    const proto = PB.el("div", { class: "pbn-cell" }, PB.el("span", { class: "pbn-proto" }));
-    const sub = PB.el("div", { class: "pbn-cell" }, PB.el("span", { class: "pbn-sub" }));
-    const delay = PB.el("div", { class: "pbn-cell" }, PB.el("span", { class: "pbn-delay" }));
-    const speed = PB.el("div", { class: "pbn-cell" }, PB.el("span", { class: "pbn-speed" }));
-    const actions = PB.el("span", { class: "pbn-actions" }, iconBtn("delay", "测延迟", "delay"), iconBtn("speed", "测网速", "speed"));
-    return PB.el("div", { class: "pbn-row" }, nameCell, proto, sub, delay, speed, PB.el("div", { class: "pbn-cell" }, actions));
-  }
-
-  function sortButton(key, id) {
-    const button = PB.el("button", {
-      class: "pbn-sorthead",
-      attrs: { type: "button", id: id },
-      on: { click: function () { onSortKey(key); } },
-    });
-    return { cell: PB.el("div", { class: "pbn-hcell" }, button), button: button };
-  }
-
-  function groupButton(id, name, groupId) {
-    return PB.el("button", {
-      class: "pb-seg-btn pbn-group",
-      attrs: { type: "button", id: id, title: name + " " + groupId },
-      on: { click: function () { setGroup(groupId); } },
-    }, PB.el("span", { class: "pbn-group-name", text: name }), PB.el("span", { class: "pbn-group-id", text: groupId }));
-  }
-
-  function presetButtons(kind, items) {
-    const map = {};
-    const bar = PB.el("div", {
-      class: "pbn-pills",
-      attrs: {
-        role: "group",
-        "data-kind": kind,
-        "aria-label": kind === "delay" ? "延迟筛选" : "网速筛选",
-      },
-    });
-    for (let i = 0; i < items.length; i++) {
-      const preset = items[i][0];
-      const button = PB.el("button", {
-        class: "pbn-pill",
-        text: items[i][1],
-        attrs: { type: "button", "data-preset": preset },
-        on: { click: function () { setPreset(kind, preset); } },
-      });
-      map[preset] = button;
-      bar.appendChild(button);
-    }
-    return { bar: bar, map: map };
-  }
-
-  function mount(root) {
-    if (state.mounted) return;
-    state.phase = readPhase();
-    root.classList.add("pbn");
-    const bar = PB.el("div", { class: "pbn-bar" });
-    dom.progressFill = PB.el("span");
-    dom.progress = PB.el("div", { class: "pbn-progress", hidden: true }, dom.progressFill);
-    dom.groupProxy = groupButton("pbnGroupProxy", "日常代理", GROUP_PROXY);
-    dom.groupAI = groupButton("pbnGroupAI", "AI 专属", GROUP_AI);
-    dom.count = PB.el("span", { class: "pbn-count", text: "可用 0 / 共 0" });
-    dom.note = PB.el("span", { class: "pbn-note", hidden: true });
-    dom.search = PB.el("input", {
-      class: "pbn-search",
-      attrs: {
-        id: "pbnSearch",
-        type: "text",
-        placeholder: "搜索节点、协议、订阅或地区",
-        autocomplete: "off",
-        spellcheck: "false",
-        "aria-label": "搜索节点",
-      },
-      on: { input: onSearch },
-    });
-    dom.searchClear = PB.el("button", {
-      class: "pbn-search-clear",
-      text: "×",
-      attrs: { type: "button", "aria-label": "清空搜索", title: "清空搜索" },
-      hidden: true,
-      on: { click: clearSearch },
-    });
-    dom.optDelay = PB.el("option", { text: "延迟 ↑", attrs: { value: "delay" } });
-    dom.optSpeed = PB.el("option", { text: "网速 ↓", attrs: { value: "speed" } });
-    dom.optName = PB.el("option", { text: "名称", attrs: { value: "name" } });
-    dom.sort = PB.el("select", {
-      class: "pbn-sort",
-      attrs: { id: "pbnSort", "aria-label": "排序" },
-      on: { change: onSortPick },
-    }, dom.optDelay, dom.optSpeed, dom.optName);
-    dom.viewCards = PB.el("button", {
-      class: "pb-seg-btn is-on",
-      attrs: { type: "button", id: "pbnViewCards", "aria-label": "卡片视图", title: "卡片视图", "aria-pressed": "true" },
-      on: { click: function () { setView("cards"); } },
-    });
-    dom.viewCards.appendChild(svgIcon("cards"));
-    dom.viewList = PB.el("button", {
-      class: "pb-seg-btn",
-      attrs: { type: "button", id: "pbnViewList", "aria-label": "列表视图", title: "列表视图", "aria-pressed": "false" },
-      on: { click: function () { setView("list"); } },
-    });
-    dom.viewList.appendChild(svgIcon("list"));
-    dom.delayAllBtn = PB.el("button", {
-      class: "pbn-btn",
-      text: "测延迟",
-      attrs: { type: "button", id: "pbnDelayAll" },
-      on: { click: function () { testAllDelay(); } },
-    });
-    dom.speedBtn = PB.el("button", {
-      class: "pbn-btn",
-      text: "全部测网速",
-      attrs: { type: "button", id: "pbnSpeedAll" },
-      on: { click: onSpeedButton },
-    });
-    const views = PB.el("div", { class: "pb-seg pbn-views" }, dom.viewCards, dom.viewList);
-    const groups = PB.el("div", { class: "pb-seg pbn-groups" }, dom.groupProxy, dom.groupAI);
-    dom.groups = groups;
-    dom.views = views;
-    const searchIcon = svgIcon("search");
-    searchIcon.setAttribute("class", "pbn-search-icon");
-    const searchWrap = PB.el("div", { class: "pbn-searchwrap" }, searchIcon, dom.search, dom.searchClear);
-    const row1 = PB.el("div", { class: "pbn-row1" },
-      groups, dom.count, searchWrap, dom.sort, views, dom.delayAllBtn, dom.speedBtn);
-    const delayPills = presetButtons("delay", DELAY_PRESETS);
-    const speedPills = presetButtons("speed", SPEED_PRESETS);
-    dom.delayPills = delayPills.map;
-    dom.speedPills = speedPills.map;
-    dom.sub = PB.el("select", {
-      class: "pbn-sub",
-      attrs: { id: "pbnSub", "aria-label": "订阅" },
-      on: { change: onSub },
-    }, PB.el("option", { text: "全部订阅", attrs: { value: "all" } }));
-    dom.delayInput = PB.el("input", {
-      class: "pbn-num",
-      attrs: {
-        id: "pbnDelayMax",
-        type: "text",
-        inputmode: "numeric",
-        autocomplete: "off",
-        spellcheck: "false",
-        "aria-label": "自定义最大延迟",
-      },
-      on: { input: onDelayInput },
-    });
-    dom.speedInput = PB.el("input", {
-      class: "pbn-num",
-      attrs: {
-        id: "pbnSpeedMin",
-        type: "text",
-        inputmode: "decimal",
-        autocomplete: "off",
-        spellcheck: "false",
-        "aria-label": "自定义最低网速",
-      },
-      on: { input: onSpeedInput },
-    });
-    dom.reset = PB.el("button", {
-      class: "pbn-btn pbn-reset",
-      text: "重置筛选",
-      attrs: { type: "button", id: "pbnReset" },
-      hidden: true,
-      on: { click: resetFilters },
-    });
-    dom.aiHint = PB.el("span", {
-      class: "pbn-ai-hint",
-      text: "已自动过滤受限地区",
-      hidden: true,
-    });
-    dom.subWrap = PB.el("label", { class: "pbn-filter" },
-      PB.el("span", { class: "pbn-filter-k", text: "订阅" }),
-      dom.sub);
-    dom.delayWrap = PB.el("div", { class: "pbn-filter" },
-      PB.el("span", { class: "pbn-filter-k", text: "延迟" }),
-      delayPills.bar,
-      PB.el("label", { class: "pbn-custom" }, "≤", dom.delayInput, "ms"));
-    dom.speedWrap = PB.el("div", { class: "pbn-filter" },
-      PB.el("span", { class: "pbn-filter-k", text: "网速" }),
-      speedPills.bar,
-      PB.el("label", { class: "pbn-custom" }, "≥", dom.speedInput, "MB/s"));
-    const row2 = PB.el("div", { class: "pbn-row2" },
-      dom.subWrap,
-      dom.delayWrap,
-      dom.speedWrap,
-      dom.reset,
-      dom.aiHint);
-    dom.regions = PB.el("div", {
-      class: "pbn-regions",
-      attrs: { role: "group", "aria-label": "地区" },
-    });
-    dom.regions.addEventListener("click", onRegionClick);
-    dom.speedHint = PB.el("span", { class: "pbn-hint-limit", text: "单节点限 10MB/6s", hidden: true });
-    dom.hints = PB.el("div", { class: "pbn-hints" }, dom.note, dom.speedHint);
-    bar.appendChild(dom.progress);
-    bar.appendChild(row1);
-    bar.appendChild(row2);
-    bar.appendChild(dom.regions);
-    bar.appendChild(dom.hints);
-
-    dom.body = PB.el("div", { class: "pbn-body" });
-    dom.body.addEventListener("scroll", function () {
-      state.scrollTop = dom.body.scrollTop;
-    }, { passive: true });
-    dom.loading = PB.el("div", { class: "pbn-loading", text: "正在读取节点…", hidden: true });
-    dom.error = PB.el("div", { class: "pbn-error", hidden: true });
-    dom.emptyText = PB.el("p", { text: "" });
-    dom.emptyStart = PB.el("button", {
-      class: "pbn-btn",
-      text: "去总览启动",
-      attrs: { type: "button", id: "pbnGoOverview" },
-      hidden: true,
-      on: { click: function () { PB.go("overview"); } },
-    });
-    dom.emptySubs = PB.el("button", {
-      class: "pbn-btn",
-      text: "去订阅管理",
-      attrs: { type: "button", id: "pbnGoSubs" },
-      hidden: true,
-      on: { click: function () { PB.go("subs"); } },
-    });
-    dom.emptyClear = PB.el("button", {
-      class: "pbn-btn pbn-reset",
-      text: "清空筛选",
-      attrs: { type: "button", id: "pbnEmptyClear" },
-      hidden: true,
-      on: { click: resetFilters },
-    });
-    dom.empty = PB.el("div", { class: "pbn-empty", hidden: true }, dom.emptyText, dom.emptyClear, dom.emptyStart, dom.emptySubs);
-    dom.grid = PB.el("div", { class: "pbn-grid", attrs: { id: "pbnGrid" } });
-    dom.grid.addEventListener("click", onItemClick);
-    const nameSort = sortButton("name", "pbnSortName");
-    const delaySort = sortButton("delay", "pbnSortDelay");
-    const speedSort = sortButton("speed", "pbnSortSpeed");
-    dom.sortName = nameSort.button;
-    dom.sortDelay = delaySort.button;
-    dom.sortSpeed = speedSort.button;
-    const head = PB.el("div", { class: "pbn-listhead" },
-      nameSort.cell,
-      PB.el("div", { class: "pbn-hcell", text: "协议" }),
-      PB.el("div", { class: "pbn-hcell", text: "订阅" }),
-      delaySort.cell,
-      speedSort.cell,
-      PB.el("div", { class: "pbn-hcell", text: "操作" }));
-    dom.listBody = PB.el("div", { class: "pbn-listbody", attrs: { id: "pbnListBody" } });
-    dom.listBody.addEventListener("click", onItemClick);
-    dom.list = PB.el("div", { attrs: { id: "pbnList" }, hidden: true }, head, dom.listBody);
-    dom.body.appendChild(dom.loading);
-    dom.body.appendChild(dom.error);
-    dom.body.appendChild(dom.empty);
-    dom.body.appendChild(dom.grid);
-    dom.body.appendChild(dom.list);
-    root.appendChild(bar);
-    root.appendChild(dom.body);
-
-    dom.cardTpl = cardTemplate();
-    dom.rowTpl = rowTemplate();
-    state.mounted = true;
-    window.addEventListener("resize", syncSegs);
-    mountSegs();
-    PB.on("core", onCoreEvent);
-    PB.on("subs", function () { loadProviderNames(); });
-    PB.on("speedtest", onSpeedEvent);
-
-    if (state.queued) {
-      const queued = state.queued;
-      state.queued = null;
-      render(queued);
-      return;
-    }
-    paint();
-  }
-
-  function show() {
-    state.visible = true;
-    state.phase = readPhase();
-    restoreSpeed();
-    loadProviderNames();
-    if (state.forced) {
-      paint();
-      return;
-    }
-    if (!coreRunning()) {
-      clearStopped();
-      return;
-    }
-    loadNodes();
-  }
-
-  function hide() {
-    state.visible = false;
-  }
-
-  function onCoreChange(status) {
-    if (!status) return;
-    const running = !!status.running;
-    if (!running) {
-      state.phase = "stopped";
-      if (!state.forced) clearStopped();
-      return;
-    }
-    const was = state.phase;
-    state.phase = "running";
-    if (was !== "running" && !state.forced) loadNodes();
-    else paint();
-  }
-
-  function onCoreEvent(msg) {
-    const core = msg && msg.core;
-    if (!core) return;
-    if (core.phase === "running") {
-      onCoreChange({ running: true });
-      return;
-    }
-    if (core.phase === "download") {
-      state.phase = "download";
-      state.loading = false;
-      state.delayAll = false;
-      paint();
-      return;
-    }
-    if (core.phase === "stopped" || core.phase === "error") onCoreChange({ running: false });
-  }
-
-  function clearStopped() {
-    state.gen++;
-    state.nodes = [];
-    state.painted = [];
-    state.totalCount = 0;
-    state.aliveCount = 0;
-    state.loading = false;
-    state.refreshing = false;
-    state.delayAll = false;
-    state.testingDelay = "";
-    state.error = "";
-    idleSpeed();
-    paint();
-  }
-
-  function idleSpeed() {
-    state.speed = { phase: "idle", done: 0, total: 0, current: "", taskId: "" };
-  }
-
-  function loadProviderNames() {
+  function loadSubs() {
     return PB.api("GET", "/api/subs").then(function (data) {
-      const subs = data && Array.isArray(data.subscriptions) ? data.subscriptions : [];
-      const map = Object.create(null);
-      for (let i = 0; i < subs.length; i++) {
-        const sub = subs[i] || {};
-        if (sub.id) map[String(sub.id)] = String(sub.name || sub.id);
+      var list = data && data.subscriptions ? data.subscriptions : [];
+      subMap = {};
+      for (var i = 0; i < list.length; i++) {
+        var row = list[i];
+        if (!row || row.id == null) continue;
+        subMap[String(row.id)] = { name: row.name ? String(row.name) : String(row.id), enabled: !!row.enabled };
       }
-      state.providerNames = map;
-      if (state.mounted && state.nodes.length) paint();
+      var groups = ["daily", "ai"];
+      for (var g = 0; g < groups.length; g++) {
+        var pool = pools[groups[g]];
+        for (var n = 0; n < pool.length; n++) pool[n].subName = subName(pool[n].provider);
+      }
+    }).catch(function () {});
+  }
+
+  function loadStatus() {
+    return PB.api("GET", "/api/speedtest/status").then(function (data) {
+      var progress = data && data.progress ? data.progress : {};
+      var results = data && data.results ? data.results : {};
+      Object.keys(results).forEach(function (name) { applyResult(results[name]); });
+      if (!progress.running) {
+        speed = idleSpeed();
+        clearOwner();
+        return;
+      }
+      speed.running = true;
+      speed.stopping = false;
+      speed.done = Number(progress.done) || 0;
+      speed.total = Number(progress.total) || 0;
+      speed.current = progress.currentNode ? String(progress.currentNode) : "";
+      speed.taskId = progress.taskId ? String(progress.taskId) : "";
+      speed.pending = null;
+      var owner = readOwner();
+      if (owner && owner.taskId && owner.taskId === speed.taskId && (owner.channel === "daily" || owner.channel === "ai")) {
+        speed.channel = owner.channel;
+      } else if (speed.current && findIn(channel(), speed.current)) {
+        speed.channel = channel();
+      } else {
+        speed.channel = otherChannel(channel());
+      }
     }).catch(function () {});
   }
 
   function loadNodes() {
-    if (state.forced) return Promise.resolve();
-    if (!coreRunning()) {
-      clearStopped();
+    var ch = channel();
+    var ticket = ++loadGen[ch];
+    var started = Date.now();
+    if (!coreOn()) {
+      loading[ch] = false;
+      paintList();
+      paintActions();
       return Promise.resolve();
     }
-    const gen = ++state.gen;
-    const first = state.nodes.length === 0;
-    state.loading = first;
-    state.refreshing = !first;
-    state.error = "";
-    paint();
+    loading[ch] = true;
+    if (!(pools[ch] && pools[ch].length) && channel() === ch) paintList();
     return PB.api("POST", "/api/nodes/list", {
-      group: state.group,
       client: "builtin",
-      testDelay: false,
+      group: groupOf(ch),
+      testDelay: false
     }).then(function (data) {
-      if (gen !== state.gen) return;
-      applyList(data);
+      if (ticket === loadGen[ch]) loading[ch] = false;
+      if (!active || ticket !== loadGen[ch]) return;
+      takeList(ch, data && data.nodes, started, false);
+      if (channel() === ch) refreshView();
     }).catch(function (err) {
-      if (gen !== state.gen) return;
-      state.error = (err && err.message) || "读取节点失败";
-      if (first) state.nodes = [];
-    }).then(function () {
-      if (gen !== state.gen) return;
-      state.loading = false;
-      state.refreshing = false;
-      paint();
+      if (ticket === loadGen[ch]) loading[ch] = false;
+      if (!active || ticket !== loadGen[ch] || channel() !== ch) return;
+      var msg = err && err.message ? err.message : "节点加载失败";
+      if (!coreOn() || msg.indexOf("未运行") >= 0) {
+        paintList();
+        return;
+      }
+      if (listEl) listEl.innerHTML = emptyBox("warn", "节点加载失败", msg, "");
+      PB.toast(msg, "err");
     });
   }
 
-  function setGroup(id) {
-    if (state.group === id) return;
-    state.group = id;
-    state.forced = false;
-    state.nodes = [];
-    state.painted = [];
-    state.totalCount = 0;
-    state.aliveCount = 0;
-    state.scrollTop = 0;
-    if (coreRunning()) loadNodes();
-    else paint();
+  function setSort(key, dir) {
+    var f = currentFilter();
+    if (key) {
+      f.sortKey = key;
+      f.sortDir = dir == null ? F.defaultSortDir(key) : dir;
+    } else if (dir) {
+      f.sortDir = dir;
+    }
+    persist();
+    paintSort();
+    paintList();
   }
 
-  function onSearch() {
-    currentFilter().query = String(dom.search.value || "");
-    saveFilters();
-    state.scrollTop = 0;
-    paint();
+  function openSort(anchor) {
+    var f = currentFilter();
+    function hint(key, fallback) {
+      if (f.sortKey !== key) return fallback;
+      return f.sortDir === 1 ? "升序" : "降序";
+    }
+    PB.openMenu(anchor, {
+      title: "排序",
+      value: f.sortKey,
+      items: [
+        { v: "delay", label: "按延迟", hint: hint("delay", "低 → 高") },
+        { v: "speed", label: "按网速", hint: hint("speed", "高 → 低") },
+        { v: "name", label: "按名称", hint: hint("name", "A → Z") },
+        { sep: true },
+        { v: "asc", label: "升序" },
+        { v: "desc", label: "降序" }
+      ],
+      onPick: function (value) {
+        if (value === "asc" || value === "desc") setSort(null, value === "asc" ? 1 : -1);
+        else if (value === f.sortKey) setSort(value, f.sortDir === 1 ? -1 : 1);
+        else setSort(value, null);
+      }
+    });
   }
 
-  function clearSearch() {
-    currentFilter().query = "";
-    saveFilters();
-    state.scrollTop = 0;
-    paint();
-    dom.search.focus();
+  function probeNodes(skip) {
+    var f = F.sanitizeFilter(currentFilter());
+    if (skip === "sub") f.sub = "all";
+    if (skip === "delay") { f.delayPreset = "all"; f.maxDelayMs = 0; }
+    if (skip === "speed") { f.speedPreset = "all"; f.minSpeedMBps = 0; }
+    var rows = F.applyFilters(pools[channel()] || [], f);
+    var out = [];
+    for (var i = 0; i < rows.length; i++) if (!F.isUtilityNode(rows[i])) out.push(rows[i]);
+    return out;
   }
 
-  function onSub() {
-    currentFilter().sub = dom.sub.value || "all";
-    saveFilters();
-    state.scrollTop = 0;
-    paint();
-  }
-
-  function onDelayInput() {
-    const filter = currentFilter();
-    filter.delayPreset = "custom";
-    filter.maxDelayMs = readPositive(dom.delayInput.value);
-    saveFilters();
-    state.scrollTop = 0;
-    paint();
-  }
-
-  function onSpeedInput() {
-    const filter = currentFilter();
-    filter.speedPreset = "custom";
-    filter.minSpeedMBps = readPositive(dom.speedInput.value);
-    saveFilters();
-    state.scrollTop = 0;
-    paint();
-  }
-
-  function setPreset(kind, preset) {
-    const filter = currentFilter();
+  function openFilter(kind, anchor) {
+    var f = currentFilter();
+    if (kind === "sub") {
+      var base = probeNodes("sub");
+      var items = [{ v: "all", label: "全部订阅", hint: String(base.length) }, { sep: true }];
+      Object.keys(subMap).forEach(function (id) {
+        var count = 0;
+        for (var i = 0; i < base.length; i++) if (base[i].provider === id) count++;
+        items.push({
+          v: id,
+          label: subMap[id].name,
+          hint: subMap[id].enabled ? String(count) : "已停用",
+          disabled: !subMap[id].enabled
+        });
+      });
+      PB.openMenu(anchor, {
+        title: "订阅",
+        value: f.sub,
+        items: items,
+        onPick: function (value) {
+          f.sub = value ? String(value) : "all";
+          persist();
+          refreshView();
+        }
+      });
+      return;
+    }
     if (kind === "delay") {
-      filter.delayPreset = preset;
-      if (preset === "100" || preset === "200" || preset === "300" || preset === "500") filter.maxDelayMs = Number(preset);
-      else if (preset !== "custom") filter.maxDelayMs = 0;
-    } else {
-      filter.speedPreset = preset;
-      if (preset === "1" || preset === "5" || preset === "10" || preset === "20") filter.minSpeedMBps = Number(preset);
-      else if (preset !== "custom") filter.minSpeedMBps = 0;
+      var value = f.delayPreset === "custom" ? Number(f.maxDelayMs) : f.delayPreset;
+      PB.openMenu(anchor, {
+        title: "延迟",
+        value: value,
+        items: [
+          { v: "all", label: "不限" },
+          { v: "alive", label: "仅可用" },
+          { sep: true },
+          { v: "100", label: "≤ 100 ms" },
+          { v: "200", label: "≤ 200 ms" },
+          { v: "300", label: "≤ 300 ms" },
+          { v: "500", label: "≤ 500 ms" }
+        ],
+        custom: { label: "自定义 ≤", unit: "ms", min: 1, max: 10000, step: 1, def: f.delayPreset === "custom" && f.maxDelayMs > 0 ? f.maxDelayMs : 200 },
+        onPick: function (pickedValue) {
+          if (typeof pickedValue === "number") {
+            f.delayPreset = "custom";
+            f.maxDelayMs = pickedValue;
+          } else {
+            f.delayPreset = String(pickedValue);
+            f.maxDelayMs = f.delayPreset === "100" || f.delayPreset === "200" || f.delayPreset === "300" || f.delayPreset === "500" ? Number(f.delayPreset) : 0;
+          }
+          persist();
+          refreshView();
+        }
+      });
+      return;
     }
-    saveFilters();
-    state.scrollTop = 0;
-    paint();
-    if (preset === "custom") {
-      if (kind === "delay") dom.delayInput.focus();
-      else dom.speedInput.focus();
-    }
+    var speedValue = f.speedPreset === "custom" ? Number(f.minSpeedMBps) : f.speedPreset;
+    PB.openMenu(anchor, {
+      title: "网速",
+      value: speedValue,
+      items: [
+        { v: "all", label: "不限" },
+        { v: "tested", label: "已测速" },
+        { sep: true },
+        { v: "1", label: "≥ 1 MB/s" },
+        { v: "5", label: "≥ 5 MB/s" },
+        { v: "10", label: "≥ 10 MB/s" },
+        { v: "20", label: "≥ 20 MB/s" }
+      ],
+      custom: { label: "自定义 ≥", unit: "MB/s", min: 0.1, max: 1000, step: 0.1, def: f.speedPreset === "custom" && f.minSpeedMBps > 0 ? f.minSpeedMBps : 5 },
+      onPick: function (pickedValue) {
+        if (typeof pickedValue === "number") {
+          f.speedPreset = "custom";
+          f.minSpeedMBps = pickedValue;
+        } else {
+          f.speedPreset = String(pickedValue);
+          f.minSpeedMBps = f.speedPreset === "1" || f.speedPreset === "5" || f.speedPreset === "10" || f.speedPreset === "20" ? Number(f.speedPreset) : 0;
+        }
+        persist();
+        refreshView();
+      }
+    });
   }
 
-  function resetFilters() {
-    const prev = currentFilter();
-    const next = PBNodeFilter.defaultGroupFilter();
+  function clearFilters() {
+    var prev = currentFilter();
+    var next = F.defaultGroupFilter();
     next.sortKey = prev.sortKey;
     next.sortDir = prev.sortDir;
-    state.filters[state.group] = next;
-    saveFilters();
-    state.scrollTop = 0;
-    paint();
+    filters[groupOf(channel())] = next;
+    persist();
+    var input = document.getElementById("ndQ");
+    var clear = document.getElementById("ndQClear");
+    if (input) input.value = "";
+    if (clear) clear.hidden = true;
+    refreshView();
+    PB.toast("已清除「" + channelWord(channel()) + "」的筛选条件", "info");
   }
 
-  function onRegionClick(ev) {
-    const button = ev.target.closest("[data-region]");
-    if (!button || !dom.regions.contains(button)) return;
-    currentFilter().region = button.getAttribute("data-region") || "all";
-    saveFilters();
-    state.scrollTop = 0;
-    paint();
-  }
-
-  function onSortKey(key) {
-    const filter = currentFilter();
-    if (filter.sortKey === key) filter.sortDir = filter.sortDir === 1 ? -1 : 1;
-    else {
-      filter.sortKey = key;
-      filter.sortDir = PBNodeFilter.defaultSortDir(key);
+  function removeChip(key) {
+    filters[groupOf(channel())] = F.clearChip(currentFilter(), key);
+    persist();
+    if (key === "query") {
+      var input = document.getElementById("ndQ");
+      var clear = document.getElementById("ndQClear");
+      if (input) input.value = "";
+      if (clear) clear.hidden = true;
     }
-    saveFilters();
-    state.scrollTop = 0;
-    paint();
+    refreshView();
   }
 
-  function onSortPick() {
-    const key = dom.sort.value;
-    if (key !== "delay" && key !== "speed" && key !== "name") return;
-    const filter = currentFilter();
-    if (filter.sortKey === key) return;
-    filter.sortKey = key;
-    filter.sortDir = PBNodeFilter.defaultSortDir(key);
-    saveFilters();
-    state.scrollTop = 0;
-    paint();
+  function poolRun(items, limit, worker) {
+    var index = 0;
+    var width = Math.min(limit, items.length);
+    var jobs = [];
+    function next() {
+      if (index >= items.length) return Promise.resolve();
+      var item = items[index++];
+      return Promise.resolve()
+        .then(function () { return worker(item); })
+        .then(next, next);
+    }
+    for (var i = 0; i < width; i++) jobs.push(next());
+    return Promise.all(jobs);
   }
 
-  function setView(next) {
-    state.view = next === "list" ? "list" : "cards";
-    if (state.mounted) paint();
+  function rememberDelay(name, ms) {
+    delayMem[name] = { delayMs: ms, alive: ms > 0, at: Date.now() };
   }
 
-  function render(list) {
-    if (!state.mounted) {
-      state.queued = list;
+  function testOne(name) {
+    var node = findNode(name);
+    if (!node || F.isUtilityNode(node)) return;
+    if (!coreOn()) {
+      PB.toast("内核未运行，无法测延迟", "warn");
       return;
     }
-    state.gen++;
-    state.forced = true;
-    state.loading = false;
-    state.refreshing = false;
-    state.delayAll = false;
-    state.testingDelay = "";
-    state.error = "";
-    const data = Array.isArray(list) ? { nodes: list } : (list || {});
-    applyList(data);
-    paint();
+    var ch = channel();
+    if (delayBusy[ch][name]) return;
+    delayBusy[ch][name] = true;
+    patchNode(name);
+    PB.api("POST", "/api/nodes/test", { client: "builtin", nodeName: name }).then(function (data) {
+      var live = findIn(ch, name);
+      var ms = Number(data && data.delayMs);
+      if (!isFinite(ms)) ms = 0;
+      rememberDelay(name, ms);
+      if (!live) return;
+      live.untested = false;
+      live.delayMs = ms;
+      live.alive = ms > 0;
+    }).catch(function (err) {
+      PB.toast((err && err.message) || "测延迟失败", "err");
+    }).then(function () {
+      delete delayBusy[ch][name];
+      if (active && channel() === ch) patchNode(name);
+    });
   }
 
-  function paint() {
-    if (!state.mounted) return;
-    const rows = visibleNodes();
-    state.painted = rows;
-    paintBar(rows);
-    paintBody(rows);
-  }
-
-  function paintPills(map, preset) {
-    const keys = Object.keys(map);
-    for (let i = 0; i < keys.length; i++) {
-      const on = keys[i] === preset;
-      map[keys[i]].classList.toggle("is-on", on);
-      map[keys[i]].setAttribute("aria-pressed", on ? "true" : "false");
+  function testDelayAll() {
+    if (!coreOn()) {
+      PB.toast("内核未运行，无法测延迟", "warn");
+      return;
     }
+    var ch = channel();
+    if (delayJob[ch]) return;
+    var names = F.scopeTargets(pools[ch], currentFilter());
+    if (names && !names.length) return;
+    if (names) {
+      delayJob[ch] = { done: 0, total: names.length, batch: false };
+      paintActions();
+      paintBadges();
+      poolRun(names, 6, function (name) {
+        delayBusy[ch][name] = true;
+        if (active && channel() === ch) patchNode(name);
+        return PB.api("POST", "/api/nodes/test", { client: "builtin", nodeName: name }).then(function (data) {
+          var ms = Number(data && data.delayMs);
+          if (!isFinite(ms)) ms = 0;
+          rememberDelay(name, ms);
+          var live = findIn(ch, name);
+          if (!live) return;
+          live.untested = false;
+          live.delayMs = ms;
+          live.alive = ms > 0;
+        }).catch(function (err) {
+          PB.toast((err && err.message) || "测延迟失败", "err");
+        }).then(function () {
+          delete delayBusy[ch][name];
+          delayJob[ch].done++;
+          if (active && channel() === ch) {
+            patchNode(name);
+            paintActions();
+          }
+        });
+      }).then(function () {
+        delayJob[ch] = null;
+        if (!active) return;
+        paintActions();
+        paintBadges();
+        if (channel() === ch) paintList();
+      });
+      return;
+    }
+    delayJob[ch] = { done: 0, total: 0, batch: true };
+    paintActions();
+    var started = Date.now();
+    var ticket = ++loadGen[ch];
+    PB.api("POST", "/api/nodes/list", {
+      client: "builtin",
+      group: groupOf(ch),
+      testDelay: true
+    }).then(function (data) {
+      if (ticket !== loadGen[ch]) return;
+      takeList(ch, data && data.nodes, started, true);
+    }).catch(function (err) {
+      PB.toast((err && err.message) || "测延迟失败", "err");
+    }).then(function () {
+      delayJob[ch] = null;
+      if (!active) return;
+      paintActions();
+      if (channel() === ch) refreshView();
+    });
   }
 
-  function subChoices() {
-    const seen = Object.create(null);
-    const ids = [];
-    function add(id, label) {
-      const key = String(id || "");
-      if (!key || seen[key]) return;
-      seen[key] = label || key;
-      ids.push(key);
+  function startSpeed(onlyName) {
+    if (!coreOn()) {
+      PB.toast("内核未运行，无法测速", "warn");
+      return;
     }
-    const names = state.providerNames;
-    const keys = Object.keys(names);
-    keys.sort();
-    for (let i = 0; i < keys.length; i++) add(keys[i], names[keys[i]]);
-    for (let n = 0; n < state.nodes.length; n++) {
-      const node = state.nodes[n];
-      add(node.provider, node.subName || node.provider);
+    if (speed.running) {
+      PB.toast((speed.channel ? channelWord(speed.channel) : "另一通道") + "的测速正在占用引擎", "warn");
+      return;
     }
-    const filter = currentFilter();
-    if (filter.sub !== "all") add(filter.sub, names[filter.sub] || filter.sub);
-    return { ids: ids, seen: seen };
-  }
-
-  function paintSubs(filter) {
-    const choice = subChoices();
-    const sig = choice.ids.map(function (id) { return id + "=" + choice.seen[id]; }).join("|");
-    if (sig !== dom.subSig) {
-      const frag = document.createDocumentFragment();
-      frag.appendChild(PB.el("option", { text: "全部订阅", attrs: { value: "all" } }));
-      for (let i = 0; i < choice.ids.length; i++) {
-        const id = choice.ids[i];
-        frag.appendChild(PB.el("option", { text: choice.seen[id], attrs: { value: id } }));
+    var ch = channel();
+    var names = onlyName ? [onlyName] : F.scopeTargets(pools[ch], currentFilter());
+    if (names && !names.length) return;
+    var body = { group: groupOf(ch) };
+    if (names && names.length) body.nodes = names.slice();
+    speed.running = true;
+    speed.stopping = false;
+    speed.channel = ch;
+    speed.done = 0;
+    speed.total = names ? names.length : 0;
+    speed.current = names && names.length === 1 ? names[0] : "";
+    speed.pending = null;
+    if (names && names.length) {
+      speed.pending = {};
+      for (var i = 0; i < names.length; i++) speed.pending[names[i]] = 1;
+    }
+    rememberOwner();
+    paintActions();
+    paintBadges();
+    if (speed.current) patchNode(speed.current);
+    PB.api("POST", "/api/speedtest/start", body).then(function (data) {
+      speed.taskId = data && data.taskId ? String(data.taskId) : speed.taskId;
+      if (data && data.total) speed.total = Number(data.total) || speed.total;
+      rememberOwner();
+      if (active) paintActions();
+    }).catch(function (err) {
+      speed.running = false;
+      speed.channel = "";
+      speed.pending = null;
+      speed.current = "";
+      clearOwner();
+      PB.toast((err && err.message) || "测网速失败", "err");
+      if (active) {
+        paintActions();
+        paintBadges();
+        paintList();
       }
-      dom.sub.replaceChildren(frag);
-      dom.subSig = sig;
-    }
-    const known = filter.sub === "all" || !!choice.seen[filter.sub];
-    if (document.activeElement !== dom.sub) dom.sub.value = known ? filter.sub : "all";
-  }
-
-  function regionChip(key, label, on) {
-    return PB.el("button", {
-      class: "pbn-chip" + (on ? " is-on" : ""),
-      text: label,
-      attrs: { type: "button", "data-region": key, "aria-pressed": on ? "true" : "false" },
     });
-  }
-
-  function paintRegions(filter) {
-    const counts = PBNodeFilter.regionCounts(state.nodes);
-    const order = PBNodeFilter.REGION_ORDER;
-    const keys = [];
-    let total = 0;
-    for (let i = 0; i < order.length; i++) {
-      const count = counts[order[i]] || 0;
-      if (count > 0) {
-        keys.push(order[i]);
-        total += count;
-      }
-    }
-    const sig = filter.region + "|" + total + "|" + keys.map(function (key) {
-      return key + ":" + counts[key];
-    }).join(",");
-    if (sig === dom.regionSig) return;
-    dom.regionSig = sig;
-    const frag = document.createDocumentFragment();
-    frag.appendChild(regionChip("all", "全部 " + total, filter.region === "all"));
-    for (let i = 0; i < keys.length; i++) {
-      const key = keys[i];
-      frag.appendChild(regionChip(key, PBNodeFilter.regionLabel(key) + " " + counts[key], filter.region === key));
-    }
-    dom.regions.replaceChildren(frag);
-  }
-
-  function paintBar(rows) {
-    const list = rows || visibleNodes();
-    const filter = currentFilter();
-    const running = coreRunning();
-    const active = PBNodeFilter.isFilterActive(filter);
-    dom.groupProxy.classList.toggle("is-on", state.group === GROUP_PROXY);
-    dom.groupAI.classList.toggle("is-on", state.group === GROUP_AI);
-    dom.groupProxy.setAttribute("aria-pressed", state.group === GROUP_PROXY ? "true" : "false");
-    dom.groupAI.setAttribute("aria-pressed", state.group === GROUP_AI ? "true" : "false");
-    dom.count.textContent = active
-      ? "命中 " + list.length + " / 共 " + state.totalCount
-      : "可用 " + state.aliveCount + " / 共 " + state.totalCount;
-    dom.count.classList.toggle("is-filter", active);
-    dom.subWrap.classList.toggle("is-on", filter.sub !== "all");
-    dom.delayWrap.classList.toggle("is-on", filter.delayPreset !== "all");
-    dom.speedWrap.classList.toggle("is-on", filter.speedPreset !== "all");
-    const busyNote = state.delayAll || (state.refreshing && !state.loading);
-    dom.note.hidden = !busyNote;
-    dom.note.textContent = state.delayAll ? "正在测延迟…" : (busyNote ? "正在刷新…" : "");
-    if (document.activeElement !== dom.search) dom.search.value = filter.query;
-    dom.searchClear.hidden = !String(filter.query || "").length;
-    if (document.activeElement !== dom.sort) dom.sort.value = filter.sortKey;
-    const arrow = filter.sortDir > 0 ? " ↑" : " ↓";
-    dom.optName.textContent = "名称" + (filter.sortKey === "name" ? arrow : "");
-    dom.optDelay.textContent = "延迟" + (filter.sortKey === "delay" ? arrow : "");
-    dom.optSpeed.textContent = "网速" + (filter.sortKey === "speed" ? arrow : "");
-    dom.sortName.textContent = "名称" + (filter.sortKey === "name" ? arrow : "");
-    dom.sortDelay.textContent = "延迟" + (filter.sortKey === "delay" ? arrow : "");
-    dom.sortSpeed.textContent = "网速" + (filter.sortKey === "speed" ? arrow : "");
-    dom.sortName.classList.toggle("is-on", filter.sortKey === "name");
-    dom.sortDelay.classList.toggle("is-on", filter.sortKey === "delay");
-    dom.sortSpeed.classList.toggle("is-on", filter.sortKey === "speed");
-    dom.viewCards.classList.toggle("is-on", state.view === "cards");
-    dom.viewList.classList.toggle("is-on", state.view === "list");
-    dom.viewCards.setAttribute("aria-pressed", state.view === "cards" ? "true" : "false");
-    dom.viewList.setAttribute("aria-pressed", state.view === "list" ? "true" : "false");
-    dom.delayAllBtn.textContent = state.delayAll ? "测延迟中" : "测延迟";
-    dom.delayAllBtn.disabled = state.delayAll || !running;
-    paintPills(dom.delayPills, filter.delayPreset);
-    paintPills(dom.speedPills, filter.speedPreset);
-    if (document.activeElement !== dom.delayInput) {
-      const delayN = filter.delayPreset === "all" || filter.delayPreset === "alive" ? 0 : PBNodeFilter.delayThreshold(filter);
-      dom.delayInput.value = delayN > 0 ? String(delayN) : "";
-    }
-    if (document.activeElement !== dom.speedInput) {
-      const speedN = filter.speedPreset === "all" || filter.speedPreset === "tested" ? 0 : PBNodeFilter.speedThreshold(filter);
-      dom.speedInput.value = speedN > 0 ? String(speedN) : "";
-    }
-    paintSubs(filter);
-    paintRegions(filter);
-    dom.reset.hidden = !active;
-    dom.aiHint.hidden = state.group !== GROUP_AI;
-    paintSpeedButton(running, list);
-    syncSegs();
-    const speedOn = state.speed && state.speed.phase !== "idle";
-    dom.speedHint.hidden = !speedOn;
-    dom.hints.hidden = dom.note.hidden && dom.speedHint.hidden;
-  }
-
-  function emptyCopy(rows) {
-    const filter = currentFilter();
-    if (PBNodeFilter.isFilterActive(filter) && rows.length === 0 && state.nodes.length > 0) {
-      const reason = PBNodeFilter.emptyReason(state.nodes, filter) || "没有同时满足当前筛选条件的节点";
-      return { text: reason, start: false, subs: false, clear: true };
-    }
-    if (!coreRunning() && !state.forced) {
-      if (state.phase === "download") return { text: "内核正在启动，完成后可以查看节点。", start: false, subs: false, clear: false };
-      return { text: "内核未运行。启动内核后可以查看和切换节点。", start: true, subs: false, clear: false };
-    }
-    return { text: "这个分组里还没有节点。先更新订阅。", start: false, subs: true, clear: false };
-  }
-
-  function paintBody(rows) {
-    const list = rows || visibleNodes();
-    state.painted = list;
-    const showRows = list.length > 0 && (coreRunning() || state.forced);
-    dom.loading.hidden = !state.loading;
-    dom.error.hidden = !state.error;
-    dom.error.textContent = state.error || "";
-    const copy = emptyCopy(list);
-    const showEmpty = !state.loading && !showRows;
-    dom.empty.hidden = !showEmpty;
-    dom.empty.classList.toggle("is-filter", !!(showEmpty && copy.clear));
-    if (showEmpty) dom.emptyText.textContent = copy.text;
-    dom.emptyClear.hidden = !showEmpty || !copy.clear;
-    dom.emptyStart.hidden = !showEmpty || !copy.start;
-    dom.emptySubs.hidden = !showEmpty || !copy.subs;
-    const cards = showRows && state.view === "cards";
-    const listView = showRows && state.view === "list";
-    dom.grid.hidden = !cards;
-    dom.list.hidden = !listView;
-    if (cards) fillCards(list);
-    else dom.grid.replaceChildren();
-    if (listView) fillRows(list);
-    else dom.listBody.replaceChildren();
-    if (state.scrollTop) dom.body.scrollTop = state.scrollTop;
-  }
-
-  function paintItem(node, nameWrap, regionEl, protoEl, subEl, delayEl, speedEl, actions, selectedHost) {
-    nameWrap.children[0].hidden = !node.isAuto;
-    nameWrap.children[1].textContent = node.name;
-    nameWrap.children[2].hidden = !node.selected;
-    const label = node.regionLabel || "";
-    regionEl.hidden = !label;
-    regionEl.textContent = label;
-    regionEl.title = label;
-    protoEl.textContent = prettyType(node.type);
-    subEl.textContent = providerLabel(node);
-    const delay = delayView(node);
-    delayEl.className = "pbn-delay " + delay.cls;
-    delayEl.textContent = delay.text;
-    delayEl.title = delay.title || "";
-    const speed = speedView(node);
-    speedEl.className = "pbn-speed " + speed.cls;
-    speedEl.textContent = speed.text;
-    speedEl.title = speed.title || "";
-    const allow = canTest(node);
-    const delayBtn = actions.children[0];
-    const phase = state.speed && state.speed.phase;
-    delayBtn.hidden = !allow;
-    delayBtn.disabled = !allow || state.testingDelay === node.name || !coreRunning();
-    delayBtn.classList.toggle("is-spin", !!(allow && state.testingDelay === node.name));
-    if (actions.children[1]) {
-      const speedBtn = actions.children[1];
-      speedBtn.hidden = !allow;
-      speedBtn.disabled = !allow || !coreRunning() || (state.speed && state.speed.phase !== "idle");
-      speedBtn.classList.toggle("is-spin", !!(allow && state.speed && state.speed.current === node.name && (phase === "running" || phase === "starting")));
-    }
-    selectedHost.classList.toggle("is-selected", !!node.selected);
-  }
-
-  function fillCards(rows) {
-    const frag = document.createDocumentFragment();
-    const tpl = dom.cardTpl;
-    for (let i = 0; i < rows.length; i++) {
-      const card = tpl.cloneNode(true);
-      card.setAttribute("data-i", String(i));
-      paintItem(
-        rows[i],
-        card.children[0],
-        card.children[1].children[0],
-        card.children[1].children[1],
-        card.children[1].children[2],
-        card.children[2].children[0],
-        card.children[2].children[1],
-        card.children[2].children[2],
-        card
-      );
-      frag.appendChild(card);
-    }
-    dom.grid.replaceChildren(frag);
-  }
-
-  function fillRows(rows) {
-    const frag = document.createDocumentFragment();
-    const tpl = dom.rowTpl;
-    for (let i = 0; i < rows.length; i++) {
-      const tr = tpl.cloneNode(true);
-      tr.setAttribute("data-i", String(i));
-      const cluster = tr.children[0].children[0];
-      paintItem(
-        rows[i],
-        cluster,
-        cluster.children[3],
-        tr.children[1].children[0],
-        tr.children[2].children[0],
-        tr.children[3].children[0],
-        tr.children[4].children[0],
-        tr.children[5].children[0],
-        tr
-      );
-      frag.appendChild(tr);
-    }
-    dom.listBody.replaceChildren(frag);
-  }
-
-  function onItemClick(ev) {
-    const host = ev.target.closest("[data-i]");
-    if (!host) return;
-    const node = state.painted[Number(host.getAttribute("data-i"))];
-    if (!node) return;
-    const act = ev.target.closest("[data-act]");
-    if (act) {
-      if (act.getAttribute("data-act") === "delay") testDelay(node);
-      else if (act.getAttribute("data-act") === "speed") testSpeedOne(node);
-      return;
-    }
-    selectNode(node);
-  }
-
-  function testAllDelay() {
-    if (!coreRunning()) {
-      state.error = "内核未运行";
-      paint();
-      return;
-    }
-    return locked("delayAll", function () {
-      const gen = ++state.gen;
-      state.delayAll = true;
-      state.error = "";
-      state.forced = false;
-      paintBar();
-      return PB.api("POST", "/api/nodes/list", {
-        group: state.group,
-        client: "builtin",
-        testDelay: true,
-      }).then(function (data) {
-        if (gen !== state.gen) return;
-        applyList(data);
-      }).catch(function (err) {
-        if (gen !== state.gen) return;
-        state.error = (err && err.message) || "测延迟失败";
-      }).then(function () {
-        if (gen !== state.gen) return;
-        state.delayAll = false;
-        state.loading = false;
-        state.refreshing = false;
-        paint();
-      });
-    });
-  }
-
-  function testDelay(node) {
-    if (!canTest(node)) return;
-    if (!coreRunning()) {
-      state.error = "内核未运行";
-      paint();
-      return;
-    }
-    return locked("delay:" + node.name, function () {
-      state.testingDelay = node.name;
-      paint();
-      const name = node.name;
-      return PB.api("POST", "/api/nodes/test", {
-        client: "builtin",
-        nodeName: name,
-      }).then(function (data) {
-        let live = node;
-        for (let i = 0; i < state.nodes.length; i++) {
-          if (state.nodes[i].name === name) live = state.nodes[i];
-        }
-        live.untested = false;
-        live.delayMs = num(data && data.delayMs);
-        live.alive = live.delayMs > 0;
-        state.aliveCount = countsFrom(state.nodes).alive;
-        state.error = "";
-      }).catch(function (err) {
-        state.error = (err && err.message) || "测延迟失败";
-      }).then(function () {
-        state.testingDelay = "";
-        paint();
-      });
-    });
-  }
-
-  function selectNode(node) {
-    if (!node || node.selected) return;
-    if (!coreRunning()) {
-      state.error = "内核未运行";
-      paint();
-      return;
-    }
-    return locked("select", function () {
-      return PB.api("POST", "/api/nodes/select", {
-        group: state.group,
-        client: "builtin",
-        nodeName: node.name,
-      }).then(function () {
-        for (let i = 0; i < state.nodes.length; i++) {
-          state.nodes[i].selected = state.nodes[i].name === node.name;
-        }
-        state.error = "";
-        paint();
-      }).catch(function (err) {
-        state.error = (err && err.message) || "切换节点失败";
-        toast(state.error, "err");
-        paint();
-      });
-    });
-  }
-
-  function paintSpeedButton(running, rows) {
-    const speed = state.speed;
-    const phase = speed.phase;
-    const active = phase === "running" || phase === "stopping" || phase === "starting";
-    const filtering = PBNodeFilter.isFilterActive(currentFilter());
-    const matched = rows ? rows.length : 0;
-    dom.speedBtn.classList.toggle("is-stop", active);
-    dom.speedBtn.classList.toggle("is-filter", !active && filtering);
-    if (active) {
-      dom.speedBtn.textContent = "停止 (" + speed.done + "/" + speed.total + ")";
-    } else if (filtering) {
-      dom.speedBtn.textContent = "测当前筛选 (" + matched + ")";
-    } else {
-      dom.speedBtn.textContent = "全部测网速";
-    }
-    const noMatch = !active && filtering && matched === 0;
-    dom.speedBtn.disabled = phase === "stopping" || state.delayAll || (!running && phase === "idle") || noMatch;
-    const showBar = phase === "running" || phase === "starting" || phase === "stopping";
-    dom.progress.hidden = !showBar;
-    const pct = speed.total > 0 ? Math.max(0, Math.min(100, (speed.done / speed.total) * 100)) : (phase === "starting" ? 8 : 0);
-    dom.progressFill.style.width = pct + "%";
-  }
-
-  function onSpeedButton() {
-    const phase = state.speed.phase;
-    if (phase === "running" || phase === "starting") stopSpeed();
-    else if (phase === "idle") {
-      stampSubNames();
-      const names = PBNodeFilter.speedTestNames(state.nodes, currentFilter());
-      if (names && !names.length) return;
-      startSpeed(names);
-    }
-  }
-
-  function startSpeed(names) {
-    if (!coreRunning()) {
-      state.error = "内核未运行";
-      paint();
-      return;
-    }
-    if (state.speed.phase === "running" || state.speed.phase === "starting" || state.speed.phase === "stopping") {
-      toast("正在测网速", "warn");
-      return;
-    }
-    return locked("speed", function () {
-      const ticket = ++state.speedTicket;
-      state.speed.phase = "starting";
-      state.speed.done = 0;
-      state.speed.total = 0;
-      state.speed.current = names && names.length === 1 ? String(names[0]) : "";
-      state.error = "";
-      paintBar();
-      const body = { group: state.group };
-      if (names && names.length) body.nodes = names;
-      return PB.api("POST", "/api/speedtest/start", body).then(function (data) {
-        if (ticket !== state.speedTicket) return;
-        state.speed.phase = "running";
-        state.speed.taskId = data && data.taskId ? String(data.taskId) : "";
-        state.speed.total = num(data && data.total);
-        state.speed.done = 0;
-        if (!(names && names.length === 1)) state.speed.current = "";
-      }).catch(function (err) {
-        if (ticket !== state.speedTicket) return;
-        state.speed.phase = "idle";
-        state.error = (err && err.message) || "测网速失败";
-        toast(state.error, "err");
-      }).then(function () {
-        if (ticket !== state.speedTicket) return;
-        paint();
-      });
-    });
-  }
-
-  function testSpeedOne(node) {
-    if (!canTest(node)) return;
-    startSpeed([node.name]);
   }
 
   function stopSpeed() {
-    if (!state.speed || state.speed.phase === "idle") return;
-    return locked("speedStop", function () {
-      const ticket = ++state.speedTicket;
-      state.speed.phase = "stopping";
-      paintBar();
-      return PB.api("POST", "/api/speedtest/stop").catch(function (err) {
-        state.error = (err && err.message) || "停止测速失败";
-        toast(state.error, "err");
-      }).then(function () {
-        if (ticket !== state.speedTicket) return;
-        state.speed.phase = "idle";
-        state.speed.current = "";
-        return restoreSpeed();
-      });
+    if (!speed.running || speed.stopping) return;
+    speed.stopping = true;
+    paintActions();
+    PB.api("POST", "/api/speedtest/stop").catch(function (err) {
+      speed.stopping = false;
+      PB.toast((err && err.message) || "停止测速失败", "err");
+      if (active) paintActions();
     });
   }
 
-  function mergeResult(raw) {
-    if (!raw) return;
-    const name = raw.nodeName != null ? String(raw.nodeName) : "";
-    if (!name) return;
-    const speedError = raw.error != null ? String(raw.error) : "";
-    let speedMBps = Number(raw.speedMBps);
-    if (!Number.isFinite(speedMBps)) speedMBps = 0;
-    state.speedMem[name] = { speedMBps: speedMBps, speedTested: true, speedError: speedError };
-    for (let i = 0; i < state.nodes.length; i++) {
-      if (state.nodes[i].name !== name) continue;
-      state.nodes[i].speedMBps = speedMBps;
-      state.nodes[i].speedTested = true;
-      state.nodes[i].speedError = speedError;
-      break;
+  function onSpeedMsg(msg) {
+    var progress = msg && (msg.speedtest || msg.Speedtest);
+    if (!progress) return;
+    var prev = speed.current;
+    if (progress.lastResult) applyResult(progress.lastResult);
+    speed.running = !!progress.running;
+    speed.done = Number(progress.done) || 0;
+    speed.total = Number(progress.total) || speed.total;
+    speed.current = progress.currentNode ? String(progress.currentNode) : "";
+    if (progress.taskId) speed.taskId = String(progress.taskId);
+    if (!speed.running) {
+      speed.stopping = false;
+      speed.current = "";
+      speed.pending = null;
+      clearOwner();
+    }
+    if (!active) return;
+    paintActions();
+    paintBadges();
+    if (channel() === speed.channel || !speed.running) {
+      if (prev) patchNode(prev);
+      if (speed.current) patchNode(speed.current);
+      if (progress.lastResult && progress.lastResult.nodeName) patchNode(String(progress.lastResult.nodeName));
     }
   }
 
-  function applyResultMap(results) {
-    if (!results) return;
-    const names = Object.keys(results);
-    for (let i = 0; i < names.length; i++) {
-      const raw = results[names[i]];
-      if (!raw) continue;
-      mergeResult({
-        nodeName: raw.nodeName || names[i],
-        speedMBps: raw.speedMBps,
-        error: raw.error || "",
-      });
+  function selectNode(name) {
+    var node = findNode(name);
+    if (!node || node.selected) return;
+    if (!coreOn()) {
+      PB.toast("内核未运行，请先到总览启动", "warn");
+      return;
     }
-  }
-
-  function applyProgress(progress) {
-    if (!progress) return;
-    if (!state.speed) idleSpeed();
-    if (progress.lastResult) mergeResult(progress.lastResult);
-    state.speed.done = num(progress.done);
-    state.speed.total = num(progress.total);
-    state.speed.current = progress.currentNode ? String(progress.currentNode) : "";
-    if (progress.taskId) state.speed.taskId = String(progress.taskId);
-    if (state.speed.phase === "stopping" && progress.running) return;
-    state.speed.phase = progress.running ? "running" : "idle";
-    if (!progress.running) state.speed.current = "";
-  }
-
-  function onSpeedEvent(msg) {
-    const progress = msg && msg.speedtest;
-    if (!progress) return;
-    applyProgress(progress);
-    paint();
-  }
-
-  function restoreSpeed() {
-    return PB.api("GET", "/api/speedtest/status").then(function (data) {
-      const progress = data && data.progress && typeof data.progress === "object" ? data.progress : {};
-      applyResultMap(data && data.results);
-      if (state.speed.phase === "starting" && !progress.running) {
-        paint();
-        return;
+    var ch = channel();
+    var prev = "";
+    var list = pools[ch];
+    for (var i = 0; i < list.length; i++) if (list[i].selected) prev = list[i].name;
+    PB.api("POST", "/api/nodes/select", {
+      client: "builtin",
+      group: groupOf(ch),
+      nodeName: name
+    }).then(function () {
+      picked[ch] = { name: name, at: Date.now() };
+      for (var n = 0; n < pools[ch].length; n++) pools[ch][n].selected = pools[ch][n].name === name;
+      if (active && channel() === ch) {
+        if (prev) patchNode(prev);
+        patchNode(name);
       }
-      if (state.speed.phase === "stopping") state.speed.phase = "idle";
-      applyProgress(progress);
-      paint();
-    }).catch(function () {
-      if (state.speed.phase === "starting") {
-        paint();
-        return;
-      }
-      state.speed.phase = "idle";
-      state.speed.current = "";
-      paint();
+      PB.toast(channelWord(ch) + "已切换到「" + name + "」");
+    }).catch(function (err) {
+      PB.toast((err && err.message) || "切换节点失败", "err");
     });
   }
 
+  function onActions(event) {
+    var target = event.target;
+    if (!target || !target.closest) return;
+    if (target.closest("#ndSort")) openSort(target.closest("#ndSort"));
+    else if (target.closest("#ndDelay")) testDelayAll();
+    else if (target.closest("#ndSpeed")) {
+      if (speed.running) stopSpeed();
+      else startSpeed();
+    }
+  }
 
-  window.PBNodes = {
-    render: render,
-    setView: setView,
+  function onAcc(event) {
+    var target = event.target;
+    if (!target || !target.closest) return;
+    var menu = target.closest("[data-menu]");
+    if (menu) {
+      openFilter(menu.getAttribute("data-menu"), menu);
+      return;
+    }
+    var region = target.closest("[data-region]");
+    if (region && document.getElementById("ndRegions") && document.getElementById("ndRegions").contains(region)) {
+      var f = currentFilter();
+      var key = region.getAttribute("data-region") || "all";
+      f.region = key !== "all" && f.region === key ? "all" : key;
+      persist();
+      refreshView();
+      return;
+    }
+    if (target.closest("#ndClear")) clearFilters();
+  }
+
+  function onPageClick(event) {
+    var target = event.target;
+    if (!target || !target.closest) return;
+    var go = target.closest("[data-go]");
+    if (go) {
+      PB.goTab(go.getAttribute("data-go"));
+      return;
+    }
+    if (target.closest("[data-clear-all]")) {
+      clearFilters();
+      return;
+    }
+    var chip = target.closest("[data-rm]");
+    if (chip) {
+      removeChip(chip.getAttribute("data-rm"));
+      return;
+    }
+    var sort = target.closest("[data-sort]");
+    if (sort) {
+      var key = sort.getAttribute("data-sort");
+      var f = currentFilter();
+      if (f.sortKey === key) setSort(key, f.sortDir === 1 ? -1 : 1);
+      else setSort(key, null);
+      return;
+    }
+    var act = target.closest("[data-act]");
+    var item = target.closest("[data-id]");
+    if (!item) return;
+    var name = item.getAttribute("data-id");
+    if (act) {
+      if (act.getAttribute("data-act") === "delay") testOne(name);
+      else startSpeed(name);
+      return;
+    }
+    selectNode(name);
+  }
+
+  function onPageKey(event) {
+    if ((event.key !== "Enter" && event.key !== " ") || !event.target || !event.target.matches) return;
+    if (!event.target.matches(".nd-card, .nd-tr")) return;
+    event.preventDefault();
+    selectNode(event.target.getAttribute("data-id"));
+  }
+
+  function bindSearch() {
+    if (unbindQ) unbindQ();
+    unbindQ = null;
+    var input = document.getElementById("ndQ");
+    var clear = document.getElementById("ndQClear");
+    if (!input) return;
+    input.value = currentFilter().query || "";
+    if (clear) clear.hidden = !input.value;
+    unbindQ = PB.onInput(input, function (value) {
+      currentFilter().query = value;
+      var btn = document.getElementById("ndQClear");
+      if (btn) btn.hidden = !value;
+      persist();
+      refreshView();
+    }, 120);
+    if (clear) {
+      clear.onclick = function () {
+        input.value = "";
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        input.focus();
+      };
+    }
+  }
+
+  function mountChrome() {
+    var ch = channel();
+    PB.topbar({
+      actions:
+        '<button type="button" class="btn sm plain" id="ndSort" aria-haspopup="menu">' + PB.ic("sort") + '<span class="lbl" id="ndSortLbl">按延迟</span>' + PB.ic("chev-down", "xs") + "</button>" +
+        PB.segHTML("ndView", [
+          { v: "card", html: PB.ic("grid"), title: "卡片视图" },
+          { v: "list", html: PB.ic("list"), title: "列表视图" }
+        ], view, "sm icons") +
+        '<button type="button" class="btn sm cl" id="ndDelay" title="测延迟"></button>' +
+        '<button type="button" class="btn sm prominent" id="ndSpeed" title="测网速"></button>',
+      acc:
+        '<div class="acc-row">' +
+        PB.segHTML("ndGroup", [
+          { v: "daily", html: '<span class="ch-dot daily"></span>日常代理<span class="seg-badge" data-badge="daily" hidden></span>' },
+          { v: "ai", html: '<span class="ch-dot ai"></span>AI 专属<span class="seg-badge" data-badge="ai" hidden></span>' }
+        ], ch, "tinted") +
+        '<label class="search">' + PB.ic("search") +
+        '<input class="field" id="ndQ" data-search type="text" role="searchbox" placeholder="搜索节点、协议、地区  (Ctrl+F)" autocomplete="off" spellcheck="false" aria-label="搜索节点">' +
+        '<button type="button" class="clear" id="ndQClear" aria-label="清空搜索" hidden>' + PB.ic("x") + "</button></label>" +
+        '<span class="count" id="ndCount"></span></div>' +
+        '<div class="acc-row" id="ndFilters"></div>'
+    });
+    PB.mountSeg(document.getElementById("ndGroup"), function (value) {
+      if (value !== "daily" && value !== "ai") return;
+      useChannel(value);
+      regionSeen = "";
+      bindSearch();
+      var scroller = document.getElementById("scroll");
+      if (scroller) scroller.scrollTop = 0;
+      if (coreOn() && !(pools[value] && pools[value].length)) loading[value] = true;
+      paintSort();
+      paintFilters();
+      paintActions();
+      paintBadges();
+      paintList();
+      loadNodes();
+    });
+    PB.mountSeg(document.getElementById("ndView"), function (value) {
+      view = value === "list" ? "list" : "card";
+      paintList();
+    });
+    var actions = document.getElementById("tbActions");
+    var acc = document.getElementById("tbAcc");
+    if (actions) actions.onclick = onActions;
+    if (acc) acc.onclick = onAcc;
+    bindSearch();
+    paintSort();
+    paintFilters();
+    paintActions();
+    paintBadges();
+  }
+
+  function boot() {
+    loadSubs().then(loadStatus).then(function () {
+      if (!active) return;
+      paintActions();
+      paintBadges();
+      if (coreOn()) return loadNodes();
+      paintList();
+    });
+  }
+
+  var tab = {
+    enter: function (root) {
+      active = true;
+      useChannel(channel());
+      sawCore = coreOn();
+      root.innerHTML = '<div id="ndList"></div>';
+      listEl = document.getElementById("ndList");
+      root.addEventListener("click", onPageClick);
+      root.addEventListener("keydown", onPageKey);
+      mountChrome();
+      if (coreOn() && !(pools[channel()] && pools[channel()].length)) loading[channel()] = true;
+      paintList();
+      boot();
+    },
+    leave: function () {
+      active = false;
+      listEl = null;
+      if (unbindQ) {
+        unbindQ();
+        unbindQ = null;
+      }
+      var actions = document.getElementById("tbActions");
+      var acc = document.getElementById("tbAcc");
+      if (actions) actions.onclick = null;
+      if (acc) acc.onclick = null;
+    },
+    onCore: function (status) {
+      if (!active) return;
+      var running = !!(status && status.running);
+      paintActions();
+      if (sawCore === running) return;
+      sawCore = running;
+      if (running) loadNodes();
+      else paintList();
+    },
+    onSSE: function (msg) {
+      if (!msg) return;
+      if (msg.type === "speedtest") onSpeedMsg(msg);
+      else if (msg.type === "sync" && active && coreOn() && !delayJob[channel()]) loadNodes();
+    },
+    paintForBench: function (next) {
+      view = next === "list" ? "list" : "card";
+      paintList();
+    }
   };
 
-  PB.registerTab("nodes", {
-    mount: mount,
-    show: show,
-    hide: hide,
-    onCoreChange: onCoreChange,
-  });
+  PB.registerTab("nodes", tab);
 })();
