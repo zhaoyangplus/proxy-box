@@ -15,7 +15,7 @@ import (
 )
 
 func TestRenderSpecAndGolden(t *testing.T) {
-	if clashscript.AIGroupName != mihomo.AIGroupName || clashscript.AIAutoName != mihomo.AIAutoName {
+	if clashscript.AIGroupName != mihomo.AIGroupName || clashscript.AIAutoName != mihomo.AIAutoName || clashscript.SpeedTestGroupName != "🧪 SPEEDTEST" {
 		t.Fatalf("group names diverged")
 	}
 	cases := []struct {
@@ -46,6 +46,8 @@ func TestRenderSpecAndGolden(t *testing.T) {
 		{name: "bypass", params: ConfigParams{Secret: "s3cret", Mode: "rule", BypassCN: true, GeoReady: true}, bypass: true, geo: true},
 		{name: "bypass-off", params: ConfigParams{Secret: "s3cret", Mode: "rule", BypassCN: true, GeoReady: false}},
 		{name: "geo-without-bypass", params: ConfigParams{Secret: "s3cret", Mode: "direct", BypassCN: false, GeoReady: true}},
+		{name: "app-cursor", params: ConfigParams{Secret: "s3cret", Mode: "rule", EnabledAIApps: []string{"cursor"}}},
+		{name: "app-overlap", params: ConfigParams{Secret: "s3cret", Mode: "rule", EnabledAIApps: []string{"antigravity", "cursor", "antigravity", "missing"}}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -56,6 +58,42 @@ func TestRenderSpecAndGolden(t *testing.T) {
 			assertRendered(t, got, tc.params, tc.providers, tc.bypass && tc.geo)
 			compareGolden(t, tc.name+".yaml", got)
 		})
+	}
+}
+
+func TestRenderEnabledAppRules(t *testing.T) {
+	got, err := Render(ConfigParams{
+		Secret:        "s3cret",
+		EnabledAIApps: []string{"codex", "antigravity", "cursor", "antigravity", "missing"},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := parseDoc(t, got)
+	var procs, domains []string
+	for _, rule := range doc.Rules {
+		switch {
+		case strings.HasPrefix(rule, "PROCESS-NAME,"):
+			procs = append(procs, strings.Split(rule, ",")[1])
+		case strings.HasPrefix(rule, "DOMAIN-SUFFIX,"):
+			domains = append(domains, strings.Split(rule, ",")[1])
+		}
+	}
+	wantProc := []string{"ProxyBox.exe", "Cursor.exe", "Antigravity.exe", "language_server_windows_x64.exe", "agy.exe", "codex.exe", "Codex.exe", "codex-plus-plus.exe"}
+	if strings.Join(procs, ",") != strings.Join(wantProc, ",") {
+		t.Fatalf("processes %v", procs)
+	}
+	googleapis := 0
+	for _, domain := range domains {
+		if domain == "googleapis.com" {
+			googleapis++
+		}
+	}
+	if googleapis != 1 || !contains(domains, "generativelanguage.googleapis.com") || !contains(domains, "cursor.sh") || !contains(domains, "openai.com") {
+		t.Fatalf("domains %v", domains)
+	}
+	if domains[0] != "cursor.sh" {
+		t.Fatalf("domain order %v", domains)
 	}
 }
 
@@ -83,28 +121,30 @@ func TestRenderRejectsBadInput(t *testing.T) {
 }
 
 func TestAllocatePortsSkipsTaken(t *testing.T) {
-	base := freeRun(t, 4)
+	base := freeRun(t, 5)
 	ln, err := net.Listen("tcp", addr(base))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer ln.Close()
-	got, err := AllocatePorts(ConfigParams{MixedPort: base, ControllerPort: base + 1, AIDedicatedPort: base + 2})
+	got, err := AllocatePorts(ConfigParams{MixedPort: base, ControllerPort: base + 1, AIDedicatedPort: base + 2, SpeedTestPort: base + 3})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Mixed != base+1 || got.Controller != base+2 || got.AIDedicated != base+3 {
+	if got.Mixed != base+1 || got.Controller != base+2 || got.AIDedicated != base+3 || got.SpeedTest != base+4 {
 		t.Fatalf("ports %+v", got)
 	}
 	def, err := AllocatePorts(ConfigParams{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if def.Mixed == 0 || def.Controller == 0 || def.AIDedicated == 0 {
-		t.Fatalf("defaults %+v", def)
-	}
-	if def.Mixed == def.Controller || def.Controller == def.AIDedicated || def.Mixed == def.AIDedicated {
-		t.Fatalf("defaults overlap %+v", def)
+	ports := []int{def.Mixed, def.Controller, def.AIDedicated, def.SpeedTest}
+	seen := map[int]bool{}
+	for _, port := range ports {
+		if port == 0 || seen[port] {
+			t.Fatalf("defaults %+v", def)
+		}
+		seen[port] = true
 	}
 }
 
@@ -117,8 +157,14 @@ func assertRendered(t *testing.T, raw string, params ConfigParams, providers []P
 	if doc.DNS.Enable || !doc.Profile.StoreSelected {
 		t.Fatalf("dns/profile %+v %+v", doc.DNS, doc.Profile)
 	}
-	if len(doc.Listeners) != 1 || doc.Listeners[0].Name != clashscript.DedicatedListenerName || doc.Listeners[0].Proxy != mihomo.AIGroupName {
-		t.Fatalf("listener %+v", doc.Listeners)
+	if !doc.UnifiedDelay || !doc.TCPConcurrent || doc.KeepAliveInterval != 30 {
+		t.Fatalf("delay flags %+v", doc)
+	}
+	if len(doc.Listeners) != 2 || doc.Listeners[0].Name != clashscript.DedicatedListenerName || doc.Listeners[0].Proxy != mihomo.AIGroupName || !doc.Listeners[0].UDP {
+		t.Fatalf("ai listener %+v", doc.Listeners)
+	}
+	if doc.Listeners[1].Name != clashscript.SpeedTestListenerName || doc.Listeners[1].Proxy != clashscript.SpeedTestGroupName || doc.Listeners[1].UDP {
+		t.Fatalf("speed listener %+v", doc.Listeners[1])
 	}
 	mode := params.Mode
 	if mode == "" {
@@ -162,7 +208,7 @@ func assertRendered(t *testing.T, raw string, params ConfigParams, providers []P
 			t.Fatal("disabled provider present")
 		}
 	}
-	if len(doc.ProxyGroups) != 4 {
+	if len(doc.ProxyGroups) != 5 {
 		t.Fatalf("groups %d", len(doc.ProxyGroups))
 	}
 	if doc.ProxyGroups[1].Name != BrowsingAutoName || doc.ProxyGroups[1].Type != "url-test" {
@@ -171,14 +217,15 @@ func assertRendered(t *testing.T, raw string, params ConfigParams, providers []P
 	if doc.ProxyGroups[2].Name != mihomo.AIGroupName || doc.ProxyGroups[3].Name != mihomo.AIAutoName || doc.ProxyGroups[3].Type != "url-test" {
 		t.Fatalf("ai groups %+v %+v", doc.ProxyGroups[2], doc.ProxyGroups[3])
 	}
-	if doc.ProxyGroups[3].Name != mihomo.AIAutoName {
-		t.Fatal(doc.ProxyGroups[3].Name)
+	if doc.ProxyGroups[4].Name != clashscript.SpeedTestGroupName || doc.ProxyGroups[4].Type != "select" || !contains(doc.ProxyGroups[4].Proxies, DirectName) {
+		t.Fatalf("speed group %+v", doc.ProxyGroups[4])
+	}
+	info := clashscript.InfoNodeExcludeFilter
+	if doc.ProxyGroups[0].ExcludeFilter != info || doc.ProxyGroups[1].ExcludeFilter != info || doc.ProxyGroups[4].ExcludeFilter != info {
+		t.Fatal("missing info exclude-filter")
 	}
 	if doc.ProxyGroups[2].ExcludeFilter != clashscript.RestrictedRegionFilter || doc.ProxyGroups[3].ExcludeFilter != clashscript.RestrictedRegionFilter {
-		t.Fatal("missing exclude-filter")
-	}
-	if doc.ProxyGroups[1].ExcludeFilter != "" {
-		t.Fatal("browsing auto has exclude-filter")
+		t.Fatal("missing region exclude-filter")
 	}
 	if len(enabled) == 0 {
 		if !contains(doc.ProxyGroups[0].Proxies, DirectName) || !contains(doc.ProxyGroups[1].Proxies, DirectName) {
@@ -187,17 +234,16 @@ func assertRendered(t *testing.T, raw string, params ConfigParams, providers []P
 	} else if len(doc.ProxyGroups[1].Use) != len(enabled) {
 		t.Fatalf("use %+v", doc.ProxyGroups[1].Use)
 	}
-	wantRules := renderRules(wantGeo, wantGeo)
-	if params.BypassCN && params.GeoReady {
-		wantRules = renderRules(true, true)
-	} else {
-		wantRules = renderRules(false, false)
-	}
+	geoOn := params.BypassCN && params.GeoReady
+	wantRules := renderRules(params.EnabledAIApps, geoOn, geoOn)
 	if strings.Join(doc.Rules, "\n") != strings.Join(wantRules, "\n") {
 		t.Fatalf("rules\n%s", strings.Join(doc.Rules, "\n"))
 	}
-	if len(doc.Rules) < 6 || doc.Rules[0] != "IP-CIDR,127.0.0.0/8,DIRECT,no-resolve" || doc.Rules[len(doc.Rules)-1] != "MATCH,PROXY" {
+	if len(doc.Rules) < 7 || doc.Rules[0] != "IP-CIDR,127.0.0.0/8,DIRECT,no-resolve" || doc.Rules[5] != "PROCESS-NAME,ProxyBox.exe,"+mihomo.AIGroupName || doc.Rules[len(doc.Rules)-1] != "MATCH,PROXY" {
 		t.Fatalf("rule ends %+v", doc.Rules)
+	}
+	if len(orderedEnabledApps(params.EnabledAIApps)) == 0 && strings.Contains(strings.Join(doc.Rules, "\n"), "Cursor.exe") {
+		t.Fatal("disabled apps still have rules")
 	}
 	if wantGeo {
 		geo := doc.Rules[len(doc.Rules)-4 : len(doc.Rules)]
@@ -211,12 +257,15 @@ func assertRendered(t *testing.T, raw string, params ConfigParams, providers []P
 }
 
 type rendered struct {
-	AllowLan        bool   `yaml:"allow-lan"`
-	BindAddress     string `yaml:"bind-address"`
-	Mode            string `yaml:"mode"`
-	FindProcessMode string `yaml:"find-process-mode"`
-	Secret          string `yaml:"secret"`
-	DNS             struct {
+	AllowLan          bool   `yaml:"allow-lan"`
+	BindAddress       string `yaml:"bind-address"`
+	Mode              string `yaml:"mode"`
+	FindProcessMode   string `yaml:"find-process-mode"`
+	UnifiedDelay      bool   `yaml:"unified-delay"`
+	TCPConcurrent     bool   `yaml:"tcp-concurrent"`
+	KeepAliveInterval int    `yaml:"keep-alive-interval"`
+	Secret            string `yaml:"secret"`
+	DNS               struct {
 		Enable bool `yaml:"enable"`
 	} `yaml:"dns"`
 	Profile struct {
@@ -226,6 +275,7 @@ type rendered struct {
 		Name  string `yaml:"name"`
 		Proxy string `yaml:"proxy"`
 		Port  int    `yaml:"port"`
+		UDP   bool   `yaml:"udp"`
 	} `yaml:"listeners"`
 	ProxyProviders map[string]struct {
 		Type     string `yaml:"type"`

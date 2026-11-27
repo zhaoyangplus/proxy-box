@@ -91,8 +91,8 @@ func TestLoadCoreSettingsCreatesStableSecret(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.MixedPort != 27890 || first.ControllerPort != 27891 || first.AIDedicatedPort != 27892 {
-		t.Fatalf("ports = %d %d %d", first.MixedPort, first.ControllerPort, first.AIDedicatedPort)
+	if first.MixedPort != 27890 || first.ControllerPort != 27891 || first.AIDedicatedPort != 27892 || first.SpeedTestPort != 27893 {
+		t.Fatalf("ports = %d %d %d %d", first.MixedPort, first.ControllerPort, first.AIDedicatedPort, first.SpeedTestPort)
 	}
 	if first.Mode != "rule" {
 		t.Fatalf("mode = %q", first.Mode)
@@ -154,6 +154,7 @@ func TestLoadCoreSettingsFillsZeroFields(t *testing.T) {
 			MixedPort:       27901,
 			ControllerPort:  27891,
 			AIDedicatedPort: 27892,
+			SpeedTestPort:   27893,
 			Secret:          "kept-secret",
 			Mode:            "rule",
 			BypassCN:        true,
@@ -224,7 +225,7 @@ func TestLoadCoreSettingsFillsZeroFields(t *testing.T) {
 	t.Run("complete", func(t *testing.T) {
 		dir := useDir(t)
 		path := filepath.Join(dir, "core.json")
-		original := []byte("{\"enabled\":true,\"mixedPort\":27901,\"controllerPort\":27891,\"aiDedicatedPort\":27892,\"secret\":\"kept-secret\",\"mode\":\"direct\",\"bypassCN\":true,\"systemProxy\":false}")
+		original := []byte("{\"enabled\":true,\"mixedPort\":27901,\"controllerPort\":27891,\"aiDedicatedPort\":27892,\"speedTestPort\":27893,\"secret\":\"kept-secret\",\"mode\":\"direct\",\"bypassCN\":true,\"systemProxy\":false}")
 		if err := os.WriteFile(path, original, 0644); err != nil {
 			t.Fatal(err)
 		}
@@ -469,6 +470,7 @@ func TestConcurrentSavesKeepBothFiles(t *testing.T) {
 		MixedPort:       27890,
 		ControllerPort:  27891,
 		AIDedicatedPort: 27892,
+		SpeedTestPort:   27893,
 		Secret:          "fixed-secret",
 		Mode:            "global",
 		BypassCN:        true,

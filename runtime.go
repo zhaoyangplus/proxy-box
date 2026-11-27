@@ -144,6 +144,7 @@ func (a *appRuntime) startCore(ctx context.Context, settings configstore.CoreSet
 	settings.MixedPort = st.Ports.Mixed
 	settings.ControllerPort = st.Ports.Controller
 	settings.AIDedicatedPort = st.Ports.AIDedicated
+	settings.SpeedTestPort = st.Ports.SpeedTest
 	if st.Mode != "" {
 		settings.Mode = st.Mode
 	}
@@ -266,10 +267,12 @@ func (a *appRuntime) coreParams(settings configstore.CoreSettings) core.ConfigPa
 		MixedPort:       settings.MixedPort,
 		ControllerPort:  settings.ControllerPort,
 		AIDedicatedPort: settings.AIDedicatedPort,
+		SpeedTestPort:   settings.SpeedTestPort,
 		Secret:          settings.Secret,
 		Mode:            settings.Mode,
 		BypassCN:        settings.BypassCN,
 		GeoReady:        core.GeoFilesReady(dir),
+		EnabledAIApps:   configstore.LoadConfig().EnabledAppIDs(),
 	}
 }
 

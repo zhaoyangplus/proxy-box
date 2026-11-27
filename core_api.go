@@ -29,6 +29,7 @@ type coreSettingsView struct {
 	MixedPort       int    `json:"mixedPort"`
 	ControllerPort  int    `json:"controllerPort"`
 	AIDedicatedPort int    `json:"aiDedicatedPort"`
+	SpeedTestPort   int    `json:"speedTestPort"`
 	Mode            string `json:"mode"`
 	BypassCN        bool   `json:"bypassCN"`
 	SystemProxy     bool   `json:"systemProxy"`
@@ -43,6 +44,7 @@ type coreStatusResponse struct {
 	MixedPort         int              `json:"mixedPort"`
 	ControllerPort    int              `json:"controllerPort"`
 	AIDedicatedPort   int              `json:"aiDedicatedPort"`
+	SpeedTestPort     int              `json:"speedTestPort"`
 	Settings          coreSettingsView `json:"settings"`
 	SystemProxyActive bool             `json:"systemProxyActive"`
 	GeoReady          bool             `json:"geoReady"`
@@ -116,6 +118,7 @@ func viewSettings(s configstore.CoreSettings) coreSettingsView {
 		MixedPort:       s.MixedPort,
 		ControllerPort:  s.ControllerPort,
 		AIDedicatedPort: s.AIDedicatedPort,
+		SpeedTestPort:   s.SpeedTestPort,
 		Mode:            s.Mode,
 		BypassCN:        s.BypassCN,
 		SystemProxy:     s.SystemProxy,
@@ -148,7 +151,7 @@ func (a *appRuntime) coreStatusResponse() (coreStatusResponse, error) {
 		st = a.core.Status()
 	}
 	mode := settings.Mode
-	mixed, ctrl, ai := settings.MixedPort, settings.ControllerPort, settings.AIDedicatedPort
+	mixed, ctrl, ai, speed := settings.MixedPort, settings.ControllerPort, settings.AIDedicatedPort, settings.SpeedTestPort
 	if st.Mode != "" {
 		mode = st.Mode
 	}
@@ -161,6 +164,9 @@ func (a *appRuntime) coreStatusResponse() (coreStatusResponse, error) {
 		}
 		if st.Ports.AIDedicated > 0 {
 			ai = st.Ports.AIDedicated
+		}
+		if st.Ports.SpeedTest > 0 {
+			speed = st.Ports.SpeedTest
 		}
 	}
 	settings.Mode = mode
@@ -177,6 +183,7 @@ func (a *appRuntime) coreStatusResponse() (coreStatusResponse, error) {
 		MixedPort:         mixed,
 		ControllerPort:    ctrl,
 		AIDedicatedPort:   ai,
+		SpeedTestPort:     speed,
 		Settings:          viewSettings(settings),
 		SystemProxyActive: st.Running && settings.SystemProxy,
 		GeoReady:          ready,

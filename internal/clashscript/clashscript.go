@@ -15,15 +15,12 @@ import (
 )
 
 const (
-	MarkerStart           = "/* === PROXY-BOX-AI-START === */"
-	LegacyMarkerStart     = "/* === CURSOR-BOX-AI-START === */"
-	MarkerEnd             = "/* === PROXY-BOX-AI-END === */"
-	ScriptVersion         = "// ProxyBox-Script-Version: 5"
-	AIGroupName           = "🤖 AI-IDE"
-	AIAutoName            = "⚡ AI-Auto"
-	VergeDedicatedPort    = 17897
-	ClashMiDedicatedPort  = 17890
-	DedicatedListenerName = "proxybox-ai-dedicated"
+	MarkerStart          = "/* === PROXY-BOX-AI-START === */"
+	LegacyMarkerStart    = "/* === CURSOR-BOX-AI-START === */"
+	MarkerEnd            = "/* === PROXY-BOX-AI-END === */"
+	ScriptVersion        = "// ProxyBox-Script-Version: 5"
+	VergeDedicatedPort   = 17897
+	ClashMiDedicatedPort = 17890
 )
 
 func ScriptFilePath(clashDir string) string {

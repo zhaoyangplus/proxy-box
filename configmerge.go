@@ -59,6 +59,10 @@ func mergeAppConfig(current configstore.AppConfig, body []byte) (configstore.App
 		{"autoSyncOnChange", &out.AutoSyncOnChange},
 		{"nodeSelectionMode", &out.NodeSelectionMode},
 		{"manualNodeName", &out.ManualNodeName},
+		{"managedApps", &out.ManagedApps},
+		{"delayTestURL", &out.DelayTestURL},
+		{"speedTestURL", &out.SpeedTestURL},
+		{"speedTestMaxMB", &out.SpeedTestMaxMB},
 	}
 	for _, field := range fields {
 		rawValue, ok := raw[field.key]

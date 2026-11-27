@@ -16,23 +16,27 @@ import (
 
 // AppConfig stores user preferences and custom path overrides for CursorBox.
 type AppConfig struct {
-	PreferredClient      string `json:"preferredClient,omitempty"` // "auto", "clash_verge", "clash_mi", "v2rayn", "builtin"
-	CustomClashDir       string `json:"customClashDir,omitempty"`
-	CustomClashExe       string `json:"customClashExe,omitempty"`
-	CustomClashMiDir     string `json:"customClashMiDir,omitempty"`
-	CustomClashMiExe     string `json:"customClashMiExe,omitempty"`
-	CustomV2rayNExe      string `json:"customV2rayNExe,omitempty"`
-	CustomCursorExe      string `json:"customCursorExe,omitempty"`
-	CustomAntigravityExe string `json:"customAntigravityExe,omitempty"`
-	CustomCodexExe       string `json:"customCodexExe,omitempty"`
-	CustomPortOverride   int    `json:"customPortOverride,omitempty"`
-	ExcludeRegionsRegex  string `json:"excludeRegionsRegex,omitempty"`
-	SyncUserEnv          bool   `json:"syncUserEnv"`
-	MinimizeToTray       bool   `json:"minimizeToTray"`
-	AutoOptimizeNode     *bool  `json:"autoOptimizeNode,omitempty"`
-	AutoSyncOnChange     *bool  `json:"autoSyncOnChange,omitempty"`
-	NodeSelectionMode    string `json:"nodeSelectionMode,omitempty"` // "auto" or "manual"
-	ManualNodeName       string `json:"manualNodeName,omitempty"`
+	PreferredClient      string          `json:"preferredClient,omitempty"` // "auto", "clash_verge", "clash_mi", "v2rayn", "builtin"
+	CustomClashDir       string          `json:"customClashDir,omitempty"`
+	CustomClashExe       string          `json:"customClashExe,omitempty"`
+	CustomClashMiDir     string          `json:"customClashMiDir,omitempty"`
+	CustomClashMiExe     string          `json:"customClashMiExe,omitempty"`
+	CustomV2rayNExe      string          `json:"customV2rayNExe,omitempty"`
+	CustomCursorExe      string          `json:"customCursorExe,omitempty"`
+	CustomAntigravityExe string          `json:"customAntigravityExe,omitempty"`
+	CustomCodexExe       string          `json:"customCodexExe,omitempty"`
+	CustomPortOverride   int             `json:"customPortOverride,omitempty"`
+	ExcludeRegionsRegex  string          `json:"excludeRegionsRegex,omitempty"`
+	ManagedApps          map[string]bool `json:"managedApps,omitempty"`
+	DelayTestURL         string          `json:"delayTestURL,omitempty"`
+	SpeedTestURL         string          `json:"speedTestURL,omitempty"`
+	SpeedTestMaxMB       int             `json:"speedTestMaxMB,omitempty"`
+	SyncUserEnv          bool            `json:"syncUserEnv"`
+	MinimizeToTray       bool            `json:"minimizeToTray"`
+	AutoOptimizeNode     *bool           `json:"autoOptimizeNode,omitempty"`
+	AutoSyncOnChange     *bool           `json:"autoSyncOnChange,omitempty"`
+	NodeSelectionMode    string          `json:"nodeSelectionMode,omitempty"` // "auto" or "manual"
+	ManualNodeName       string          `json:"manualNodeName,omitempty"`
 }
 
 func (c AppConfig) IsAutoOptimizeEnabled() bool {
@@ -50,6 +54,25 @@ func (c AppConfig) IsAutoSyncEnabled() bool {
 }
 
 func BoolPtr(v bool) *bool { return &v }
+
+// appIDs is the stable order shared with clashscript.AppIDs.
+var appIDs = []string{"cursor", "antigravity", "claude_code", "codex"}
+
+// IsAppEnabled reports whether the user turned the app's proxy switch on.
+func (c AppConfig) IsAppEnabled(id string) bool {
+	return c.ManagedApps[id]
+}
+
+// EnabledAppIDs returns enabled app ids in stable order.
+func (c AppConfig) EnabledAppIDs() []string {
+	var out []string
+	for _, id := range appIDs {
+		if c.ManagedApps[id] {
+			out = append(out, id)
+		}
+	}
+	return out
+}
 
 // KeySnapshot records previous values of managed keys before CursorBox modified them.
 type KeySnapshot struct {
@@ -218,6 +241,7 @@ const (
 	defaultMixedPort      = 27890
 	defaultControllerPort = 27891
 	defaultAIPort         = 27892
+	defaultSpeedTestPort  = 27893
 	defaultMode           = "rule"
 	subscriptionIDBytes   = 16
 	idAlphabet            = "abcdefghijklmnopqrstuvwxyz0123456789_-"
@@ -252,6 +276,7 @@ type CoreSettings struct {
 	MixedPort       int    `json:"mixedPort"`
 	ControllerPort  int    `json:"controllerPort"`
 	AIDedicatedPort int    `json:"aiDedicatedPort"`
+	SpeedTestPort   int    `json:"speedTestPort"`
 	Secret          string `json:"secret"`
 	Mode            string `json:"mode"` // rule, global, or direct
 	BypassCN        bool   `json:"bypassCN"`
@@ -414,6 +439,10 @@ func fillCoreDefaults(cfg *CoreSettings) (bool, error) {
 	}
 	if cfg.AIDedicatedPort == 0 {
 		cfg.AIDedicatedPort = defaultAIPort
+		filled = true
+	}
+	if cfg.SpeedTestPort == 0 {
+		cfg.SpeedTestPort = defaultSpeedTestPort
 		filled = true
 	}
 	if cfg.Mode == "" {
