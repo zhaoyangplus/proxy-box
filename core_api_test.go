@@ -373,6 +373,28 @@ func TestGlobalFallsBackToProxyGroupForProviderNode(t *testing.T) {
 	}
 }
 
+func TestNodeSelectMessageUsesSwitchedNode(t *testing.T) {
+	live := &mihomo.LiveNodeStatus{ResolvedNode: "SG03", ExternalNode: "HK01"}
+	if got := nodeSelectMessage("PROXY", "alpha", live); got != "已切换 PROXY 节点：alpha" {
+		t.Fatalf("PROXY leaf = %s", got)
+	}
+	if got := nodeSelectMessage("PROXY", core.BrowsingAutoName, live); got != "已切换 PROXY 节点：HK01" {
+		t.Fatalf("PROXY auto = %s", got)
+	}
+	if got := nodeSelectMessage("PROXY", core.BrowsingAutoName, &mihomo.LiveNodeStatus{ResolvedNode: "SG03"}); got != "已切换 PROXY 节点："+core.BrowsingAutoName {
+		t.Fatalf("PROXY auto fallback = %s", got)
+	}
+	if got := nodeSelectMessage("PROXY", "alpha", nil); got != "已切换 PROXY 节点：alpha" {
+		t.Fatalf("nil live = %s", got)
+	}
+	if got := nodeSelectMessage(mihomo.AIGroupName, "US01", live); got != "Proxy Box 专属通道已锁定节点：SG03（外部代理软件节点不受影响）" {
+		t.Fatalf("AI = %s", got)
+	}
+	if got := nodeSelectMessage("", mihomo.AIAutoName, live); got != "Proxy Box 专属通道已切回自动优选：SG03" {
+		t.Fatalf("AI auto = %s", got)
+	}
+}
+
 func postJSON(h http.HandlerFunc, body string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodPost, "/", bytes.NewBufferString(body))
 	rec := httptest.NewRecorder()

@@ -778,17 +778,21 @@ func groupClient(client detector.ProxyClientInfo) (*mihomo.Client, error) {
 }
 
 func nodeSelectMessage(group, node string, live *mihomo.LiveNodeStatus) string {
-	resolved := node
-	if live != nil && live.ResolvedNode != "" {
-		resolved = live.ResolvedNode
-	}
 	if group == "" || group == mihomo.AIGroupName {
+		resolved := node
+		if live != nil && live.ResolvedNode != "" {
+			resolved = live.ResolvedNode
+		}
 		if node == clashscript.AIAutoName {
 			return fmt.Sprintf("Proxy Box 专属通道已切回自动优选：%s", resolved)
 		}
 		return fmt.Sprintf("Proxy Box 专属通道已锁定节点：%s（外部代理软件节点不受影响）", resolved)
 	}
-	return fmt.Sprintf("已切换 %s 节点：%s", group, resolved)
+	shown := node
+	if node == core.BrowsingAutoName && live != nil && live.ExternalNode != "" {
+		shown = live.ExternalNode
+	}
+	return fmt.Sprintf("已切换 %s 节点：%s", group, shown)
 }
 
 func validateSubURL(raw string) error {
