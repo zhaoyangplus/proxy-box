@@ -6,6 +6,13 @@ const S = require("../ui/settings-logic.js");
 
 const HOSTILE = "<img src=x onerror=alert(1)>";
 
+test("settings leave allows a clean page, blocks a dirty page, and allows force", function () {
+  assert.deepEqual(S.leaveDecision({ dirty: false, target: "nodes" }), { allow: true, target: "nodes" });
+  assert.deepEqual(S.leaveDecision({ dirty: true, target: "overview" }), { allow: false, target: "overview" });
+  assert.deepEqual(S.leaveDecision({ dirty: true, force: true, target: "diag" }), { allow: true, target: "diag" });
+  assert.deepEqual(S.leaveDecision({ dirty: true, target: "" }), { allow: false, target: "" });
+});
+
 test("settings diff posts only changed fields", function () {
   const saved = {
     delayTestURL: "http://www.gstatic.com/generate_204",

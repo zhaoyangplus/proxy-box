@@ -69,6 +69,13 @@
     return out;
   }
 
+  function leaveDecision(input) {
+    input = input || {};
+    var target = input.target == null ? "" : String(input.target);
+    if (input.force || !input.dirty) return { allow: true, target: target };
+    return { allow: false, target: target };
+  }
+
   function validURL(value) {
     var raw = text(value);
     if (!raw) return true;
@@ -121,6 +128,7 @@
     MB_ERROR: MB_ERROR,
     draftFrom: draftFrom,
     changedFields: changedFields,
+    leaveDecision: leaveDecision,
     validate: validate,
     portsFrom: portsFrom
   };

@@ -604,7 +604,7 @@
     if (current === id && !opt.force) return;
     var prev = current;
     if (prev && tabs[prev] && typeof tabs[prev].leave === "function") {
-      if (tabs[prev].leave() === false && !opt.force) return;
+      if (tabs[prev].leave(id, opt) === false && !opt.force) return;
     }
     closeMenu(true);
     closeSheet();

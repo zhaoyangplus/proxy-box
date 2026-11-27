@@ -13,8 +13,6 @@
   var saveBar = null;
   var saveText = null;
   var saveBtn = null;
-  var pendingTab = "";
-  var allowLeave = false;
   var mbSeg = null;
 
   var PORTS = [
@@ -449,9 +447,14 @@
     });
   }
 
-  function leave() {
-    if (allowLeave || !isDirty()) return;
-    var id = pendingTab;
+  function leave(targetId, opt) {
+    var decision = L.leaveDecision({
+      dirty: isDirty(),
+      force: !!(opt && opt.force),
+      target: targetId
+    });
+    if (decision.allow) return;
+    var id = decision.target;
     if (!id || id === "settings" || typeof PB.openSheet !== "function") return false;
     PB.openSheet({
       title: "有未保存的更改",
@@ -461,29 +464,17 @@
         { label: "继续编辑", kind: "plain" },
         { label: "放弃更改", kind: "plain danger-text", fn: function () {
           resetDraft();
-          allowLeave = true;
-          try { PB.goTab(id, { force: true }); }
-          finally { allowLeave = false; }
+          PB.goTab(id, { force: true });
         } },
         { label: "保存并离开", kind: "prominent", fn: function () {
           return save({ render: false }).then(function (ok) {
             if (!ok) return false;
-            allowLeave = true;
-            try { PB.goTab(id, { force: true }); }
-            finally { allowLeave = false; }
+            PB.goTab(id, { force: true });
           });
         } }
       ]
     });
     return false;
-  }
-
-  if (typeof PB.goTab === "function") {
-    var goTab = PB.goTab;
-    PB.goTab = function (id, opt) {
-      pendingTab = id;
-      return goTab(id, opt);
-    };
   }
 
   PB.registerTab("settings", {
